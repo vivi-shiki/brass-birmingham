@@ -25,6 +25,17 @@ export function getLinkLineOrThrow(linkLineId: string): LinkLineSpec {
   return line;
 }
 
+export function isLocationActiveForPlayerCount(state: GameState, locationId: string): boolean {
+  const location = staticConfig.locations[locationId];
+  return Boolean(location && (location.kind !== 'merchant' || location.minPlayers <= state.playerCount));
+}
+
+export function isLinkLineActiveForPlayerCount(state: GameState, line: LinkLineSpec): boolean {
+  return [line.endpointA, line.endpointB, line.viaFarmBreweryId]
+    .filter((locationId): locationId is string => Boolean(locationId))
+    .every((locationId) => isLocationActiveForPlayerCount(state, locationId));
+}
+
 function industrySlotMatchesLocation(industry: IndustryInstance): boolean {
   const location = staticConfig.locations[industry.locationId];
   if (location?.kind === 'city') {
@@ -68,7 +79,8 @@ export function isActiveLinkInstance(state: GameState, link: LinkInstance): bool
     link.linkType === state.era &&
     state.players[link.ownerPlayerId] &&
     state.board.linkLines[link.linkLineId]?.occupiedBy === link.id &&
-    line.allowedLinkTypes.includes(link.linkType),
+    line.allowedLinkTypes.includes(link.linkType) &&
+    isLinkLineActiveForPlayerCount(state, line),
   );
 }
 
@@ -146,6 +158,8 @@ export function hasCoalMarketAccess(state: GameState, locationId: string): boole
   const component = connectedComponent(state, locationId);
   return [...component].some((id) => {
     const location = staticConfig.locations[id];
-    return location?.kind === 'merchant' && location.providesCoalMarketConnection;
+    return location?.kind === 'merchant' &&
+      location.minPlayers <= state.playerCount &&
+      location.providesCoalMarketConnection;
   });
 }

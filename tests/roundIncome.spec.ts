@@ -40,6 +40,40 @@ describe('round income', () => {
     expect(state.turnOrder).toEqual(['p1', 'p2']);
   });
 
+  it('keeps action-spending turn order after negative-income liquidation', () => {
+    const state = testGame();
+    state.players.p1.cash = 4;
+    state.players.p1.incomeTrackPosition = retreatIncomeLevels(staticConfig.incomeTrack.startPosition, 5);
+    const cotton = addIndustry(state, {
+      id: 'cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+    });
+
+    applyCommand(state, {type: 'network', playerId: 'p1', cardId: firstHandCard(state, 'p1'), linkLineIds: ['birmingham-walsall']});
+    applyCommand(state, {type: 'pass', playerId: 'p2', cardId: firstHandCard(state, 'p2')});
+
+    expect(state.pendingDecision).toEqual({
+      type: 'negative_income',
+      playerId: 'p1',
+      amountOwed: 5,
+      incomePlayerIndex: 1,
+    });
+    expect(state.turnOrder).toEqual(['p2', 'p1']);
+
+    applyCommand(state, {type: 'resolve_negative_income', playerId: 'p1', industryInstanceIds: [cotton.id]});
+
+    expect(state.pendingDecision).toBeUndefined();
+    expect(state.roundNumber).toBe(2);
+    expect(state.turnOrder).toEqual(['p2', 'p1']);
+    expect(state.players.p1.spentThisRound).toBe(0);
+    expect(state.players.p2.spentThisRound).toBe(0);
+    expect(state.players.p1.cash).toBe(2);
+  });
+
   it('pauses for manual industry liquidation when cash cannot cover negative income', () => {
     const state = testGame();
     state.players.p1.cash = 1;

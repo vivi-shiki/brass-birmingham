@@ -14,6 +14,7 @@ export type ActionType = 'build' | 'network' | 'develop' | 'sell' | 'loan' | 'sc
 export type CardType = 'location' | 'industry' | 'wild_location' | 'wild_industry';
 export type LocationKind = 'city' | 'merchant' | 'farm_brewery';
 export type LinkType = 'canal' | 'rail';
+export type GameVariant = 'introductory_canal_only';
 
 export interface CitySlotSpec {
   id: string;
@@ -131,7 +132,62 @@ export interface IncomeTrackConfig {
   maxIncomeLevel: number;
 }
 
+export interface PhysicalComponentManifest {
+  boardCount: 1;
+  playerMatCount: 4;
+  characterTileCount: 4;
+  playerAidCount: 4;
+  incomeMarkerCount: 4;
+  victoryPointMarkerCount: 4;
+  linkTilesPerPlayer: 14;
+  industryTilesPerPlayer: 45;
+  industryTilesTotal: 180;
+  locationAndIndustryCardCount: 64;
+  wildCards: {
+    location: 4;
+    industry: 4;
+    total: 8;
+  };
+  merchantTileCount: 9;
+  resourcePieces: {
+    ironCubes: 18;
+    coalCubes: 30;
+    beerBarrels: 15;
+    generalSupplyLimit: 'unlimited';
+  };
+  moneyTokens: 77;
+  deluxeIronClays: 78;
+  unusedBlankPunchboardTiles: 3;
+}
+
+export type StaticDataAuditStatus =
+  | 'manifest_locked'
+  | 'manifest_locked_face_audit_pending';
+
+export interface StaticDataAuditArea {
+  status: StaticDataAuditStatus;
+  rulebookPages: number[];
+  sourceRefs: string[];
+  coveredByTests: string[];
+  note: string;
+}
+
+export interface StaticDataAuditManifest {
+  components: StaticDataAuditArea;
+  setupAndTurnRules: StaticDataAuditArea;
+  locationsAndSlots: StaticDataAuditArea;
+  linkLines: StaticDataAuditArea;
+  regularCards: StaticDataAuditArea;
+  wildCards: StaticDataAuditArea;
+  industryTiles: StaticDataAuditArea;
+  merchantTiles: StaticDataAuditArea;
+  markets: StaticDataAuditArea;
+  incomeTrack: StaticDataAuditArea;
+}
+
 export interface StaticConfig {
+  components: PhysicalComponentManifest;
+  audit: StaticDataAuditManifest;
   incomeTrack: IncomeTrackConfig;
   locations: Record<string, LocationSpec>;
   linkLines: Record<string, LinkLineSpec>;
@@ -267,6 +323,7 @@ export interface GameState {
   eventLog: GameEvent[];
   nextInstanceId: number;
   status: 'playing' | 'ended';
+  variant?: GameVariant;
   pendingDecision?: PendingDecision;
   lastEraScore?: EraScoreBreakdown;
 }

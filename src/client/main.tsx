@@ -11,7 +11,7 @@ import {
   type SaleBeerSourceSelection,
 } from '../common/gameEngine';
 import {getIncomeLevel} from '../common/income';
-import {getActiveIndustries, getActiveLinks, getCurrentPlayerId} from '../common/selectors';
+import {getActiveIndustries, getActiveLinks} from '../common/selectors';
 import {staticConfig} from '../common/staticData';
 import type {GameCommand, GameState, IndustryInstance, IndustryType, SellStep} from '../common/types';
 import {canScout, scoutCardOptionsForSelect} from './actionOptions';
@@ -47,7 +47,15 @@ import {
 } from './actionValidation';
 import {gameSummariesFromPayload, listedGames, type GameSummary, type ListedGame} from './roomListOptions';
 import {hashForGameState, parseGameJoinHash, playerSessionHash, playerSessionUrl} from './sessionLinks';
-import {canSubmitForActivePlayerView, handPlayerIdForView, sessionForPlayer, sessionNeededForActivePlayerView} from './sessionOptions';
+import {
+  activePlayerIdForView,
+  canSubmitForActivePlayerView,
+  handPlayerIdForView,
+  pendingDecisionPlayerIdForView,
+  sessionForPlayer,
+  sessionNeededForActivePlayerView,
+} from './sessionOptions';
+import {rememberSessions, sessionsForGame, type PlayerSession} from './playerSessionStore';
 import './styles.css';
 
 type SocketReply = {
@@ -58,13 +66,6 @@ type SocketReply = {
   errors?: string[];
 };
 
-type PlayerSession = {
-  playerId: string;
-  token: string;
-};
-
-type StoredSessions = Record<string, Record<string, string>>;
-
 type SellStepDraft = {
   industryId: string;
   merchantSpaceId: string;
@@ -73,7 +74,6 @@ type SellStepDraft = {
 };
 
 const serverUrl = import.meta.env.DEV ? 'http://127.0.0.1:3001' : window.location.origin;
-const sessionStorageKey = 'brass.playerSessions.v1';
 const ironSourceAnchorLocationId = 'birmingham';
 
 function isHiddenCardId(cardId: string): boolean {
@@ -82,34 +82,6 @@ function isHiddenCardId(cardId: string): boolean {
 
 function createSellStepDraft(): SellStepDraft {
   return {industryId: '', merchantSpaceId: '', beerOne: '', beerTwo: ''};
-}
-
-function readStoredSessions(): StoredSessions {
-  try {
-    const raw = window.localStorage.getItem(sessionStorageKey);
-    return raw ? JSON.parse(raw) as StoredSessions : {};
-  } catch {
-    return {};
-  }
-}
-
-function writeStoredSessions(sessions: StoredSessions): void {
-  window.localStorage.setItem(sessionStorageKey, JSON.stringify(sessions));
-}
-
-function sessionsForGame(gameId: string): PlayerSession[] {
-  return Object.entries(readStoredSessions()[gameId] ?? {}).map(([playerId, token]) => ({playerId, token}));
-}
-
-function rememberSessions(gameId: string, sessions: PlayerSession[]): PlayerSession[] {
-  const stored = readStoredSessions();
-  const current = stored[gameId] ?? {};
-  for (const session of sessions) {
-    current[session.playerId] = session.token;
-  }
-  stored[gameId] = current;
-  writeStoredSessions(stored);
-  return Object.entries(current).map(([playerId, token]) => ({playerId, token}));
 }
 
 function ResourceSourceSelect({
@@ -233,7 +205,7 @@ function App() {
     if (!game) {
       return;
     }
-    const activePlayerId = game.pendingDecision?.playerId ?? getCurrentPlayerId(game);
+    const activePlayerId = activePlayerIdForView(game);
     setAutoFollowActivePlayer(session.playerId === activePlayerId);
     setViewerPlayerId(session.playerId);
     window.location.hash = playerSessionHash(game.id, session);
@@ -243,6 +215,25 @@ function App() {
   function selectManualViewer(playerId?: string) {
     setAutoFollowActivePlayer(false);
     setViewerPlayerId(playerId);
+  }
+
+  function leaveRoom() {
+    socket.timeout(3000).emit('game:leave', {}, (error: Error | null, reply: SocketReply) => {
+      if (error) {
+        setErrors([error.message]);
+        return;
+      }
+      if (!reply.ok) {
+        setErrors(reply.errors ?? ['Unknown error']);
+        return;
+      }
+      setErrors([]);
+      setGame(undefined);
+      setKnownSessions([]);
+      setAutoFollowActivePlayer(true);
+      setViewerPlayerId(undefined);
+      window.location.hash = '';
+    });
   }
 
   return (
@@ -263,6 +254,7 @@ function App() {
               viewerPlayerId={viewerPlayerId}
               sendCommand={sendCommand}
               joinSession={joinSession}
+              leaveRoom={leaveRoom}
             />
           )
         : <div>No game loaded.</div>}
@@ -281,6 +273,7 @@ function ConnectionPanel({
 }) {
   const [playerCount, setPlayerCount] = useState(2);
   const [playerNames, setPlayerNames] = useState(['Alice', 'Bob']);
+  const [introductoryCanalOnly, setIntroductoryCanalOnly] = useState(false);
   const [joinGameId, setJoinGameId] = useState('');
   const [joinPlayerId, setJoinPlayerId] = useState('');
   const [joinSessionToken, setJoinSessionToken] = useState('');
@@ -289,16 +282,23 @@ function ConnectionPanel({
   const [gameListLoading, setGameListLoading] = useState(false);
   const roomList = listedGames(gameSummaries, sessionsForGame);
 
+  function requestGameList(): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      socket.timeout(3000).emit('games:list:get', {}, (error: Error | null, payload: unknown) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(payload);
+      });
+    });
+  }
+
   async function loadGames() {
     setGameListLoading(true);
     setGameListError(undefined);
     try {
-      const response = await fetch(`${serverUrl}/api/games`);
-      const payload = await response.json() as unknown;
-      if (!response.ok) {
-        setGameListError('Could not load games');
-        return;
-      }
+      const payload = await requestGameList();
       setGameSummaries(gameSummariesFromPayload(payload));
     } catch (error) {
       setGameListError(error instanceof Error ? error.message : String(error));
@@ -311,6 +311,16 @@ function ConnectionPanel({
     void loadGames();
   }, []);
 
+  useEffect(() => {
+    const updateGameSummaries = (payload: unknown) => {
+      setGameSummaries(gameSummariesFromPayload(payload));
+    };
+    socket.on('games:list', updateGameSummaries);
+    return () => {
+      socket.off('games:list', updateGameSummaries);
+    };
+  }, [socket]);
+
   function updatePlayerCount(nextCount: number) {
     setPlayerCount(nextCount);
     setPlayerNames((names) => Array.from({length: nextCount}, (_, index) => names[index] ?? `Player ${index + 1}`));
@@ -318,10 +328,7 @@ function ConnectionPanel({
 
   function create(event: FormEvent) {
     event.preventDefault();
-    socket.emit('game:create', {playerNames}, (reply: SocketReply) => {
-      onReply(reply);
-      void loadGames();
-    });
+    socket.emit('game:create', {playerNames, introductoryCanalOnly}, onReply);
   }
 
   function join(event: FormEvent) {
@@ -373,6 +380,14 @@ function ConnectionPanel({
             />
           </label>
         ))}
+        <label>
+          <input
+            type="checkbox"
+            checked={introductoryCanalOnly}
+            onChange={(event) => setIntroductoryCanalOnly(event.target.checked)}
+          />
+          Introductory Canal-only game
+        </label>
         <button type="submit">Create Game</button>
       </form>
       <form onSubmit={join}>
@@ -443,14 +458,17 @@ function GameView({
   viewerPlayerId,
   sendCommand,
   joinSession,
+  leaveRoom,
 }: {
   game: GameState;
   knownSessions: PlayerSession[];
   viewerPlayerId?: string;
   sendCommand: (command: GameCommand) => void;
   joinSession: (session: PlayerSession) => void;
+  leaveRoom: () => void;
 }) {
-  const activePlayerId = game.pendingDecision?.playerId ?? getCurrentPlayerId(game);
+  const pendingDecisionPlayerId = pendingDecisionPlayerIdForView(game);
+  const activePlayerId = activePlayerIdForView(game);
   const activePlayer = game.players[activePlayerId];
   const handPlayerId = handPlayerIdForView(game, viewerPlayerId);
   const handPlayer = game.players[handPlayerId];
@@ -460,12 +478,13 @@ function GameView({
   return (
     <section>
       <h2>Game {game.id}</h2>
+      <button type="button" onClick={leaveRoom}>Leave room</button>
       <div>Status: {game.status}</div>
       <div>Era: {game.era}</div>
       <div>Round: {game.roundNumber}</div>
       {!gameEnded && (
         <>
-          <div>{game.pendingDecision ? 'Pending player' : 'Current player'}: {activePlayer.name} ({activePlayer.id})</div>
+          <div>{pendingDecisionPlayerId ? 'Pending player' : 'Current player'}: {activePlayer.name} ({activePlayer.id})</div>
           <div>Viewing player: {handPlayer.name} ({handPlayer.id})</div>
           <div>Action {game.actionIndexInTurn + 1} / {game.actionsAllowedThisTurn}</div>
         </>
@@ -480,7 +499,7 @@ function GameView({
         <>
           <HandPanel game={game} playerId={handPlayerId} />
           {canSubmitForActivePlayer
-            ? (game.pendingDecision
+            ? (pendingDecisionPlayerId
                 ? <PendingDecisionPanel game={game} sendCommand={sendCommand} />
                 : <ActionForms game={game} playerId={activePlayerId} sendCommand={sendCommand} />)
             : <div>Join with the saved session for {activePlayerId} to submit actions.</div>}
@@ -741,7 +760,7 @@ function PendingDecisionPanel({game, sendCommand}: {game: GameState; sendCommand
               <select value={selectedType} onChange={(event) => setDevelopType(index, event.target.value as IndustryType)}>
                 {developOptionsForSelect(player, selectedTypes, index).map((industryType) => {
                   const offset = selectedTypes.slice(0, index).filter((selected) => selected === industryType).length;
-                  const specId = player.industryTileStacks[industryType].availableSpecIdsInOrder[offset];
+                  const specId = player.industryTileStacks[industryType]?.availableSpecIdsInOrder[offset];
                   const spec = specId ? staticConfig.industryTileSpecs[specId] : undefined;
                   return <option key={industryType} value={industryType}>{industryType}: {specId} L{spec?.level ?? '?'}</option>;
                 })}
@@ -884,7 +903,7 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
     : [];
   const buildIndustryOptionKey = buildIndustryOptions.join('|');
   const selectedBuildSpecId = industryType
-    ? game.players[playerId].industryTileStacks[industryType].availableSpecIdsInOrder[0]
+    ? game.players[playerId].industryTileStacks[industryType]?.availableSpecIdsInOrder[0]
     : undefined;
   const selectedBuildSpec = selectedBuildSpecId ? staticConfig.industryTileSpecs[selectedBuildSpecId] : undefined;
   const buildCoalRequired = selectedBuildSpec?.cost.coal ?? 0;
@@ -913,7 +932,7 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
   const buildCoalSourcesForSubmit = optionalSources(buildCoalValues, buildCoalRequired);
   const buildIronSourcesForSubmit = optionalSources(buildIronValues, buildIronRequired);
   const networkCoalSourcesForSubmit = optionalSources(networkCoalValues, networkCoalRequired);
-  const networkBeerSourceForSubmit = doubleRailBeerSourceForSubmit(game, networkLinkLineIds, networkBeerSource);
+  const networkBeerSourceForSubmit = doubleRailBeerSourceForSubmit(game, playerId, networkLinkLineIds, networkBeerSource);
   const networkReason = networkActionReason(
     game,
     playerId,
@@ -963,6 +982,7 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
     [networkBeerSource],
     0,
   );
+  const networkBeerOptionKey = networkBeerOptions.map((option) => option.value).join('|');
   const slots = industryType ? buildSlotOptionsForIndustry(game, locationId, industryType, playerId) : [];
   const selectedBuildSlotId = slots.some((slot) => slot.id === slotId) ? slotId : slots[0]?.id ?? '';
   const buildReason = buildActionReason(
@@ -981,6 +1001,7 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
     const industry = game.board.industryInstances[step.industryId];
     return {
       playerId,
+      industryInstanceId: step.industryId,
       saleLocationId: industry?.locationId ?? '',
       merchantSpaceId: step.merchantSpaceId,
       selectedSources: [optionalSource(step.beerOne), optionalSource(step.beerTwo)],
@@ -1038,6 +1059,12 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
       setNetworkBeerSource('');
     }
   }, [secondLinkLineId, networkSecondLinkOptionKey]);
+
+  useEffect(() => {
+    if (networkBeerSource && !networkBeerOptions.some((option) => option.value === networkBeerSource)) {
+      setNetworkBeerSource('');
+    }
+  }, [networkBeerSource, networkBeerOptionKey]);
 
   useEffect(() => {
     if (!developOneOptions.includes(developOne as IndustryType)) {

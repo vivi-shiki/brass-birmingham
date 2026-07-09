@@ -144,15 +144,22 @@ integrity tests, saved player-session tokens for reconnects, Build/Develop/Netwo
 context-filtered resource-source controls, Sell context-filtered beer-source
 controls, negative-income decision controls, automatic active-player session
 switching, manual saved-session view switching, existing-game room list with
-saved-session join controls, browser CORS support for the REST API, audited
+saved-session join controls, a plain leave-room control backed by Socket.IO,
+browser CORS support for the REST API, audited
 city-slot/farm brewery/merchant/link/card/industry/market/core-rules/
-income-track data manifests, client-side disabled-action rule reasons, and
+income-track data manifests, legacy static-prototype parity tests,
+official physical-component manifest,
+player-count link availability and merchant-tile setup manifests,
+client-side disabled-action rule reasons, and
 audited setup/dealing/board-occupancy invariants, link-anchored rail coal
-sourcing, and the first rule test suite.
+sourcing, the first rule test suite, and the optional introductory Canal-only
+variant.
 
-Still pending for a full Brass implementation: final human rules-data audit
-against the official component list and later UI/UX polish beyond the current
-plain native command forms.
+Still pending for a full Brass implementation: final face-by-face human
+rules-data audit against the official card, board, industry tile, and merchant
+tile faces using the checklist in
+`docs/Brass_Birmingham_rules_data_model_cn.md`, plus later UI/UX polish beyond
+the current plain native command forms.
 
 ---
 
@@ -167,6 +174,16 @@ npm run dev
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in your browser.
 The API and Socket.IO server run on [http://127.0.0.1:3001](http://127.0.0.1:3001).
+Useful HTTP endpoints:
+
+- `GET /api/health` - server health check
+- `GET /api/static-config` - public rules/static-data config and audit metadata
+- `GET /api/games` - public game room summaries; the lobby shows connected clients, ended-game winners, and victory points
+- `POST /api/games` - create a game
+- `GET /api/games/:id` - observer or player-specific game state
+- `POST /api/games/:id/commands` - submit an authoritative command
+
+Socket.IO also supports `games:list:get` for the same public room-summary payload, emits `games:list` after game creation and successful commands, and accepts `game:leave` so a client can unbind from the current room before returning to the lobby.
 
 Useful commands:
 

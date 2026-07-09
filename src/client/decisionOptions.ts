@@ -1,22 +1,24 @@
 import {validateResolveMerchantDevelop, validateResolveNegativeIncome} from '../common/gameEngine';
 import {getActiveIndustries} from '../common/selectors';
 import {staticConfig} from '../common/staticData';
-import type {GameState, IndustryInstance, IndustryType, MerchantDevelopDecision, ValidationResult} from '../common/types';
-
-function validationReason(validate: () => ValidationResult): string | undefined {
-  try {
-    const result = validate();
-    return result.ok ? undefined : result.errors.join('; ');
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
+import type {GameState, IndustryInstance, IndustryType, MerchantDevelopDecision} from '../common/types';
+import {validationReason} from './validation';
 
 export function merchantDevelopSourceLabel(decision: MerchantDevelopDecision): string {
-  const merchantSpaceIds = decision.merchantSpaceIds && decision.merchantSpaceIds.length > 0
-    ? decision.merchantSpaceIds
-    : [decision.merchantSpaceId];
-  return [...new Set(merchantSpaceIds)].join(', ');
+  const decisionRecord = decision as {merchantSpaceIds?: unknown};
+  const rawMerchantSpaceIds = Array.isArray(decisionRecord.merchantSpaceIds)
+    ? decisionRecord.merchantSpaceIds
+    : [];
+  const merchantSpaceIds: string[] = [];
+  const seen = new Set<string>();
+  for (const rawMerchantSpaceId of [...rawMerchantSpaceIds, decision.merchantSpaceId]) {
+    const merchantSpaceId = typeof rawMerchantSpaceId === 'string' ? rawMerchantSpaceId.trim() : '';
+    if (merchantSpaceId && !seen.has(merchantSpaceId)) {
+      merchantSpaceIds.push(merchantSpaceId);
+      seen.add(merchantSpaceId);
+    }
+  }
+  return merchantSpaceIds.join(', ');
 }
 
 export function canSubmitResolveMerchantDevelop(

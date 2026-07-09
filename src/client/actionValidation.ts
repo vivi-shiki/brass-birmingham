@@ -7,16 +7,23 @@ import {
   validateScout,
   validateSell,
 } from '../common/gameEngine';
+import {getCurrentPlayerId} from '../common/selectors';
 import {staticConfig} from '../common/staticData';
-import type {GameState, IndustryType, ResourceSource, SellStep, ValidationResult} from '../common/types';
+import type {GameState, IndustryType, ResourceSource, SellStep} from '../common/types';
+import {validationReason} from './validation';
 
-function validationReason(validate: () => ValidationResult): string | undefined {
-  try {
-    const result = validate();
-    return result.ok ? undefined : result.errors.join('; ');
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+function ordinaryActionBlockReason(game: GameState, playerId: string): string | undefined {
+  if (!game.players[playerId]) {
+    return `Unknown player: ${playerId}`;
   }
+  if (game.status !== 'playing') {
+    return 'Game is not active';
+  }
+  if (game.pendingDecision) {
+    return 'Pending decision must be resolved first';
+  }
+  const currentPlayerId = getCurrentPlayerId(game);
+  return currentPlayerId === playerId ? undefined : `It is ${currentPlayerId}'s turn`;
 }
 
 export function passActionReason(game: GameState, playerId: string, cardId: string): string | undefined {
@@ -28,6 +35,10 @@ export function loanActionReason(game: GameState, playerId: string, cardId: stri
 }
 
 export function scoutActionReason(game: GameState, playerId: string, cardIds: string[]): string | undefined {
+  const blockReason = ordinaryActionBlockReason(game, playerId);
+  if (blockReason) {
+    return blockReason;
+  }
   const player = game.players[playerId];
   if (!player) {
     return `Unknown player: ${playerId}`;
@@ -57,6 +68,10 @@ export function buildActionReason(
   coalSources?: ResourceSource[],
   ironSources?: ResourceSource[],
 ): string | undefined {
+  const blockReason = ordinaryActionBlockReason(game, playerId);
+  if (blockReason) {
+    return blockReason;
+  }
   if (!locationId) {
     return 'No valid build location';
   }
@@ -86,6 +101,10 @@ export function networkActionReason(
   coalSources?: ResourceSource[],
   beerSourceForDoubleRail?: ResourceSource,
 ): string | undefined {
+  const blockReason = ordinaryActionBlockReason(game, playerId);
+  if (blockReason) {
+    return blockReason;
+  }
   if (linkLineIds.length === 0) {
     return 'No valid network links';
   }
@@ -106,6 +125,10 @@ export function developActionReason(
   industryTypes: IndustryType[],
   ironSources?: ResourceSource[],
 ): string | undefined {
+  const blockReason = ordinaryActionBlockReason(game, playerId);
+  if (blockReason) {
+    return blockReason;
+  }
   if (industryTypes.length === 0) {
     return 'No developable tiles';
   }
@@ -124,6 +147,10 @@ export function sellActionReason(
   cardId: string,
   sales: SellStep[],
 ): string | undefined {
+  const blockReason = ordinaryActionBlockReason(game, playerId);
+  if (blockReason) {
+    return blockReason;
+  }
   if (sales.length === 0 || sales.some((sale) => !sale.industryInstanceId)) {
     return 'Select a sellable industry';
   }

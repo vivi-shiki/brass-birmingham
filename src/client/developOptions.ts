@@ -1,6 +1,7 @@
 import {validateDevelop} from '../common/gameEngine';
 import {staticConfig} from '../common/staticData';
 import type {GameState, IndustryType, PlayerState, ResourceSource} from '../common/types';
+import {validationOk} from './validation';
 
 export const developIndustryTypes: IndustryType[] = [
   'cotton_mill',
@@ -26,7 +27,7 @@ export function developOptionsForSelect(
 
   return developIndustryTypes.filter((industryType) => {
     const offset = simulatedStackHeads.get(industryType) ?? 0;
-    const specId = player.industryTileStacks[industryType].availableSpecIdsInOrder[offset];
+    const specId = player.industryTileStacks[industryType]?.availableSpecIdsInOrder[offset];
     return Boolean(specId && staticConfig.industryTileSpecs[specId]?.canDevelop);
   });
 }
@@ -58,11 +59,11 @@ export function canSubmitDevelop(
   if (industryTypes.length === 0) {
     return false;
   }
-  return validateDevelop(game, {
+  return validationOk(() => validateDevelop(game, {
     type: 'develop',
     playerId,
     cardId,
     industryTypes,
     ironSources,
-  }).ok;
+  }));
 }

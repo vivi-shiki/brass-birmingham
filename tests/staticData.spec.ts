@@ -1,6 +1,9 @@
+import {existsSync, readFileSync} from 'node:fs';
 import {describe, expect, it} from 'vitest';
+import {createGame} from '../src/common/gameSetup';
+import {isLinkLineActiveForPlayerCount} from '../src/common/selectors';
 import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../src/common/staticData';
-import type {CardSpec, IndustryType, MerchantBonus, PlayerCount, StaticConfig} from '../src/common/types';
+import type {CardSpec, IndustryType, MerchantBonus, PlayerCount, StaticConfig, StaticDataAuditArea, StaticDataAuditManifest} from '../src/common/types';
 
 const industryTypes: IndustryType[] = [
   'cotton_mill',
@@ -216,6 +219,107 @@ const expectedRulesManifest: StaticConfig['rules'] = {
   railDoubleBeer: 1,
 };
 
+const expectedPhysicalComponentManifest: StaticConfig['components'] = {
+  boardCount: 1,
+  playerMatCount: 4,
+  characterTileCount: 4,
+  playerAidCount: 4,
+  incomeMarkerCount: 4,
+  victoryPointMarkerCount: 4,
+  linkTilesPerPlayer: 14,
+  industryTilesPerPlayer: 45,
+  industryTilesTotal: 180,
+  locationAndIndustryCardCount: 64,
+  wildCards: {
+    location: 4,
+    industry: 4,
+    total: 8,
+  },
+  merchantTileCount: 9,
+  resourcePieces: {
+    ironCubes: 18,
+    coalCubes: 30,
+    beerBarrels: 15,
+    generalSupplyLimit: 'unlimited',
+  },
+  moneyTokens: 77,
+  deluxeIronClays: 78,
+  unusedBlankPunchboardTiles: 3,
+};
+
+const expectedStaticDataAuditManifest: StaticDataAuditManifest = {
+  components: {
+    status: 'manifest_locked',
+    rulebookPages: [1, 4, 5],
+    sourceRefs: ['official rulebook component list p1', 'official rulebook setup pp4-6'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/setup.spec.ts'],
+    note: 'Physical counts and setup-facing component behavior are locked to manifest tests.',
+  },
+  setupAndTurnRules: {
+    status: 'manifest_locked',
+    rulebookPages: [4, 5, 6, 7],
+    sourceRefs: ['official rulebook setup pp4-6', 'official rulebook action and era rules pp7-12'],
+    coveredByTests: ['tests/setup.spec.ts', 'tests/era.spec.ts', 'tests/actions.spec.ts'],
+    note: 'Initial cash, hand size, facedown discards, round counts, action counts, and core action constants are test-backed.',
+  },
+  locationsAndSlots: {
+    status: 'manifest_locked_face_audit_pending',
+    rulebookPages: [4, 5],
+    sourceRefs: ['legacy js/gameData.js migration', 'official board face audit pending'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/legacyStaticDataParity.spec.ts'],
+    note: 'City ids, regions, and slot manifests are locked; rulebook diagrams are partial, so final board-face icon review is still pending.',
+  },
+  linkLines: {
+    status: 'manifest_locked_face_audit_pending',
+    rulebookPages: [4, 5, 8, 11],
+    sourceRefs: ['legacy js/gameData.js migration', 'official board face audit pending'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/legacyStaticDataParity.spec.ts', 'tests/network.spec.ts'],
+    note: 'Endpoints, era support, player-count activation, and farm-brewery links are locked; rulebook diagrams are partial, so final printed-line review is still pending.',
+  },
+  regularCards: {
+    status: 'manifest_locked_face_audit_pending',
+    rulebookPages: [1, 4, 9],
+    sourceRefs: ['legacy js/gameData.js migration', 'official card face audit pending'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/legacyStaticDataParity.spec.ts', 'tests/setup.spec.ts'],
+    note: 'Location and industry card counts, player counts, ids, and deck sizes are locked; rulebook examples are partial, so final card-face review is still pending.',
+  },
+  wildCards: {
+    status: 'manifest_locked_face_audit_pending',
+    rulebookPages: [1, 4, 9, 12],
+    sourceRefs: ['official rulebook component list p1', 'official card face audit pending'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/actions.spec.ts', 'tests/setup.spec.ts'],
+    note: 'Wild card counts and pool behavior are locked; rulebook examples are partial, so final wild-card face review is still pending.',
+  },
+  industryTiles: {
+    status: 'manifest_locked_face_audit_pending',
+    rulebookPages: [1, 5, 8, 9, 11, 12],
+    sourceRefs: ['legacy js/gameData.js migration', 'official player-board tile face audit pending'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/legacyStaticDataParity.spec.ts', 'tests/actions.spec.ts'],
+    note: 'Tile economics, order, ids, resources, and develop restrictions are locked; rulebook thumbnails are partial, so final tile-face review is still pending.',
+  },
+  merchantTiles: {
+    status: 'manifest_locked_face_audit_pending',
+    rulebookPages: [1, 4, 10],
+    sourceRefs: ['legacy js/gameData.js migration', 'official merchant tile face audit pending'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/setup.spec.ts', 'tests/sell.spec.ts'],
+    note: 'Merchant tile counts, player counts, industry icons, blanks, and rewards are locked; rulebook examples are partial, so final merchant-tile face review is still pending.',
+  },
+  markets: {
+    status: 'manifest_locked',
+    rulebookPages: [4],
+    sourceRefs: ['official rulebook setup p4', 'legacy js/gameData.js migration'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/resourceSources.spec.ts', 'tests/setup.spec.ts'],
+    note: 'Coal and iron market prices, initial occupancy, fallback prices, and connection behavior are test-backed.',
+  },
+  incomeTrack: {
+    status: 'manifest_locked',
+    rulebookPages: [4, 5, 11],
+    sourceRefs: ['official board income track audit', 'rules data model income-track manifest'],
+    coveredByTests: ['tests/staticData.spec.ts', 'tests/roundIncome.spec.ts'],
+    note: 'Every income-track space is recorded and tested instead of inferred from formula-only logic.',
+  },
+};
+
 const expectedIncomeTrackManifest = {
   minIncomeLevel: -10,
   maxIncomeLevel: 30,
@@ -411,6 +515,12 @@ const expectedLinkSupport = [
   ['walsall-wolverhampton', 'walsall', 'wolverhampton', ['canal', 'rail']],
 ] as const;
 
+const expectedInactiveLinkLinesByPlayerCount: Record<PlayerCount, string[]> = {
+  2: ['derby-nottingham', 'stokeOnTrent-warrington'],
+  3: ['derby-nottingham'],
+  4: [],
+};
+
 const expectedIndustryLevelManifest: Record<IndustryType, Array<{
   level: number;
   count: number;
@@ -429,7 +539,7 @@ const expectedIndustryLevelManifest: Record<IndustryType, Array<{
     {level: 4, count: 1, buildableEras: ['rail'], cost: {cash: 9, coal: 0, iron: 1}, flip: {incomeSpaces: 5, victoryPoints: 10, linkIcons: 2}, resourcesWhenBuilt: {rail: 2}, canDevelop: true},
   ],
   coal_mine: [
-    {level: 1, count: 1, buildableEras: ['canal'], cost: {cash: 5, coal: 0, iron: 0}, flip: {incomeSpaces: 4, victoryPoints: 1, linkIcons: 2}, resourcesWhenBuilt: {canal: 2, rail: 2}, canDevelop: true},
+    {level: 1, count: 1, buildableEras: ['canal'], cost: {cash: 5, coal: 0, iron: 0}, flip: {incomeSpaces: 4, victoryPoints: 1, linkIcons: 2}, resourcesWhenBuilt: {canal: 2}, canDevelop: true},
     {level: 2, count: 2, buildableEras: ['canal', 'rail'], cost: {cash: 7, coal: 0, iron: 0}, flip: {incomeSpaces: 7, victoryPoints: 2, linkIcons: 1}, resourcesWhenBuilt: {canal: 3, rail: 3}, canDevelop: true},
     {level: 3, count: 2, buildableEras: ['canal', 'rail'], cost: {cash: 8, coal: 0, iron: 1}, flip: {incomeSpaces: 6, victoryPoints: 3, linkIcons: 1}, resourcesWhenBuilt: {canal: 4, rail: 4}, canDevelop: true},
     {level: 4, count: 2, buildableEras: ['canal', 'rail'], cost: {cash: 10, coal: 0, iron: 1}, flip: {incomeSpaces: 5, victoryPoints: 4, linkIcons: 1}, resourcesWhenBuilt: {canal: 5, rail: 5}, canDevelop: true},
@@ -441,7 +551,7 @@ const expectedIndustryLevelManifest: Record<IndustryType, Array<{
     {level: 4, count: 3, buildableEras: ['canal', 'rail'], cost: {cash: 18, coal: 1, iron: 1}, beerRequiredToSell: 1, flip: {incomeSpaces: 2, victoryPoints: 12, linkIcons: 1}, canDevelop: true},
   ],
   iron_works: [
-    {level: 1, count: 1, buildableEras: ['canal'], cost: {cash: 5, coal: 1, iron: 0}, flip: {incomeSpaces: 3, victoryPoints: 3, linkIcons: 1}, resourcesWhenBuilt: {canal: 4, rail: 4}, canDevelop: true},
+    {level: 1, count: 1, buildableEras: ['canal'], cost: {cash: 5, coal: 1, iron: 0}, flip: {incomeSpaces: 3, victoryPoints: 3, linkIcons: 1}, resourcesWhenBuilt: {canal: 4}, canDevelop: true},
     {level: 2, count: 1, buildableEras: ['canal', 'rail'], cost: {cash: 7, coal: 1, iron: 0}, flip: {incomeSpaces: 3, victoryPoints: 5, linkIcons: 1}, resourcesWhenBuilt: {canal: 4, rail: 4}, canDevelop: true},
     {level: 3, count: 1, buildableEras: ['canal', 'rail'], cost: {cash: 9, coal: 1, iron: 0}, flip: {incomeSpaces: 2, victoryPoints: 7, linkIcons: 1}, resourcesWhenBuilt: {canal: 5, rail: 5}, canDevelop: true},
     {level: 4, count: 1, buildableEras: ['canal', 'rail'], cost: {cash: 12, coal: 1, iron: 0}, flip: {incomeSpaces: 1, victoryPoints: 9, linkIcons: 1}, resourcesWhenBuilt: {canal: 6, rail: 6}, canDevelop: true},
@@ -487,6 +597,34 @@ function cardDistribution(cards: CardSpec[]) {
   }
 
   return {locations, industries};
+}
+
+function expectedRegularCardIdsForPlayerCount(playerCount: PlayerCount): string[] {
+  const distribution = expectedCardDistributionByPlayerCount[playerCount];
+  const locationIds = Object.entries(distribution.locations).flatMap(([locationId, count]) =>
+    Array.from({length: count}, (_, index) => `p${playerCount}-location-${locationId}-${index + 1}`),
+  );
+  const industryIds = (Object.entries(distribution.industries) as Array<[IndustryType, number]>)
+    .flatMap(([industryType, count]) =>
+      Array.from({length: count}, (_, index) => `p${playerCount}-industry-${industryType}-${index + 1}`),
+    );
+
+  return [...locationIds, ...industryIds];
+}
+
+function locationCardRegions(cards: CardSpec[]): string[] {
+  const regions = new Set<string>();
+  for (const card of cards) {
+    if (card.type !== 'location' || !card.locationId) {
+      continue;
+    }
+    const location = staticConfig.locations[card.locationId];
+    if (!location || location.kind !== 'city') {
+      throw new Error(`Expected location card ${card.id} to reference a city`);
+    }
+    regions.add(location.region);
+  }
+  return [...regions].sort();
 }
 
 function industryLevelManifest(industryType: IndustryType) {
@@ -536,7 +674,79 @@ function incomeTrackLevelCounts(): Array<[number, number]> {
   return Array.from(counts.entries()).sort(([a], [b]) => a - b);
 }
 
+function auditGameForPlayerCount(playerCount: PlayerCount) {
+  const playerIds = Array.from({length: playerCount}, (_, index) => `p${index + 1}`);
+  return createGame({
+    id: `static-data-audit-${playerCount}p`,
+    playerNames: ['Ada', 'Ben', 'Cara', 'Dev'].slice(0, playerCount),
+    seed: playerCount,
+    initialTurnOrder: playerIds,
+  });
+}
+
 describe('static rules data integrity', () => {
+  it('tracks static-data audit coverage and the remaining face-audit boundary', () => {
+    expect(staticConfig.audit).toEqual(expectedStaticDataAuditManifest);
+
+    const auditEntries = Object.values(staticConfig.audit) as StaticDataAuditArea[];
+    for (const entry of auditEntries) {
+      expect(entry.rulebookPages.length).toBeGreaterThan(0);
+      expect(entry.rulebookPages).toEqual([...new Set(entry.rulebookPages)].sort((a, b) => a - b));
+      expect(entry.rulebookPages.every((page) => Number.isInteger(page) && page >= 1 && page <= 12)).toBe(true);
+      expect(entry.sourceRefs.length).toBeGreaterThan(0);
+      expect(entry.coveredByTests.length).toBeGreaterThan(0);
+      expect(entry.note.trim()).toBe(entry.note);
+      expect(entry.note.length).toBeGreaterThan(0);
+    }
+
+    const pendingFaceAuditKeys = Object.entries(staticConfig.audit)
+      .filter(([, entry]) => entry.status === 'manifest_locked_face_audit_pending')
+      .map(([key]) => key)
+      .sort();
+
+    expect(pendingFaceAuditKeys).toEqual([
+      'industryTiles',
+      'linkLines',
+      'locationsAndSlots',
+      'merchantTiles',
+      'regularCards',
+      'wildCards',
+    ]);
+  });
+
+  it('keeps static-data audit test references resolvable to real Vitest specs', () => {
+    const referencedTests = new Set<string>();
+
+    for (const [area, entry] of Object.entries(staticConfig.audit)) {
+      for (const testPath of entry.coveredByTests) {
+        expect(testPath, `${area} audit test path should be a repo test spec`).toMatch(/^tests\/.+\.spec\.ts$/);
+        referencedTests.add(testPath);
+      }
+    }
+
+    for (const testPath of [...referencedTests].sort()) {
+      expect(existsSync(testPath), `Missing audit-referenced test file: ${testPath}`).toBe(true);
+      expect(readFileSync(testPath, 'utf8'), `${testPath} should contain Vitest tests`).toMatch(/\b(it|test|describe)\(/);
+    }
+  });
+
+  it('keeps static-data audit statuses semantically tied to their remaining review work', () => {
+    for (const [area, entry] of Object.entries(staticConfig.audit)) {
+      const reviewText = [...entry.sourceRefs, entry.note].join(' ').toLowerCase();
+
+      if (entry.status === 'manifest_locked_face_audit_pending') {
+        expect(reviewText, `${area} should identify the unresolved face audit`).toContain('face audit pending');
+        expect(reviewText, `${area} should identify the unfinished human review`).toContain('still pending');
+        continue;
+      }
+
+      expect(reviewText, `${area} is locked and should not carry unresolved face-audit wording`)
+        .not.toContain('face audit pending');
+      expect(reviewText, `${area} is locked and should not carry unresolved review wording`)
+        .not.toContain('still pending');
+    }
+  });
+
   it('matches the official component counts represented in rules data', () => {
     const expectedIndustryTilesPerPlayer: Record<IndustryType, number> = {
       cotton_mill: 11,
@@ -547,17 +757,25 @@ describe('static rules data integrity', () => {
       brewery: 7,
     };
 
+    expect(staticConfig.components).toEqual(expectedPhysicalComponentManifest);
+
     for (const industryType of industryTypes) {
       expect(staticConfig.industryStackSpecIds[industryType]).toHaveLength(expectedIndustryTilesPerPlayer[industryType]);
     }
 
     const industryTilesPerPlayer = Object.values(staticConfig.industryStackSpecIds)
       .reduce((total, stack) => total + stack.length, 0);
-    expect(industryTilesPerPlayer).toBe(45);
-    expect(industryTilesPerPlayer * 4).toBe(180);
-    expect(Object.keys(staticConfig.merchantTileSpecs)).toHaveLength(9);
-    expect(getCardIdsForPlayerCount(4)).toHaveLength(64);
-    expect([...getWildLocationCardIds(), ...getWildIndustryCardIds()]).toHaveLength(8);
+    expect(industryTilesPerPlayer).toBe(staticConfig.components.industryTilesPerPlayer);
+    expect(industryTilesPerPlayer * staticConfig.components.playerMatCount).toBe(staticConfig.components.industryTilesTotal);
+    expect(staticConfig.rules.initialLinksPerType).toBe(staticConfig.components.linkTilesPerPlayer);
+    expect(Object.keys(staticConfig.merchantTileSpecs)).toHaveLength(staticConfig.components.merchantTileCount);
+    expect(getCardIdsForPlayerCount(4)).toHaveLength(staticConfig.components.locationAndIndustryCardCount);
+    expect(getWildLocationCardIds()).toHaveLength(staticConfig.components.wildCards.location);
+    expect(getWildIndustryCardIds()).toHaveLength(staticConfig.components.wildCards.industry);
+    expect([...getWildLocationCardIds(), ...getWildIndustryCardIds()]).toHaveLength(staticConfig.components.wildCards.total);
+    expect(staticConfig.components.resourcePieces.generalSupplyLimit).toBe('unlimited');
+    expect(staticConfig.markets.coal.priceSlotsCheapestToMostExpensive).not.toHaveLength(staticConfig.components.resourcePieces.coalCubes);
+    expect(staticConfig.markets.iron.priceSlotsCheapestToMostExpensive).not.toHaveLength(staticConfig.components.resourcePieces.ironCubes);
   });
 
   it('defines the expected location graph shape', () => {
@@ -679,6 +897,33 @@ describe('static rules data integrity', () => {
     expect(actual).toEqual(expectedLinkSupport);
   });
 
+  it('matches audited player-count availability for map links', () => {
+    const linkIds = Object.keys(staticConfig.linkLines).sort();
+
+    for (const playerCount of [2, 3, 4] as const) {
+      const state = auditGameForPlayerCount(playerCount);
+      const inactiveIds = linkIds.filter((linkId) =>
+        !isLinkLineActiveForPlayerCount(state, staticConfig.linkLines[linkId]),
+      );
+
+      expect(inactiveIds).toEqual(expectedInactiveLinkLinesByPlayerCount[playerCount]);
+      expect(linkIds.filter((linkId) => !inactiveIds.includes(linkId))).toHaveLength(
+        linkIds.length - expectedInactiveLinkLinesByPlayerCount[playerCount].length,
+      );
+
+      for (const inactiveId of inactiveIds) {
+        const line = staticConfig.linkLines[inactiveId];
+        const inactiveMerchantEndpoints = [line.endpointA, line.endpointB, line.viaFarmBreweryId]
+          .filter((locationId): locationId is string => Boolean(locationId))
+          .filter((locationId) => {
+            const location = staticConfig.locations[locationId];
+            return location?.kind === 'merchant' && location.minPlayers > playerCount;
+          });
+        expect(inactiveMerchantEndpoints.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
   it('builds player-count decks sized for the exact number of era actions plus facedown discards', () => {
     const expectedRoundsByPlayerCount: Record<PlayerCount, number> = {2: 10, 3: 9, 4: 8};
     const expectedDeckSizes: Record<PlayerCount, number> = {2: 40, 3: 54, 4: 64};
@@ -710,6 +955,108 @@ describe('static rules data integrity', () => {
     }
   });
 
+  it('matches the rulebook location-banner card eligibility by player count', () => {
+    expect(locationCardRegions(cardsForPlayerCount(2))).toEqual(['birmingham', 'blackCountry', 'midlands']);
+    expect(locationCardRegions(cardsForPlayerCount(3))).toEqual(['birmingham', 'blackCountry', 'midlands', 'staffordshire']);
+    expect(locationCardRegions(cardsForPlayerCount(4))).toEqual(['birmingham', 'blackCountry', 'derbyshire', 'midlands', 'staffordshire']);
+  });
+
+  it('keeps generated regular decks isolated by exact player count and wild pool', () => {
+    const playerCounts = [2, 3, 4] as const;
+    const regularDeckIds = playerCounts.flatMap((playerCount) => getCardIdsForPlayerCount(playerCount));
+    const wildLocationIds = getWildLocationCardIds();
+    const wildIndustryIds = getWildIndustryCardIds();
+    const wildIds = new Set([...wildLocationIds, ...wildIndustryIds]);
+
+    assertUnique(regularDeckIds);
+    expect(regularDeckIds.some((cardId) => wildIds.has(cardId))).toBe(false);
+    expect(wildLocationIds.every((cardId) => /^wild-location-\d+$/.test(cardId))).toBe(true);
+    expect(wildIndustryIds.every((cardId) => /^wild-industry-\d+$/.test(cardId))).toBe(true);
+
+    for (const playerCount of playerCounts) {
+      const deckIds = getCardIdsForPlayerCount(playerCount);
+      expect(deckIds.every((cardId) => cardId.startsWith(`p${playerCount}-`))).toBe(true);
+
+      for (const cardId of deckIds) {
+        const card = staticConfig.cardSpecs[cardId];
+        const match = /^p([234])-(location|industry)-/.exec(cardId);
+        expect(match).not.toBeNull();
+        expect(card.minPlayers).toBe(playerCount);
+        expect(Number(match?.[1])).toBe(playerCount);
+        expect(card.type).toBe(match?.[2]);
+      }
+    }
+  });
+
+  it('expands audited regular and wild card counts into contiguous physical card ids', () => {
+    const expectedRegularIds: string[] = [];
+
+    for (const playerCount of [2, 3, 4] as const) {
+      const expectedIds = expectedRegularCardIdsForPlayerCount(playerCount);
+      const actualIds = getCardIdsForPlayerCount(playerCount);
+
+      expect([...actualIds].sort()).toEqual([...expectedIds].sort());
+      expectedRegularIds.push(...expectedIds);
+
+      for (const cardId of expectedIds) {
+        const card = staticConfig.cardSpecs[cardId];
+        const match = /^p([234])-(location|industry)-(.+)-(\d+)$/.exec(cardId);
+        expect(match).not.toBeNull();
+        expect(card.id).toBe(cardId);
+        expect(card.minPlayers).toBe(playerCount);
+        expect(card.name.endsWith(` (${match?.[4]})`)).toBe(true);
+        if (match?.[2] === 'location') {
+          expect(card.type).toBe('location');
+          expect(card.locationId).toBe(match[3]);
+          expect(card.industryType).toBeUndefined();
+        } else {
+          expect(card.type).toBe('industry');
+          expect(card.industryType).toBe(match?.[3]);
+          expect(card.locationId).toBeUndefined();
+        }
+      }
+    }
+
+    const expectedWildLocationIds = Array.from(
+      {length: staticConfig.components.wildCards.location},
+      (_, index) => `wild-location-${index + 1}`,
+    );
+    const expectedWildIndustryIds = Array.from(
+      {length: staticConfig.components.wildCards.industry},
+      (_, index) => `wild-industry-${index + 1}`,
+    );
+    const expectedAllCardIds = [
+      ...expectedRegularIds,
+      ...expectedWildLocationIds,
+      ...expectedWildIndustryIds,
+    ];
+
+    expect(getWildLocationCardIds()).toEqual(expectedWildLocationIds);
+    expect(getWildIndustryCardIds()).toEqual(expectedWildIndustryIds);
+    expect([...expectedAllCardIds].sort()).toEqual(Object.keys(staticConfig.cardSpecs).sort());
+  });
+
+  it('defines card specs with only the fields allowed by each card type', () => {
+    for (const card of Object.values(staticConfig.cardSpecs)) {
+      expect(card.name.trim()).toBe(card.name);
+
+      if (card.type === 'location') {
+        expect(card.locationId).toBeDefined();
+        expect(staticConfig.locations[card.locationId ?? '']?.kind).toBe('city');
+        expect(card.industryType).toBeUndefined();
+        expect([2, 3, 4]).toContain(card.minPlayers);
+      } else if (card.type === 'industry') {
+        expect(industryTypes).toContain(card.industryType);
+        expect(card.locationId).toBeUndefined();
+        expect([2, 3, 4]).toContain(card.minPlayers);
+      } else {
+        expect(card.locationId).toBeUndefined();
+        expect(card.industryType).toBeUndefined();
+        expect(card.minPlayers).toBeUndefined();
+      }
+    }
+  });
+
   it('defines complete ordered industry stacks and tile specs', () => {
     const allStackedSpecIds = new Set<string>();
     for (const industryType of industryTypes) {
@@ -738,6 +1085,9 @@ describe('static rules data integrity', () => {
       if (spec.industryType === 'coal_mine' || spec.industryType === 'iron_works' || spec.industryType === 'brewery') {
         expect(spec.flip.trigger).toBe('resource_depleted');
         expect(spec.resourcesWhenBuilt).toBeDefined();
+        for (const era of Object.keys(spec.resourcesWhenBuilt ?? {})) {
+          expect(spec.buildableEras).toContain(era);
+        }
       } else {
         expect(spec.flip.trigger).toBe('sell');
         expect(spec.beerRequiredToSell).toBeGreaterThanOrEqual(0);
@@ -753,6 +1103,45 @@ describe('static rules data integrity', () => {
     for (const industryType of industryTypes) {
       expect(industryLevelManifest(industryType)).toEqual(expectedIndustryLevelManifest[industryType]);
     }
+  });
+
+  it('expands audited industry tile counts into contiguous physical tile ids', () => {
+    const allExpectedSpecIds: string[] = [];
+
+    for (const industryType of industryTypes) {
+      const expectedSpecIds = expectedIndustryLevelManifest[industryType].flatMap((entry) =>
+        Array.from({length: entry.count}, (_, index) => `${industryType}-${entry.level}-${index + 1}`),
+      );
+
+      expect(staticConfig.industryStackSpecIds[industryType]).toEqual(expectedSpecIds);
+      allExpectedSpecIds.push(...expectedSpecIds);
+
+      expectedSpecIds.forEach((specId, sequenceIndex) => {
+        const spec = staticConfig.industryTileSpecs[specId];
+        expect(spec.id).toBe(specId);
+        expect(spec.industryType).toBe(industryType);
+        expect(spec.sequenceIndex).toBe(sequenceIndex);
+      });
+    }
+
+    expect(allExpectedSpecIds).toHaveLength(staticConfig.components.industryTilesPerPlayer);
+    expect([...allExpectedSpecIds].sort()).toEqual(Object.keys(staticConfig.industryTileSpecs).sort());
+  });
+
+  it('matches the rulebook Rail-era exception for level 1 pottery only', () => {
+    const railBuildableLevelOneSpecs = Object.values(staticConfig.industryTileSpecs)
+      .filter((spec) => spec.level === 1 && spec.buildableEras.includes('rail'))
+      .map((spec) => spec.id)
+      .sort();
+
+    expect(railBuildableLevelOneSpecs).toEqual(['pottery-1-1']);
+    expect(staticConfig.industryTileSpecs['pottery-1-1']).toMatchObject({
+      industryType: 'pottery',
+      level: 1,
+      buildableEras: ['canal', 'rail'],
+      canDevelop: false,
+      special: {lightbulbPottery: true},
+    });
   });
 
   it('matches brewery beer placement by era', () => {
@@ -826,6 +1215,37 @@ describe('static rules data integrity', () => {
     }));
 
     expect(actual).toEqual(expectedMerchantTileManifest);
+  });
+
+  it('matches merchant tile ids to merchant locations and printed industry icons', () => {
+    const industrySuffixes: Record<string, IndustryType> = {
+      cotton: 'cotton_mill',
+      manufacturer: 'manufacturer',
+      pottery: 'pottery',
+    };
+
+    for (const [tileId, tile] of Object.entries(staticConfig.merchantTileSpecs)) {
+      if (tile.blank) {
+        const blankMatch = /^blank-([234])p$/.exec(tileId);
+        expect(blankMatch).not.toBeNull();
+        expect(tile.id).toBe(tileId);
+        expect(tile.acceptedIndustryTypes).toEqual([]);
+        expect(tile.minPlayers).toBe(Number(blankMatch?.[1]));
+        continue;
+      }
+
+      const tileMatch = /^([a-z]+)-([a-z]+)$/.exec(tileId);
+      expect(tileMatch).not.toBeNull();
+      const [, merchantId, industrySuffix] = tileMatch ?? [];
+      const merchantLocation = staticConfig.locations[merchantId ?? ''];
+
+      expect(merchantLocation?.kind).toBe('merchant');
+      if (!merchantLocation || merchantLocation.kind !== 'merchant') {
+        throw new Error(`Merchant tile ${tileId} does not reference a merchant location`);
+      }
+      expect(tile.minPlayers).toBe(merchantLocation.minPlayers);
+      expect(tile.acceptedIndustryTypes).toEqual([industrySuffixes[industrySuffix ?? '']]);
+    }
   });
 
   it('matches the audited resource market manifest', () => {

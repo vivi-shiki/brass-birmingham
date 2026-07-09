@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {
   buildActionReason,
+  developActionReason,
   loanActionReason,
   networkActionReason,
   passActionReason,
@@ -25,11 +26,55 @@ describe('client action validation reasons', () => {
     expect(loanActionReason(state, 'p1', firstHandCard(state, 'p1'))).toContain('below the minimum');
   });
 
+  it('returns shared pending-decision blockers for single-card actions', () => {
+    const state = testGame();
+    const cardId = firstHandCard(state, 'p1');
+    state.pendingDecision = {
+      type: 'negative_income',
+      playerId: 'p1',
+      amountOwed: 5,
+      incomePlayerIndex: 0,
+    };
+
+    expect(passActionReason(state, 'p1', cardId)).toBe('Pending decision must be resolved first');
+    expect(loanActionReason(state, 'p1', cardId)).toBe('Pending decision must be resolved first');
+  });
+
   it('returns a specific reason when Scout is unavailable because a wild card is held', () => {
     const state = testGame();
     setHand(state, 'p1', ['p2-location-birmingham-1', 'p2-location-cannock-1', 'wild-location-1']);
 
     expect(scoutActionReason(state, 'p1', state.players.p1.handCardIds)).toBe('Cannot Scout while holding a wild card');
+  });
+
+  it('returns ordinary-action blockers before local Scout availability reasons', () => {
+    const state = testGame();
+    setHand(state, 'p1', ['p2-location-birmingham-1', 'p2-location-cannock-1', 'wild-location-1']);
+    state.pendingDecision = {
+      type: 'negative_income',
+      playerId: 'p1',
+      amountOwed: 5,
+      incomePlayerIndex: 0,
+    };
+
+    expect(scoutActionReason(state, 'p1', state.players.p1.handCardIds)).toBe('Pending decision must be resolved first');
+  });
+
+  it('returns ordinary-action blockers before local form selection reasons', () => {
+    const state = testGame();
+    const cardId = firstHandCard(state, 'p1');
+    state.pendingDecision = {
+      type: 'negative_income',
+      playerId: 'p1',
+      amountOwed: 5,
+      incomePlayerIndex: 0,
+    };
+
+    expect(buildActionReason(state, 'p1', cardId, '', '', '')).toBe('Pending decision must be resolved first');
+    expect(networkActionReason(state, 'p1', cardId, [])).toBe('Pending decision must be resolved first');
+    expect(developActionReason(state, 'p1', cardId, [])).toBe('Pending decision must be resolved first');
+    expect(sellActionReason(state, 'p1', cardId, [{industryInstanceId: '', merchantSpaceId: ''}]))
+      .toBe('Pending decision must be resolved first');
   });
 
   it('returns selection reasons before Build has enough form input', () => {
@@ -76,6 +121,25 @@ describe('client action validation reasons', () => {
 
     expect(networkActionReason(state, 'p1', firstHandCard(state, 'p1'), ['missing-link-line']))
       .toBe('Unknown link line: missing-link-line');
+  });
+
+  it('returns selection reasons before Develop has a tile selection', () => {
+    const state = testGame();
+
+    expect(developActionReason(state, 'p1', firstHandCard(state, 'p1'), [])).toBe('No developable tiles');
+  });
+
+  it('returns no reason for a legal Develop selection', () => {
+    const state = testGame();
+
+    expect(developActionReason(state, 'p1', firstHandCard(state, 'p1'), ['coal_mine'])).toBeUndefined();
+  });
+
+  it('returns shared rule reasons for illegal Develop selections', () => {
+    const state = testGame();
+
+    expect(developActionReason(state, 'p1', firstHandCard(state, 'p1'), ['pottery']))
+      .toBe('pottery level 1 cannot be developed');
   });
 
   it('asks for a sellable industry before Sell has a sale target', () => {

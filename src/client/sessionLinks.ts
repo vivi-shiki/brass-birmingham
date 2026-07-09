@@ -14,6 +14,10 @@ function nonEmpty(value: string | null): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function clean(value: string): string {
+  return value.trim();
+}
+
 function decodeHashComponent(value: string): string | undefined {
   try {
     return decodeURIComponent(value);
@@ -22,16 +26,27 @@ function decodeHashComponent(value: string): string | undefined {
   }
 }
 
+function hasValidPercentEncoding(value: string): boolean {
+  try {
+    decodeURIComponent(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function gameHash(gameId: string): string {
-  return `#${encodeURIComponent(gameId)}`;
+  return `#${encodeURIComponent(clean(gameId))}`;
 }
 
 export function playerSessionHash(gameId: string, session: LinkPlayerSession): string {
-  const params = new URLSearchParams({
-    gameId,
-    playerId: session.playerId,
-    sessionToken: session.token,
-  });
+  const params = new URLSearchParams({gameId: clean(gameId)});
+  const playerId = nonEmpty(session.playerId);
+  const sessionToken = nonEmpty(session.token);
+  if (playerId && sessionToken) {
+    params.set('playerId', playerId);
+    params.set('sessionToken', sessionToken);
+  }
   return `#${params.toString()}`;
 }
 
@@ -40,11 +55,12 @@ export function playerSessionUrl(baseUrl: string, gameId: string, session: LinkP
 }
 
 export function hashForGameState(gameId: string, currentHash: string): string {
+  const normalizedGameId = clean(gameId);
   const current = parseGameJoinHash(currentHash);
-  if (current?.gameId === gameId && current.playerId && current.sessionToken) {
-    return currentHash.startsWith('#') ? currentHash : `#${currentHash}`;
+  if (current?.gameId === normalizedGameId && current.playerId && current.sessionToken) {
+    return playerSessionHash(normalizedGameId, {playerId: current.playerId, token: current.sessionToken});
   }
-  return gameHash(gameId);
+  return gameHash(normalizedGameId);
 }
 
 export function parseGameJoinHash(hash: string): GameJoinHash | undefined {
@@ -55,6 +71,10 @@ export function parseGameJoinHash(hash: string): GameJoinHash | undefined {
 
   const query = raw.startsWith('?') ? raw.slice(1) : raw;
   if (query.includes('=')) {
+    if (!hasValidPercentEncoding(query)) {
+      return undefined;
+    }
+
     const params = new URLSearchParams(query);
     const gameId = nonEmpty(params.get('gameId'));
     if (!gameId) {

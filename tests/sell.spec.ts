@@ -4,13 +4,14 @@ import {
   canSellToMerchant,
   canSellToMerchantSpace,
   endCurrentEra,
+  executeSell,
   validateCommand,
   validateResolveMerchantDevelop,
   validateSell,
 } from '../src/common/gameEngine';
 import {retreatIncomeLevels} from '../src/common/income';
 import {staticConfig} from '../src/common/staticData';
-import type {SellCommand} from '../src/common/types';
+import type {ResourceSource, SellCommand} from '../src/common/types';
 import {addIndustry, addLink, setHand, setMerchantSpace, testGame} from './helpers';
 
 function prepareCottonSale() {
@@ -27,6 +28,14 @@ function prepareCottonSale() {
   addLink(state, 'link-1', 'p1', 'birmingham-oxford');
   setMerchantSpace(state, 'oxford-0', 'oxford-cotton-0', true);
   return {state, cotton};
+}
+
+function prepareEraEnd(state: ReturnType<typeof testGame>): void {
+  for (const player of Object.values(state.players)) {
+    player.discardCardIds.push(...player.handCardIds);
+    player.handCardIds = [];
+  }
+  state.cardZones.drawDeck = [];
 }
 
 describe('sell action', () => {
@@ -86,6 +95,36 @@ describe('sell action', () => {
     expect(state.eventLog).toHaveLength(eventCountBefore);
   });
 
+  it('rejects malformed explicit sell beer sources before mutating the game', () => {
+    const {state, cotton} = prepareCottonSale();
+    const handBefore = [...state.players.p1.handCardIds];
+    const discardBefore = [...state.players.p1.discardCardIds];
+    const eventCountBefore = state.eventLog.length;
+    const incomeBefore = state.players.p1.incomeTrackPosition;
+    const command: SellCommand = {
+      type: 'sell',
+      playerId: 'p1',
+      cardId: 'p2-location-birmingham-1',
+      sales: [{
+        industryInstanceId: cotton.id,
+        merchantSpaceId: 'oxford-0',
+        beerSources: [undefined] as unknown as ResourceSource[],
+      }],
+    };
+
+    const result = validateSell(state, command);
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain('Selected beer source is malformed');
+    expect(() => applyCommand(state, command)).toThrow('Selected beer source is malformed');
+
+    expect(state.board.industryInstances[cotton.id].flipped).toBe(false);
+    expect(state.board.merchantSpaces['oxford-0'].beerPresent).toBe(true);
+    expect(state.players.p1.incomeTrackPosition).toBe(incomeBefore);
+    expect(state.players.p1.handCardIds).toEqual(handBefore);
+    expect(state.players.p1.discardCardIds).toEqual(discardBefore);
+    expect(state.eventLog).toHaveLength(eventCountBefore);
+  });
+
   it('defers sold industry victory points until era scoring', () => {
     const {state, cotton} = prepareCottonSale();
     const industryVp = staticConfig.industryTileSpecs[cotton.specId].flip.victoryPoints;
@@ -101,6 +140,7 @@ describe('sell action', () => {
     expect(state.players.p1.victoryPoints).toBe(0);
     expect(state.eventLog.some((event) => event.type === 'industry_scored')).toBe(false);
 
+    prepareEraEnd(state);
     const score = endCurrentEra(state);
 
     expect(score.industryVictoryPointsByPlayer.p1).toBe(industryVp);
@@ -215,6 +255,77 @@ describe('sell action', () => {
       reason: 'sell',
     });
     expect(state.eventLog.some((event) => event.type === 'merchant_bonus_claimed')).toBe(false);
+  });
+
+  it('uses only connected opponent brewery beer for Sell', () => {
+    const {state, cotton} = prepareCottonSale();
+    state.board.merchantSpaces['oxford-0'].beerPresent = false;
+    addLink(state, 'link-2', 'p1', 'birmingham-walsall');
+    const connectedOpponentBrewery = addIndustry(state, {
+      id: 'opponent-brewery-connected',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'walsall',
+      slotId: 'walsall-1',
+      remainingResource: 1,
+    });
+    const disconnectedOpponentBrewery = addIndustry(state, {
+      id: 'opponent-brewery-disconnected',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-1-2',
+      locationId: 'stone',
+      slotId: 'stone-0',
+      remainingResource: 1,
+    });
+    const disconnectedBeerSource = {
+      kind: 'industry_tile' as const,
+      industryInstanceId: disconnectedOpponentBrewery.id,
+      resourceType: 'beer' as const,
+    };
+    const connectedBeerSource = {
+      kind: 'industry_tile' as const,
+      industryInstanceId: connectedOpponentBrewery.id,
+      resourceType: 'beer' as const,
+    };
+
+    const disconnectedValidation = validateSell(state, {
+      type: 'sell',
+      playerId: 'p1',
+      cardId: 'p2-location-birmingham-1',
+      sales: [{
+        industryInstanceId: cotton.id,
+        merchantSpaceId: 'oxford-0',
+        beerSources: [disconnectedBeerSource],
+      }],
+    });
+
+    expect(disconnectedValidation.ok).toBe(false);
+    expect(disconnectedValidation.errors).toContain('Selected beer source is not available');
+
+    applyCommand(state, {
+      type: 'sell',
+      playerId: 'p1',
+      cardId: 'p2-location-birmingham-1',
+      sales: [{
+        industryInstanceId: cotton.id,
+        merchantSpaceId: 'oxford-0',
+        beerSources: [connectedBeerSource],
+      }],
+    });
+
+    expect(state.board.industryInstances[cotton.id].flipped).toBe(true);
+    expect(state.board.industryInstances[connectedOpponentBrewery.id].remainingResource).toBe(0);
+    expect(state.board.industryInstances[connectedOpponentBrewery.id].flipped).toBe(true);
+    expect(state.board.industryInstances[disconnectedOpponentBrewery.id].remainingResource).toBe(1);
+    expect(state.board.industryInstances[disconnectedOpponentBrewery.id].flipped).toBe(false);
+    expect(state.eventLog).toContainEqual({
+      type: 'resource_consumed',
+      source: connectedBeerSource,
+      byPlayerId: 'p1',
+      reason: 'sell',
+    });
   });
 
   it('sells a zero-beer manufacturer without consuming merchant beer or claiming its bonus', () => {
@@ -515,7 +626,8 @@ describe('sell action', () => {
   it('claims a cash merchant bonus when using Warrington merchant beer', () => {
     const state = testGame();
     state.playerCount = 3;
-    setHand(state, 'p1', ['p2-location-birmingham-1']);
+    const cardId = 'p3-location-birmingham-1';
+    setHand(state, 'p1', [cardId]);
     const pottery = addIndustry(state, {
       id: 'pottery-1',
       ownerPlayerId: 'p1',
@@ -530,7 +642,7 @@ describe('sell action', () => {
     applyCommand(state, {
       type: 'sell',
       playerId: 'p1',
-      cardId: 'p2-location-birmingham-1',
+      cardId,
       sales: [{industryInstanceId: pottery.id, merchantSpaceId: 'warrington-0'}],
     });
 
@@ -544,6 +656,41 @@ describe('sell action', () => {
       merchantSpaceId: 'warrington-0',
       bonus: {type: 'cash', cash: 5},
     });
+  });
+
+  it('does not count a cash merchant bonus as money spent for turn order', () => {
+    const state = testGame();
+    state.playerCount = 3;
+    const cardId = 'p3-location-birmingham-1';
+    setHand(state, 'p1', [cardId]);
+    setHand(state, 'p2', ['p3-location-cannock-1']);
+    const pottery = addIndustry(state, {
+      id: 'pottery-1',
+      ownerPlayerId: 'p1',
+      industryType: 'pottery',
+      specId: 'pottery-1-1',
+      locationId: 'stokeOnTrent',
+      slotId: 'stokeOnTrent-1',
+    });
+    addLink(state, 'link-1', 'p1', 'stokeOnTrent-warrington');
+    setMerchantSpace(state, 'warrington-0', 'warrington-pottery-0', true);
+
+    applyCommand(state, {
+      type: 'sell',
+      playerId: 'p1',
+      cardId,
+      sales: [{industryInstanceId: pottery.id, merchantSpaceId: 'warrington-0'}],
+    });
+
+    expect(state.players.p1.cash).toBe(22);
+    expect(state.players.p1.spentThisRound).toBe(0);
+
+    applyCommand(state, {type: 'pass', playerId: 'p2', cardId: state.players.p2.handCardIds[0]});
+
+    expect(state.roundNumber).toBe(2);
+    expect(state.turnOrder).toEqual(['p1', 'p2']);
+    expect(state.players.p1.spentThisRound).toBe(0);
+    expect(state.players.p2.spentThisRound).toBe(0);
   });
 
   it('rejects inactive high-player-count merchant spaces even if stale state contains a tile', () => {
@@ -576,7 +723,8 @@ describe('sell action', () => {
   it('claims a victory point merchant bonus when using Nottingham merchant beer', () => {
     const state = testGame();
     state.playerCount = 4;
-    setHand(state, 'p1', ['p2-location-birmingham-1']);
+    const cardId = 'p4-location-birmingham-1';
+    setHand(state, 'p1', [cardId]);
     const cotton = addIndustry(state, {
       id: 'cotton-1',
       ownerPlayerId: 'p1',
@@ -591,7 +739,7 @@ describe('sell action', () => {
     applyCommand(state, {
       type: 'sell',
       playerId: 'p1',
-      cardId: 'p2-location-birmingham-1',
+      cardId,
       sales: [{industryInstanceId: cotton.id, merchantSpaceId: 'nottingham-0'}],
     });
 
@@ -803,6 +951,33 @@ describe('sell action', () => {
     expect(result.ok).toBe(false);
     expect(result.errors).toContain('Merchant develop must remove 1 tile');
     expect(state.pendingDecision?.type).toBe('merchant_develop');
+  });
+
+  it('rejects an invalid second merchant develop selection before mutating the game', () => {
+    const state = testGame();
+    state.pendingDecision = {
+      type: 'merchant_develop',
+      playerId: 'p1',
+      count: 2,
+      merchantSpaceId: 'gloucester-0',
+      merchantSpaceIds: ['gloucester-0', 'gloucester-1'],
+    };
+    state.players.p1.industryTileStacks.coal_mine.availableSpecIdsInOrder = ['coal_mine-1-1'];
+    const stackBefore = structuredClone(state.players.p1.industryTileStacks.coal_mine);
+    const pendingBefore = structuredClone(state.pendingDecision);
+    const eventLogBefore = structuredClone(state.eventLog);
+    const turnBefore = state.currentTurnIndex;
+
+    expect(() => applyCommand(state, {
+      type: 'resolve_merchant_develop',
+      playerId: 'p1',
+      industryTypes: ['coal_mine', 'coal_mine'],
+    })).toThrow('No coal_mine tile available to develop');
+
+    expect(state.pendingDecision).toEqual(pendingBefore);
+    expect(state.currentTurnIndex).toBe(turnBefore);
+    expect(state.players.p1.industryTileStacks.coal_mine).toEqual(stackBefore);
+    expect(state.eventLog).toEqual(eventLogBefore);
   });
 
   it('allows resolving a Gloucester merchant develop bonus with no tiles when no developable stack heads remain', () => {
@@ -1217,6 +1392,53 @@ describe('sell action', () => {
     expect(state.board.merchantSpaces['oxford-0'].beerPresent).toBe(false);
     expect(state.players.p1.handCardIds).not.toContain('p2-location-birmingham-1');
     expect(state.eventLog.some((event) => event.type === 'industry_sold')).toBe(true);
+  });
+
+  it('does not sell the first step before later sale beer sources are rechecked during execution', () => {
+    const {state, cotton} = prepareCottonSale();
+    const manufacturer = addIndustry(state, {
+      id: 'manufacturer-1',
+      ownerPlayerId: 'p1',
+      industryType: 'manufacturer',
+      specId: 'manufacturer-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-1',
+    });
+    setMerchantSpace(state, 'oxford-1', 'oxford-manufacturer-0', true);
+    const handBefore = [...state.players.p1.handCardIds];
+    const discardBefore = [...state.players.p1.discardCardIds];
+    const eventLogBefore = structuredClone(state.eventLog);
+    const incomeBefore = state.players.p1.incomeTrackPosition;
+    let salesReads = 0;
+    const validSales = [
+      {industryInstanceId: cotton.id, merchantSpaceId: 'oxford-0'},
+      {industryInstanceId: manufacturer.id, merchantSpaceId: 'oxford-1'},
+    ];
+    const staleSales = [
+      {industryInstanceId: cotton.id, merchantSpaceId: 'oxford-0'},
+      {industryInstanceId: manufacturer.id, merchantSpaceId: 'oxford-1', beerSources: []},
+    ];
+    const command = {
+      type: 'sell' as const,
+      playerId: 'p1',
+      cardId: 'p2-location-birmingham-1',
+      get sales() {
+        salesReads++;
+        return salesReads === 1 ? validSales : staleSales;
+      },
+    } as SellCommand;
+
+    expect(() => executeSell(state, command)).toThrow('Beer source count does not match the industry requirement');
+
+    expect(salesReads).toBe(2);
+    expect(state.board.industryInstances[cotton.id].flipped).toBe(false);
+    expect(state.board.industryInstances[manufacturer.id].flipped).toBe(false);
+    expect(state.board.merchantSpaces['oxford-0'].beerPresent).toBe(true);
+    expect(state.board.merchantSpaces['oxford-1'].beerPresent).toBe(true);
+    expect(state.players.p1.incomeTrackPosition).toBe(incomeBefore);
+    expect(state.players.p1.handCardIds).toEqual(handBefore);
+    expect(state.players.p1.discardCardIds).toEqual(discardBefore);
+    expect(state.eventLog).toEqual(eventLogBefore);
   });
 
   it('rejects selling the same industry twice in one action before consuming beer', () => {

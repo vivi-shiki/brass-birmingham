@@ -6,6 +6,7 @@ import {
   legalResourceSourcesForSelect,
   type SaleBeerSourceSelection,
 } from '../src/common/gameEngine';
+import {staticConfig} from '../src/common/staticData';
 import {decodeSource, normalizeResourceSelection, optionalSource, optionalSources, resourceOptionsFromSources} from '../src/client/resourceSources';
 import {addIndustry, addLink, setMerchantSpace, testGame} from './helpers';
 
@@ -27,9 +28,11 @@ describe('client resource source options', () => {
       0,
     );
     const current = marketOption(options, 'coal').value;
+    const currentWithExtraFields = JSON.stringify({kind: 'market', market: 'coal', price: 1, sessionToken: 'secret-token'});
     const stale = JSON.stringify({kind: 'market', market: 'coal', price: 99});
 
     expect(normalizeResourceSelection(current, options)).toBe(current);
+    expect(normalizeResourceSelection(currentWithExtraFields, options)).toBe(current);
     expect(normalizeResourceSelection(stale, options)).toBe('');
     expect(normalizeResourceSelection('', options)).toBe('');
   });
@@ -62,12 +65,83 @@ describe('client resource source options', () => {
 
   it('treats malformed encoded sources as empty optional selections', () => {
     const valid = JSON.stringify({kind: 'market', market: 'coal', price: 1});
+    const invalidShape = JSON.stringify({kind: 'market', market: 'gold', price: 1});
 
     expect(optionalSource('not-json')).toBeUndefined();
+    expect(optionalSource(invalidShape)).toBeUndefined();
     expect(optionalSources(['not-json'], 1)).toBeUndefined();
+    expect(optionalSources([invalidShape], 1)).toBeUndefined();
+    expect(optionalSources([], 1)).toBeUndefined();
+    expect(optionalSources([valid], 2)).toBeUndefined();
     expect(optionalSources([valid, 'not-json'], 2)).toBeUndefined();
     expect(optionalSources([valid, ''], 2)).toBeUndefined();
     expect(optionalSources([valid, 'not-json'], 1)).toEqual([{kind: 'market', market: 'coal', price: 1}]);
+  });
+
+  it('rejects decoded resource sources that do not match the command payload shape', () => {
+    const invalidSources = [
+      {kind: 'industry_tile', industryInstanceId: '   ', resourceType: 'coal'},
+      {kind: 'industry_tile', industryInstanceId: 'coal-1', resourceType: 'money'},
+      {kind: 'market', market: 'coal', price: -1},
+      {kind: 'market', market: 'coal', price: 1.5},
+      {kind: 'market', market: 'coal', price: 99},
+      {kind: 'market', market: 'gold', price: 1},
+      {kind: 'merchant_beer', merchantSpaceId: 'oxford-0', merchantTileInstanceId: ''},
+      {kind: 'merchant_beer', merchantSpaceId: 1, merchantTileInstanceId: 'oxford-cotton-0'},
+      {kind: 'future_source', id: 'secret'},
+    ];
+
+    for (const source of invalidSources) {
+      const encoded = JSON.stringify(source);
+      expect(() => decodeSource(encoded)).toThrow('Invalid resource source');
+      expect(optionalSource(encoded)).toBeUndefined();
+    }
+  });
+
+  it('accepts decoded market sources at configured market prices', () => {
+    const validSources = [
+      {kind: 'market' as const, market: 'coal' as const, price: staticConfig.markets.coal.priceSlotsCheapestToMostExpensive[0]},
+      {kind: 'market' as const, market: 'coal' as const, price: staticConfig.markets.coal.fallbackPriceWhenEmpty},
+      {kind: 'market' as const, market: 'iron' as const, price: staticConfig.markets.iron.priceSlotsCheapestToMostExpensive[0]},
+      {kind: 'market' as const, market: 'iron' as const, price: staticConfig.markets.iron.fallbackPriceWhenEmpty},
+    ];
+
+    for (const source of validSources) {
+      expect(decodeSource(JSON.stringify(source))).toEqual(source);
+    }
+  });
+
+  it('normalizes decoded resource source identifiers before command submission', () => {
+    expect(decodeSource(JSON.stringify({
+      kind: 'industry_tile',
+      industryInstanceId: ' iron-1 ',
+      resourceType: 'iron',
+      sessionToken: 'secret-token',
+    }))).toEqual({
+      kind: 'industry_tile',
+      industryInstanceId: 'iron-1',
+      resourceType: 'iron',
+    });
+    expect(optionalSource(JSON.stringify({
+      kind: 'merchant_beer',
+      merchantSpaceId: ' oxford-0 ',
+      merchantTileInstanceId: ' oxford-cotton-0 ',
+      sessionToken: 'secret-token',
+    }))).toEqual({
+      kind: 'merchant_beer',
+      merchantSpaceId: 'oxford-0',
+      merchantTileInstanceId: 'oxford-cotton-0',
+    });
+    expect(decodeSource(JSON.stringify({
+      kind: 'market',
+      market: 'coal',
+      price: 1,
+      sessionToken: 'secret-token',
+    }))).toEqual({
+      kind: 'market',
+      market: 'coal',
+      price: 1,
+    });
   });
 
   it('removes an industry resource option once other selects use all remaining cubes', () => {
@@ -134,6 +208,35 @@ describe('client resource source options', () => {
     );
 
     expect(secondOptions.some((option) => option.value === industryOption.value)).toBe(true);
+  });
+
+  it('deduplicates multi-cube industry resource options within one select', () => {
+    const state = testGame();
+    const iron = addIndustry(state, {
+      id: 'iron-1',
+      ownerPlayerId: 'p2',
+      industryType: 'iron_works',
+      specId: 'iron_works-2-1',
+      locationId: 'dudley',
+      slotId: 'dudley-1',
+      remainingResource: 2,
+    });
+    const expectedSource = {
+      kind: 'industry_tile' as const,
+      industryInstanceId: iron.id,
+      resourceType: 'iron' as const,
+    };
+
+    const options = resourceOptionsFromSources(
+      state,
+      legalResourceSourcesForSelect(state, 'iron', 'birmingham', [], 0),
+      ['', ''],
+      0,
+    );
+
+    expect(options.map((option) => decodeSource(option.value)).filter((source) =>
+      source.kind === 'industry_tile' && source.industryInstanceId === iron.id
+    )).toEqual([expectedSource]);
   });
 
   it('keeps iron source options independent of the selected anchor location', () => {
@@ -411,10 +514,41 @@ describe('client resource source options', () => {
     expect(sources).not.toContainEqual({kind: 'industry_tile', industryInstanceId: disconnectedOpponentBrewery.id, resourceType: 'beer'});
   });
 
+  it('does not offer Network beer options outside valid Rail double-link selections', () => {
+    const state = testGame();
+    const brewery = addIndustry(state, {
+      id: 'own-brewery',
+      ownerPlayerId: 'p1',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'stone',
+      slotId: 'stone-0',
+      remainingResource: 1,
+    });
+
+    expect(legalBeerSourcesForNetwork(state, 'p1', ['birmingham-walsall', 'walsall-wolverhampton'])).toEqual([]);
+
+    state.era = 'rail';
+    expect(legalBeerSourcesForNetwork(state, 'p1', ['birmingham-walsall'])).toEqual([]);
+    expect(legalBeerSourcesForNetwork(state, 'p1', ['birmingham-walsall', 'missing-link-line'])).toEqual([]);
+    expect(legalBeerSourcesForNetwork(state, 'p1', ['burtonOnTrent-walsall', 'birmingham-walsall'])).toEqual([]);
+    expect(legalBeerSourcesForNetwork(state, 'p1', ['birmingham-walsall', 'walsall-wolverhampton'])).toEqual([
+      {kind: 'industry_tile', industryInstanceId: brewery.id, resourceType: 'beer'},
+    ]);
+  });
+
   it('limits Sell beer options to the selected merchant and legal brewery connections', () => {
     const state = testGame();
     state.era = 'rail';
     setMerchantSpace(state, 'oxford-0', 'oxford-cotton-0', true);
+    const cotton = addIndustry(state, {
+      id: 'cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-2-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+    });
     const ownBrewery = addIndustry(state, {
       id: 'own-brewery',
       ownerPlayerId: 'p1',
@@ -442,9 +576,11 @@ describe('client resource source options', () => {
       slotId: 'leek-0',
       remainingResource: 1,
     });
+    addLink(state, 'merchant-link', 'p1', 'birmingham-oxford', 'rail');
     addLink(state, 'connected-link', 'p2', 'birmingham-nuneaton', 'rail');
     const selections: SaleBeerSourceSelection[] = [{
       playerId: 'p1',
+      industryInstanceId: cotton.id,
       saleLocationId: 'birmingham',
       merchantSpaceId: 'oxford-0',
       selectedSources: [undefined, undefined],
@@ -466,5 +602,53 @@ describe('client resource source options', () => {
     expect(sources).toContainEqual({kind: 'industry_tile', industryInstanceId: ownBrewery.id, resourceType: 'beer'});
     expect(sources).toContainEqual({kind: 'industry_tile', industryInstanceId: connectedOpponentBrewery.id, resourceType: 'beer'});
     expect(sources).not.toContainEqual({kind: 'industry_tile', industryInstanceId: disconnectedOpponentBrewery.id, resourceType: 'beer'});
+  });
+
+  it('hides Sell beer options when the selected industry cannot sell to that merchant', () => {
+    const state = testGame();
+    setMerchantSpace(state, 'oxford-0', 'oxford-cotton-0', true);
+    const cotton = addIndustry(state, {
+      id: 'cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+    });
+    const brewery = addIndustry(state, {
+      id: 'own-brewery',
+      ownerPlayerId: 'p1',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'coalbrookdale',
+      slotId: 'coalbrookdale-0',
+      remainingResource: 1,
+    });
+    addLink(state, 'merchant-link', 'p1', 'birmingham-oxford');
+    const validSelection: SaleBeerSourceSelection = {
+      playerId: 'p1',
+      industryInstanceId: cotton.id,
+      saleLocationId: 'birmingham',
+      merchantSpaceId: 'oxford-0',
+      selectedSources: [undefined],
+    };
+
+    expect(legalBeerSourcesForSaleSelect(state, [validSelection], 0, 0)).toContainEqual({
+      kind: 'industry_tile',
+      industryInstanceId: brewery.id,
+      resourceType: 'beer',
+    });
+
+    setMerchantSpace(state, 'oxford-0', 'oxford-manufacturer-0', true);
+    expect(legalBeerSourcesForSaleSelect(state, [validSelection], 0, 0)).toEqual([]);
+
+    setMerchantSpace(state, 'oxford-0', 'oxford-cotton-0', true);
+    state.board.linkLines['birmingham-oxford'] = {};
+    expect(legalBeerSourcesForSaleSelect(state, [validSelection], 0, 0)).toEqual([]);
+
+    expect(legalBeerSourcesForSaleSelect(state, [{
+      ...validSelection,
+      saleLocationId: 'worcester',
+    }], 0, 0)).toEqual([]);
   });
 });

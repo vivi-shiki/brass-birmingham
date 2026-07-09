@@ -1,7 +1,7 @@
 import {validateLoan, validatePass, validateScout} from '../common/gameEngine';
-import {getIncomeLevel} from '../common/income';
 import {staticConfig} from '../common/staticData';
 import type {GameState} from '../common/types';
+import {validationOk} from './validation';
 
 function hasWildCard(game: GameState, cardId: string): boolean {
   const type = staticConfig.cardSpecs[cardId]?.type;
@@ -13,16 +13,19 @@ export function canLoan(game: GameState, playerId: string): boolean {
   if (!player) {
     return false;
   }
-  const currentLevel = getIncomeLevel(player.incomeTrackPosition);
-  return currentLevel - staticConfig.rules.loanIncomeLevelPenalty >= staticConfig.incomeTrack.minIncomeLevel;
+  const cardId = player.handCardIds[0];
+  if (!cardId) {
+    return false;
+  }
+  return validationOk(() => validateLoan(game, {type: 'loan', playerId, cardId}));
 }
 
 export function canSubmitPass(game: GameState, playerId: string, cardId: string): boolean {
-  return validatePass(game, {type: 'pass', playerId, cardId}).ok;
+  return validationOk(() => validatePass(game, {type: 'pass', playerId, cardId}));
 }
 
 export function canSubmitLoan(game: GameState, playerId: string, cardId: string): boolean {
-  return validateLoan(game, {type: 'loan', playerId, cardId}).ok;
+  return validationOk(() => validateLoan(game, {type: 'loan', playerId, cardId}));
 }
 
 export function canScout(game: GameState, playerId: string): boolean {
@@ -38,11 +41,11 @@ export function canScout(game: GameState, playerId: string): boolean {
   ) {
     return false;
   }
-  return validateScout(game, {type: 'scout', playerId, cardIds: player.handCardIds.slice(0, 3)}).ok;
+  return validationOk(() => validateScout(game, {type: 'scout', playerId, cardIds: player.handCardIds.slice(0, 3)}));
 }
 
 export function canSubmitScout(game: GameState, playerId: string, cardIds: string[]): boolean {
-  return validateScout(game, {type: 'scout', playerId, cardIds}).ok;
+  return validationOk(() => validateScout(game, {type: 'scout', playerId, cardIds}));
 }
 
 export function scoutCardOptionsForSelect(

@@ -2,6 +2,7 @@ import {validateBuild} from '../common/gameEngine';
 import {getActiveIndustries, hasAnyPlayerNetwork, isActiveIndustryInstance, isInPlayerNetwork} from '../common/selectors';
 import {staticConfig} from '../common/staticData';
 import type {CitySlotSpec, GameState, IndustryType, LocationSpec, ResourceSource} from '../common/types';
+import {validationOk} from './validation';
 
 const buildIndustryTypes: IndustryType[] = ['cotton_mill', 'coal_mine', 'iron_works', 'manufacturer', 'pottery', 'brewery'];
 
@@ -35,7 +36,7 @@ function canUseBuildSlotForPlayer(
   }
 
   const player = game.players[playerId];
-  const specId = player?.industryTileStacks[industryType].availableSpecIdsInOrder[0];
+  const specId = player?.industryTileStacks[industryType]?.availableSpecIdsInOrder[0];
   const spec = specId ? staticConfig.industryTileSpecs[specId] : undefined;
   if (!player || !spec || !spec.buildableEras.includes(game.era)) {
     return false;
@@ -130,7 +131,7 @@ export function buildIndustryOptionsForLocation(
   }
 
   return buildIndustryTypes.filter((industryType) => {
-    const specId = player.industryTileStacks[industryType].availableSpecIdsInOrder[0];
+    const specId = player.industryTileStacks[industryType]?.availableSpecIdsInOrder[0];
     const spec = specId ? staticConfig.industryTileSpecs[specId] : undefined;
     return Boolean(
       spec &&
@@ -181,7 +182,7 @@ export function canSubmitBuild(
   if (!locationId || !slotId || !industryType) {
     return false;
   }
-  return validateBuild(game, {
+  return validationOk(() => validateBuild(game, {
     type: 'build',
     playerId,
     cardId,
@@ -190,5 +191,5 @@ export function canSubmitBuild(
     industryType,
     coalSources,
     ironSources,
-  }).ok;
+  }));
 }

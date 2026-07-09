@@ -15,10 +15,12 @@ import {
   isActiveIndustryInstance,
   isActiveLinkInstance,
   isInPlayerNetwork,
+  isLinkLineActiveForPlayerCount,
   linkLineTouchesLocation,
 } from './selectors';
 import {staticConfig} from './staticData';
 import {SeededRandom, shuffle} from './random';
+import {INDUSTRY_TYPES} from './gameSetup';
 import type {
   BuildCommand,
   DevelopCommand,
@@ -68,6 +70,7 @@ interface BeerSelectionTracker {
 
 export interface SaleBeerSourceSelection {
   playerId: string;
+  industryInstanceId?: string;
   saleLocationId: string;
   merchantSpaceId: string;
   selectedSources: Array<ResourceSource | undefined>;
@@ -83,6 +86,10 @@ function ok(): ValidationResult {
 
 function fail(...errors: string[]): ValidationResult {
   return {ok: false, errors};
+}
+
+function isIndustryType(value: unknown): value is IndustryType {
+  return typeof value === 'string' && (INDUSTRY_TYPES as readonly string[]).includes(value);
 }
 
 function pushEvent(state: GameState, event: GameEvent): void {
@@ -107,6 +114,9 @@ function validateActingPlayer(state: GameState, playerId: string): ValidationRes
   if (state.status !== 'playing') {
     return fail('Game is not active');
   }
+  if (!state.players[playerId]) {
+    return fail(`Unknown player: ${playerId}`);
+  }
   if (state.pendingDecision) {
     return fail('Pending decision must be resolved first');
   }
@@ -116,21 +126,31 @@ function validateActingPlayer(state: GameState, playerId: string): ValidationRes
   return ok();
 }
 
-function requireCardInHand(state: GameState, playerId: string, cardId: string): ValidationResult {
+function requireCardInHand(state: GameState, playerId: string, cardId: unknown): ValidationResult {
   const player = getPlayerOrError(state, playerId);
+  if (!isNonEmptyString(cardId)) {
+    return fail('Command requires cardId as a non-empty string');
+  }
   if (!player.handCardIds.includes(cardId)) {
     return fail(`Player ${playerId} does not have card ${cardId}`);
   }
   return ok();
 }
 
-function requireKnownCardInHand(state: GameState, playerId: string, cardId: string): ValidationResult {
+function requireKnownCardInHand(state: GameState, playerId: string, cardId: unknown): ValidationResult {
   const inHand = requireCardInHand(state, playerId, cardId);
   if (!inHand.ok) {
     return inHand;
   }
+  if (!isNonEmptyString(cardId)) {
+    return fail('Command requires cardId as a non-empty string');
+  }
   if (!staticConfig.cardSpecs[cardId]) {
     return fail(`Unknown card: ${cardId}`);
+  }
+  const card = staticConfig.cardSpecs[cardId];
+  if ((card.type === 'location' || card.type === 'industry') && card.minPlayers !== state.playerCount) {
+    return fail(`Card ${cardId} is not available for ${state.playerCount} players`);
   }
   return ok();
 }
@@ -143,15 +163,27 @@ function getCard(cardId: string) {
   return card;
 }
 
+function returnWildCardToPool(pool: string[], cardId: string): void {
+  if (!pool.includes(cardId)) {
+    pool.push(cardId);
+  }
+}
+
 function discardCard(state: GameState, playerId: string, cardId: string): void {
   const player = getPlayerOrError(state, playerId);
   const card = getCard(cardId);
-  player.handCardIds = player.handCardIds.filter((id) => id !== cardId);
+  const handCardIds = [...player.handCardIds];
+  const cardIndex = handCardIds.indexOf(cardId);
+  if (cardIndex < 0) {
+    throw new Error(`Player ${playerId} does not have card ${cardId}`);
+  }
+  handCardIds.splice(cardIndex, 1);
+  player.handCardIds = handCardIds;
   if (card.type === 'wild_location') {
-    state.cardZones.wildLocationPool.push(cardId);
+    returnWildCardToPool(state.cardZones.wildLocationPool, cardId);
     pushEvent(state, {type: 'card_discarded', playerId, cardId, destination: 'wild_pool'});
   } else if (card.type === 'wild_industry') {
-    state.cardZones.wildIndustryPool.push(cardId);
+    returnWildCardToPool(state.cardZones.wildIndustryPool, cardId);
     pushEvent(state, {type: 'card_discarded', playerId, cardId, destination: 'wild_pool'});
   } else {
     player.discardCardIds.push(cardId);
@@ -212,13 +244,13 @@ function changeIncomePosition(state: GameState, playerId: string, to: number, re
 
 function currentTileSpec(state: GameState, playerId: string, industryType: IndustryType): IndustryTileSpec | undefined {
   const player = getPlayerOrError(state, playerId);
-  const specId = player.industryTileStacks[industryType].availableSpecIdsInOrder[0];
+  const specId = player.industryTileStacks[industryType]?.availableSpecIdsInOrder[0];
   return specId ? staticConfig.industryTileSpecs[specId] : undefined;
 }
 
 function removeCurrentTileFromStack(state: GameState, playerId: string, industryType: IndustryType): string {
   const player = getPlayerOrError(state, playerId);
-  const specId = player.industryTileStacks[industryType].availableSpecIdsInOrder.shift();
+  const specId = player.industryTileStacks[industryType]?.availableSpecIdsInOrder.shift();
   if (!specId) {
     throw new Error(`No ${industryType} tile left for ${playerId}`);
   }
@@ -228,6 +260,9 @@ function removeCurrentTileFromStack(state: GameState, playerId: string, industry
 function removeBuiltIndustryReference(state: GameState, industry: IndustryInstance): void {
   const player = getPlayerOrError(state, industry.ownerPlayerId);
   const stack = player.industryTileStacks[industry.industryType];
+  if (!stack) {
+    return;
+  }
   stack.builtInstanceIds = stack.builtInstanceIds.filter((id) => id !== industry.id);
 }
 
@@ -392,6 +427,84 @@ function sourceKey(source: ResourceSource): string {
   return `market:${source.market}:${source.price}`;
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value > 0;
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every(isNonEmptyString)
+    ? value
+    : undefined;
+}
+
+function isResourceTypeValue(value: unknown): value is 'coal' | 'iron' | 'beer' {
+  return value === 'coal' || value === 'iron' || value === 'beer';
+}
+
+function isMarketResourceValue(value: unknown): value is 'coal' | 'iron' {
+  return value === 'coal' || value === 'iron';
+}
+
+function isMarketPriceValue(marketName: 'coal' | 'iron', price: number): boolean {
+  const spec = staticConfig.markets[marketName];
+  return spec.priceSlotsCheapestToMostExpensive.includes(price) || spec.fallbackPriceWhenEmpty === price;
+}
+
+function isResourceSourceValue(source: unknown): source is ResourceSource {
+  if (!source || typeof source !== 'object') {
+    return false;
+  }
+  const value = source as Record<string, unknown>;
+  if (value.kind === 'industry_tile') {
+    return isNonEmptyString(value.industryInstanceId) && isResourceTypeValue(value.resourceType);
+  }
+  if (value.kind === 'market') {
+    return isMarketResourceValue(value.market) &&
+      typeof value.price === 'number' &&
+      Number.isFinite(value.price) &&
+      Number.isInteger(value.price) &&
+      value.price >= 0 &&
+      isMarketPriceValue(value.market, value.price);
+  }
+  if (value.kind === 'merchant_beer') {
+    return isNonEmptyString(value.merchantSpaceId) && isNonEmptyString(value.merchantTileInstanceId);
+  }
+  return false;
+}
+
+function resourceSourceArrayValue(value: unknown): ResourceSource[] | undefined {
+  return Array.isArray(value) ? value as ResourceSource[] : undefined;
+}
+
+function snapshotResourceSourceValue(source: unknown): ResourceSource {
+  return source && typeof source === 'object'
+    ? {...source as Record<string, unknown>} as ResourceSource
+    : source as ResourceSource;
+}
+
+function snapshotResourceSourceArray(value: unknown, error: string): ResourceSource[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const sources = resourceSourceArrayValue(value);
+  if (!sources) {
+    throw new Error(error);
+  }
+  return sources.map(snapshotResourceSourceValue);
+}
+
+function isSellStepValue(value: unknown): value is SellStep {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  const step = value as Record<string, unknown>;
+  return isNonEmptyString(step.industryInstanceId) && isNonEmptyString(step.merchantSpaceId);
+}
+
 function createResourceSelectionTracker(): ResourceSelectionTracker {
   return {
     usedSources: new Map(),
@@ -489,7 +602,10 @@ function legalResourceCandidates(resource: 'coal' | 'iron', candidates: Resource
   return industryCandidates;
 }
 
-function validateResourceSourceType(resource: 'coal' | 'iron', source: ResourceSource): string | undefined {
+function validateResourceSourceType(resource: 'coal' | 'iron', source: unknown): string | undefined {
+  if (!isResourceSourceValue(source)) {
+    return `Selected ${resource} source is malformed`;
+  }
   if (source.kind === 'merchant_beer') {
     return `${resource} cannot come from merchant beer`;
   }
@@ -527,19 +643,25 @@ function selectResourceSources(
       resource,
       availableResourceCandidates(state, resource, anchorLocationId, extraLinkLineIds, tracker),
     );
-    const requestedSource = requestedSources?.[index];
-    const typeError = requestedSource ? validateResourceSourceType(resource, requestedSource) : undefined;
-    if (typeError) {
-      return {ok: false, errors: [typeError], sources: [], marketCash: 0};
+    const hasRequestedSource = requestedSources !== undefined;
+    const requestedSource = hasRequestedSource ? requestedSources[index] : undefined;
+    if (hasRequestedSource) {
+      if (requestedSource === undefined) {
+        return {ok: false, errors: [`Selected ${resource} source is missing`], sources: [], marketCash: 0};
+      }
+      const typeError = validateResourceSourceType(resource, requestedSource);
+      if (typeError) {
+        return {ok: false, errors: [typeError], sources: [], marketCash: 0};
+      }
     }
 
-    const candidate = requestedSource
-      ? candidates.find((option) => sourceKey(option.source) === sourceKey(requestedSource))
+    const candidate = hasRequestedSource
+      ? candidates.find((option) => sourceKey(option.source) === sourceKey(requestedSource as ResourceSource))
       : candidates[0];
     if (!candidate) {
       return {
         ok: false,
-        errors: [requestedSource ? `Selected ${resource} source is not available` : `No ${resource} source available`],
+        errors: [hasRequestedSource ? `Selected ${resource} source is not available` : `No ${resource} source available`],
         sources: [],
         marketCash: 0,
       };
@@ -608,10 +730,14 @@ export function legalResourceSourcesForSelect(
   ).map((candidate) => candidate.source);
 }
 
-function networkCoalContext(linkLineIds: string[], index: number): {anchorLocationId: ResourceAnchor; extraLinkLineIds: string[]} | undefined {
+function networkCoalContext(
+  state: GameState,
+  linkLineIds: string[],
+  index: number,
+): {anchorLocationId: ResourceAnchor; extraLinkLineIds: string[]} | undefined {
   const linkLineId = linkLineIds[index];
   const line = linkLineId ? staticConfig.linkLines[linkLineId] : undefined;
-  if (!line) {
+  if (!line || !isLinkLineActiveForPlayerCount(state, line)) {
     return undefined;
   }
   return {
@@ -628,13 +754,13 @@ export function legalCoalSourcesForNetworkSelect(
 ): ResourceSource[] {
   const tracker = createResourceSelectionTracker();
   for (let selectedIndex = 0; selectedIndex < index; selectedIndex++) {
-    const context = networkCoalContext(linkLineIds, selectedIndex);
+    const context = networkCoalContext(state, linkLineIds, selectedIndex);
     if (context) {
       trackSelectedResourceSource(state, 'coal', context.anchorLocationId, selectedSources[selectedIndex], context.extraLinkLineIds, tracker);
     }
   }
 
-  const context = networkCoalContext(linkLineIds, index);
+  const context = networkCoalContext(state, linkLineIds, index);
   if (!context) {
     return [];
   }
@@ -668,6 +794,11 @@ function getMerchantSpecForSpace(merchantSpaceId: string): MerchantSpec | undefi
   return Object.values(staticConfig.locations).find((location): location is MerchantSpec =>
     location.kind === 'merchant' && location.spaces.some((space) => space.id === merchantSpaceId),
   );
+}
+
+function merchantSpaceHasDevelopBonus(state: GameState, merchantSpaceId: string): boolean {
+  const merchant = getMerchantSpecForSpace(merchantSpaceId);
+  return Boolean(state.board.merchantSpaces[merchantSpaceId]) && merchant?.bonus.type === 'develop';
 }
 
 function getMerchantTileSpecId(merchantTileInstanceId: string): string {
@@ -775,7 +906,7 @@ function getConnectedLocationsWithExtraLinks(state: GameState, startLocationId: 
 
     for (const linkLineId of extraLinkLineIds) {
       const line = staticConfig.linkLines[linkLineId];
-      if (!line) {
+      if (!line || !isLinkLineActiveForPlayerCount(state, line)) {
         continue;
       }
       for (const neighbor of getNeighborLocations(line, locationId)) {
@@ -795,7 +926,7 @@ function isInPlayerNetworkWithPendingLinks(state: GameState, playerId: string, l
   }
   return pendingLinkLineIds.some((linkLineId) => {
     const line = staticConfig.linkLines[linkLineId];
-    return line ? linkLineTouchesLocation(line, locationId) : false;
+    return line && isLinkLineActiveForPlayerCount(state, line) ? linkLineTouchesLocation(line, locationId) : false;
   });
 }
 
@@ -803,7 +934,9 @@ function hasCoalMarketAccessWithExtraLinks(state: GameState, locationId: Resourc
   const component = getConnectedLocationsWithExtraLinks(state, locationId, extraLinkLineIds);
   return [...component].some((id) => {
     const location = staticConfig.locations[id];
-    return location?.kind === 'merchant' && location.providesCoalMarketConnection;
+    return location?.kind === 'merchant' &&
+      location.minPlayers <= state.playerCount &&
+      location.providesCoalMarketConnection;
   });
 }
 
@@ -847,7 +980,7 @@ function findCoalCandidatesWithExtraLinks(state: GameState, anchorLocationId: Re
 
     for (const linkLineId of extraLinkLineIds) {
       const line = staticConfig.linkLines[linkLineId];
-      if (!line) {
+      if (!line || !isLinkLineActiveForPlayerCount(state, line)) {
         continue;
       }
       for (const neighbor of getNeighborLocations(line, next.locationId)) {
@@ -902,6 +1035,15 @@ function findBeerCandidatesForNetwork(state: GameState, playerId: string, linkLi
 }
 
 export function legalBeerSourcesForNetwork(state: GameState, playerId: string, linkLineIds: string[]): ResourceSource[] {
+  if (state.era !== 'rail' || linkLineIds.length !== 2) {
+    return [];
+  }
+  if (!linkLineIds.every((linkLineId) => {
+    const line = staticConfig.linkLines[linkLineId];
+    return Boolean(line?.allowedLinkTypes.includes('rail') && isLinkLineActiveForPlayerCount(state, line));
+  })) {
+    return [];
+  }
   return findBeerCandidatesForNetwork(state, playerId, linkLineIds).map((candidate) => candidate.source);
 }
 
@@ -915,12 +1057,40 @@ function availableBeerCandidatesForSale(
   return filterConsumedBeerCandidates(findBeerCandidatesForSale(state, playerId, saleLocationId, merchantSpaceId), tracker);
 }
 
+function canListBeerSourcesForSaleSelection(state: GameState, selection: SaleBeerSourceSelection): boolean {
+  if (!selection.industryInstanceId) {
+    return true;
+  }
+
+  const industry = state.board.industryInstances[selection.industryInstanceId];
+  if (
+    !industry ||
+    !isActiveIndustryInstance(state, industry) ||
+    industry.ownerPlayerId !== selection.playerId ||
+    industry.flipped ||
+    industry.locationId !== selection.saleLocationId ||
+    !SELLABLE_INDUSTRIES.has(industry.industryType)
+  ) {
+    return false;
+  }
+
+  const target = getMerchantTarget(state, selection.merchantSpaceId);
+  return Boolean(
+    target &&
+    merchantAcceptsIndustry(state, selection.merchantSpaceId, industry.industryType) &&
+    connectedComponent(state, industry.locationId).has(target.merchant.id),
+  );
+}
+
 function trackSelectedBeerSource(
   state: GameState,
   selection: SaleBeerSourceSelection,
   source: ResourceSource | undefined,
   tracker: BeerSelectionTracker,
 ): void {
+  if (!canListBeerSourcesForSaleSelection(state, selection)) {
+    return;
+  }
   if (!source || source.kind === 'market') {
     return;
   }
@@ -963,6 +1133,9 @@ export function legalBeerSourcesForSaleSelect(
   if (!selection) {
     return [];
   }
+  if (!canListBeerSourcesForSaleSelection(state, selection)) {
+    return [];
+  }
   return availableBeerCandidatesForSale(
     state,
     selection.playerId,
@@ -992,7 +1165,11 @@ function selectBeerSourcesForSale(
     return sources;
   }
 
-  if (step.beerSources.length !== beerRequired) {
+  const beerSources = resourceSourceArrayValue((step as SellStep & {beerSources?: unknown}).beerSources);
+  if (!beerSources) {
+    throw new Error('Sell beerSources must be an array');
+  }
+  if (beerSources.length !== beerRequired) {
     throw new Error('Beer source count does not match the industry requirement');
   }
 
@@ -1004,7 +1181,10 @@ function selectBeerSourcesForSale(
     available.set(key, values);
   }
 
-  const sources = step.beerSources.map((source) => {
+  const sources = beerSources.map((source) => {
+    if (!isResourceSourceValue(source)) {
+      throw new Error('Selected beer source is malformed');
+    }
     const values = available.get(sourceKey(source));
     const candidate = values?.shift();
     if (!candidate) {
@@ -1036,7 +1216,12 @@ function validateBeerSourcesForSale(
     }
     return ok();
   }
-  if (step.beerSources.length !== beerRequired) {
+
+  const beerSources = resourceSourceArrayValue((step as SellStep & {beerSources?: unknown}).beerSources);
+  if (!beerSources) {
+    return fail('Sell beerSources must be an array');
+  }
+  if (beerSources.length !== beerRequired) {
     return fail('Beer source count does not match the industry requirement');
   }
 
@@ -1047,7 +1232,10 @@ function validateBeerSourcesForSale(
   }
 
   const selectedSources: ResourceSource[] = [];
-  for (const source of step.beerSources) {
+  for (const source of beerSources) {
+    if (!isResourceSourceValue(source)) {
+      return fail('Selected beer source is malformed');
+    }
     if (source.kind === 'market') {
       return fail('Beer cannot come from a market');
     }
@@ -1101,10 +1289,13 @@ function consumeBeerSource(state: GameState, playerId: string, source: ResourceS
 function validateDevelopIndustryTypes(state: GameState, playerId: string, industryTypes: IndustryType[]): ValidationResult {
   const simulatedStackHeads = new Map<IndustryType, number>();
   for (const industryType of industryTypes) {
+    if (!isIndustryType(industryType)) {
+      return fail(`Unknown industry type: ${industryType}`);
+    }
     const offset = simulatedStackHeads.get(industryType) ?? 0;
     const stack = state.players[playerId].industryTileStacks[industryType]?.availableSpecIdsInOrder;
     if (!stack) {
-      return fail(`Unknown industry type: ${industryType}`);
+      return fail(`No ${industryType} tile available to develop`);
     }
     const specId = stack[offset];
     if (!specId) {
@@ -1150,14 +1341,36 @@ function developIndustryTiles(state: GameState, playerId: string, industryTypes:
   const specIds: string[] = [];
   for (const industryType of industryTypes) {
     const specId = removeCurrentTileFromStack(state, playerId, industryType);
-    state.players[playerId].industryTileStacks[industryType].removedSpecIds.push(specId);
+    const stack = state.players[playerId].industryTileStacks[industryType];
+    if (!stack) {
+      throw new Error(`No ${industryType} tile left for ${playerId}`);
+    }
+    stack.removedSpecIds.push(specId);
     specIds.push(specId);
   }
   return specIds;
 }
 
-function merchantDevelopSpaceIds(decision: {merchantSpaceId: string; merchantSpaceIds?: string[]}): string[] {
-  return [...new Set([...(decision.merchantSpaceIds ?? [decision.merchantSpaceId]), decision.merchantSpaceId])];
+function merchantDevelopPrimarySpaceId(decision: {merchantSpaceId: unknown}): string | undefined {
+  const merchantSpaceId = typeof decision.merchantSpaceId === 'string' ? decision.merchantSpaceId.trim() : '';
+  return merchantSpaceId || undefined;
+}
+
+function merchantDevelopSpaceIds(decision: {merchantSpaceId: unknown; merchantSpaceIds?: unknown}): string[] {
+  const rawMerchantSpaceIds = Array.isArray(decision.merchantSpaceIds)
+    ? decision.merchantSpaceIds
+    : [decision.merchantSpaceId];
+  const primaryMerchantSpaceId = merchantDevelopPrimarySpaceId(decision);
+  const merchantSpaceIds: string[] = [];
+  const seen = new Set<string>();
+  for (const rawMerchantSpaceId of [...rawMerchantSpaceIds, primaryMerchantSpaceId]) {
+    const merchantSpaceId = typeof rawMerchantSpaceId === 'string' ? rawMerchantSpaceId.trim() : '';
+    if (merchantSpaceId && !seen.has(merchantSpaceId)) {
+      merchantSpaceIds.push(merchantSpaceId);
+      seen.add(merchantSpaceId);
+    }
+  }
+  return merchantSpaceIds;
 }
 
 function addMerchantDevelopDecision(state: GameState, playerId: string, merchantSpaceId: string, count: number): void {
@@ -1219,7 +1432,10 @@ function isResourceGloballyDepleted(state: GameState, industryType: IndustryType
 function validateBuildCard(state: GameState, command: BuildCommand): ValidationResult {
   const card = getCard(command.cardId);
   const playerHasNoNetwork = !hasAnyPlayerNetwork(state, command.playerId);
-  const location = getLocationOrThrow(command.locationId);
+  const location = staticConfig.locations[command.locationId];
+  if (!location) {
+    return fail(`Unknown location: ${command.locationId}`);
+  }
 
   if (location.kind === 'farm_brewery' && card.type !== 'industry' && card.type !== 'wild_industry') {
     return fail('Farm breweries require a Brewery industry card or Wild Industry');
@@ -1317,6 +1533,9 @@ export function validateBuild(state: GameState, command: BuildCommand): Validati
   if (!base.ok) return base;
   const card = requireKnownCardInHand(state, command.playerId, command.cardId);
   if (!card.ok) return card;
+  if (!isIndustryType(command.industryType)) {
+    return fail(`Unknown industry type: ${command.industryType}`);
+  }
   const cardValidation = validateBuildCard(state, command);
   if (!cardValidation.ok) return cardValidation;
 
@@ -1373,11 +1592,22 @@ export function validateBuild(state: GameState, command: BuildCommand): Validati
     }
   }
 
-  const coalSelection = selectResourceSources(state, 'coal', spec.cost.coal, command.locationId, command.coalSources);
+  const coalSourcesValue = (command as BuildCommand & {coalSources?: unknown}).coalSources;
+  if (coalSourcesValue !== undefined && !resourceSourceArrayValue(coalSourcesValue)) {
+    return fail('Build coalSources must be an array');
+  }
+  const ironSourcesValue = (command as BuildCommand & {ironSources?: unknown}).ironSources;
+  if (ironSourcesValue !== undefined && !resourceSourceArrayValue(ironSourcesValue)) {
+    return fail('Build ironSources must be an array');
+  }
+
+  const coalSources = resourceSourceArrayValue(coalSourcesValue);
+  const ironSources = resourceSourceArrayValue(ironSourcesValue);
+  const coalSelection = selectResourceSources(state, 'coal', spec.cost.coal, command.locationId, coalSources);
   if (!coalSelection.ok) {
     return fail(...coalSelection.errors);
   }
-  const ironSelection = selectResourceSources(state, 'iron', spec.cost.iron, command.locationId, command.ironSources);
+  const ironSelection = selectResourceSources(state, 'iron', spec.cost.iron, command.locationId, ironSources);
   if (!ironSelection.ok) {
     return fail(...ironSelection.errors);
   }
@@ -1393,21 +1623,53 @@ export function executeBuild(state: GameState, command: BuildCommand): void {
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
-  const specId = removeCurrentTileFromStack(state, command.playerId, command.industryType);
-  const spec = staticConfig.industryTileSpecs[specId];
-  const player = state.players[command.playerId];
+  const playerId = command.playerId;
+  const cardId = command.cardId;
+  const locationId = command.locationId;
+  const slotId = command.slotId;
+  const industryType = command.industryType;
+  const coalSources = snapshotResourceSourceArray(
+    (command as BuildCommand & {coalSources?: unknown}).coalSources,
+    'Build coalSources must be an array',
+  );
+  const ironSources = snapshotResourceSourceArray(
+    (command as BuildCommand & {ironSources?: unknown}).ironSources,
+    'Build ironSources must be an array',
+  );
+  const capturedCommand: BuildCommand = {
+    type: 'build',
+    playerId,
+    cardId,
+    locationId,
+    slotId,
+    industryType,
+    ...(coalSources !== undefined ? {coalSources} : {}),
+    ...(ironSources !== undefined ? {ironSources} : {}),
+  };
+  const capturedValidation = validateBuild(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
 
-  const coalSelection = selectResourceSources(state, 'coal', spec.cost.coal, command.locationId, command.coalSources);
-  const ironSelection = selectResourceSources(state, 'iron', spec.cost.iron, command.locationId, command.ironSources);
+  const specId = currentTileSpec(state, playerId, industryType)?.id;
+  if (!specId) {
+    throw new Error(`No ${industryType} tile left for ${playerId}`);
+  }
+  const spec = staticConfig.industryTileSpecs[specId];
+  const player = state.players[playerId];
+
+  const coalSelection = selectResourceSources(state, 'coal', spec.cost.coal, locationId, coalSources);
+  const ironSelection = selectResourceSources(state, 'iron', spec.cost.iron, locationId, ironSources);
   if (!coalSelection.ok || !ironSelection.ok) {
     throw new Error([...coalSelection.errors, ...ironSelection.errors].join('; '));
   }
+  removeCurrentTileFromStack(state, playerId, industryType);
   const marketCash =
-    consumeSelectedResourceSources(state, command.playerId, coalSelection.sources, 'build') +
-    consumeSelectedResourceSources(state, command.playerId, ironSelection.sources, 'build');
-  spendCash(state, command.playerId, spec.cost.cash + marketCash, 'build');
+    consumeSelectedResourceSources(state, playerId, coalSelection.sources, 'build') +
+    consumeSelectedResourceSources(state, playerId, ironSelection.sources, 'build');
+  spendCash(state, playerId, spec.cost.cash + marketCash, 'build');
 
-  const occupiedBy = state.board.slots[command.slotId]?.occupiedBy;
+  const occupiedBy = state.board.slots[slotId]?.occupiedBy;
   if (occupiedBy) {
     const existing = state.board.industryInstances[occupiedBy];
     removeIndustryFromBoard(state, existing, 'overbuild');
@@ -1417,35 +1679,35 @@ export function executeBuild(state: GameState, command: BuildCommand): void {
   const instance: IndustryInstance = {
     id: nextInstanceId(state, 'industry'),
     specId,
-    ownerPlayerId: command.playerId,
-    industryType: command.industryType,
+    ownerPlayerId: playerId,
+    industryType,
     level: spec.level,
-    locationId: command.locationId,
-    slotId: command.slotId,
+    locationId,
+    slotId,
     flipped: false,
     remainingResource: resourcesWhenBuilt,
     removedFromGame: false,
   };
   state.board.industryInstances[instance.id] = instance;
-  state.board.slots[command.slotId] = {occupiedBy: instance.id};
-  player.industryTileStacks[command.industryType].builtInstanceIds.push(instance.id);
+  state.board.slots[slotId] = {occupiedBy: instance.id};
+  player.industryTileStacks[industryType].builtInstanceIds.push(instance.id);
   pushEvent(state, {type: 'industry_built', instance});
 
-  if (command.industryType === 'iron_works') {
+  if (industryType === 'iron_works') {
     while (instance.remainingResource > 0 && marketHasSpace(state.markets.iron, 'iron')) {
-      sellResourceToMarket(state, command.playerId, 'iron', instance.id);
+      sellResourceToMarket(state, playerId, 'iron', instance.id);
       instance.remainingResource--;
     }
   }
-  if (command.industryType === 'coal_mine' && hasCoalMarketAccess(state, command.locationId)) {
+  if (industryType === 'coal_mine' && hasCoalMarketAccess(state, locationId)) {
     while (instance.remainingResource > 0 && marketHasSpace(state.markets.coal, 'coal')) {
-      sellResourceToMarket(state, command.playerId, 'coal', instance.id);
+      sellResourceToMarket(state, playerId, 'coal', instance.id);
       instance.remainingResource--;
     }
   }
   flipIndustryIfDepleted(state, instance);
 
-  discardCard(state, command.playerId, command.cardId);
+  discardCard(state, playerId, cardId);
 }
 
 function validateNetworkLine(
@@ -1466,6 +1728,9 @@ function validateNetworkLine(
   if (!line.allowedLinkTypes.includes(linkType)) {
     return fail(`Link line does not support ${linkType}`);
   }
+  if (!isLinkLineActiveForPlayerCount(state, line)) {
+    return fail(`Link line is not available for ${state.playerCount} players`);
+  }
   if (state.players[playerId].remainingLinks[linkType] <= 0) {
     return fail(`Player has no ${linkType} links remaining`);
   }
@@ -1480,16 +1745,20 @@ function validateNetworkLine(
 }
 
 function validateDoubleRailBeer(state: GameState, command: NetworkCommand): ValidationResult {
-  if (state.era !== 'rail' || command.linkLineIds.length !== 2) {
+  const linkLineIds = stringArrayValue((command as NetworkCommand & {linkLineIds?: unknown}).linkLineIds);
+  if (!linkLineIds || state.era !== 'rail' || linkLineIds.length !== 2) {
     return ok();
   }
 
-  const candidates = findBeerCandidatesForNetwork(state, command.playerId, command.linkLineIds);
+  const candidates = findBeerCandidatesForNetwork(state, command.playerId, linkLineIds);
   const explicitSource = command.beerSourceForDoubleRail;
-  if (!explicitSource) {
+  if (explicitSource === undefined) {
     return candidates.length >= staticConfig.rules.railDoubleBeer
       ? ok()
       : fail('Double rail Network requires beer');
+  }
+  if (!isResourceSourceValue(explicitSource)) {
+    return fail('Selected double rail beer source is malformed');
   }
   if (explicitSource.kind !== 'industry_tile' || explicitSource.resourceType !== 'beer') {
     return fail('Double rail beer must come from a brewery');
@@ -1507,7 +1776,10 @@ function selectBeerSourceForDoubleRail(state: GameState, command: NetworkCommand
   }
   const candidates = findBeerCandidatesForNetwork(state, command.playerId, command.linkLineIds);
   const explicitSource = command.beerSourceForDoubleRail;
-  if (explicitSource) {
+  if (explicitSource !== undefined) {
+    if (!isResourceSourceValue(explicitSource)) {
+      throw new Error('Selected double rail beer source is malformed');
+    }
     if (explicitSource.kind !== 'industry_tile' || explicitSource.resourceType !== 'beer') {
       throw new Error('Double rail beer must come from a brewery');
     }
@@ -1529,43 +1801,56 @@ export function validateNetwork(state: GameState, command: NetworkCommand): Vali
   if (!base.ok) return base;
   const card = requireKnownCardInHand(state, command.playerId, command.cardId);
   if (!card.ok) return card;
-  if (command.linkLineIds.length < 1) {
+  const linkLineIds = stringArrayValue((command as NetworkCommand & {linkLineIds?: unknown}).linkLineIds);
+  if (!linkLineIds) {
+    return fail('Network requires linkLineIds as a string array');
+  }
+  const coalSourcesValue = (command as NetworkCommand & {coalSources?: unknown}).coalSources;
+  if (coalSourcesValue !== undefined && !resourceSourceArrayValue(coalSourcesValue)) {
+    return fail('Network coalSources must be an array');
+  }
+  const coalSources = resourceSourceArrayValue(coalSourcesValue);
+
+  if (linkLineIds.length < 1) {
     return fail('Network must include at least one link');
   }
 
   const linkType: LinkType = state.era === 'canal' ? 'canal' : 'rail';
-  if (state.era === 'canal' && command.linkLineIds.length !== 1) {
+  if (state.era === 'canal' && linkLineIds.length !== 1) {
     return fail('Canal era Network builds exactly one canal');
   }
-  if (state.era === 'rail' && command.linkLineIds.length > 2) {
+  if (state.era === 'rail' && linkLineIds.length > 2) {
     return fail('Rail era Network builds at most two rails');
   }
-  if (command.beerSourceForDoubleRail !== undefined && !(state.era === 'rail' && command.linkLineIds.length === 2)) {
+  if (command.beerSourceForDoubleRail !== undefined && !(state.era === 'rail' && linkLineIds.length === 2)) {
     return fail('Double rail beer source is only valid when building two rails');
   }
-  if (state.era === 'canal' && command.coalSources !== undefined && command.coalSources.length > 0) {
+  if (state.era === 'canal' && coalSources !== undefined && coalSources.length > 0) {
     return fail('Canal era Network does not consume coal');
   }
-  if (state.era === 'rail' && command.coalSources !== undefined && command.coalSources.length !== command.linkLineIds.length) {
+  if (state.era === 'rail' && coalSources !== undefined && coalSources.length !== linkLineIds.length) {
     return fail('Coal source count must match rail link count');
   }
-  if (new Set(command.linkLineIds).size !== command.linkLineIds.length) {
+  if (new Set(linkLineIds).size !== linkLineIds.length) {
     return fail('Network cannot build the same link line twice');
   }
-  if (state.players[command.playerId].remainingLinks[linkType] < command.linkLineIds.length) {
-    return fail(`Player has fewer than ${command.linkLineIds.length} ${linkType} links remaining`);
+  if (state.players[command.playerId].remainingLinks[linkType] < linkLineIds.length) {
+    return fail(`Player has fewer than ${linkLineIds.length} ${linkType} links remaining`);
   }
 
   let totalCost = state.era === 'canal'
     ? staticConfig.rules.canalLinkCost
-    : command.linkLineIds.length === 2
+    : linkLineIds.length === 2
       ? staticConfig.rules.railDoubleLinkCost
       : staticConfig.rules.railSingleLinkCost;
 
   const pendingLinkLineIds: string[] = [];
   const coalTracker = createResourceSelectionTracker();
-  for (const [index, linkLineId] of command.linkLineIds.entries()) {
-    const line = getLinkLineOrThrow(linkLineId);
+  for (const [index, linkLineId] of linkLineIds.entries()) {
+    const line = staticConfig.linkLines[linkLineId];
+    if (!line) {
+      return fail(`Unknown link line: ${linkLineId}`);
+    }
     const lineValidation = validateNetworkLine(state, command.playerId, line, linkType, pendingLinkLineIds);
     if (!lineValidation.ok) return lineValidation;
     if (state.era === 'rail') {
@@ -1574,7 +1859,7 @@ export function validateNetwork(state: GameState, command: NetworkCommand): Vali
         'coal',
         1,
         linkDemandLocations(line),
-        command.coalSources ? [command.coalSources[index]] : undefined,
+        coalSources ? [coalSources[index]] : undefined,
         [...pendingLinkLineIds, linkLineId],
         coalTracker,
       );
@@ -1601,17 +1886,46 @@ export function executeNetwork(state: GameState, command: NetworkCommand): void 
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
+  const playerId = command.playerId;
+  const cardId = command.cardId;
+  const linkLineIdsValue = stringArrayValue((command as NetworkCommand & {linkLineIds?: unknown}).linkLineIds);
+  if (!linkLineIdsValue) {
+    throw new Error('Network requires linkLineIds as a string array');
+  }
+  const linkLineIds = [...linkLineIdsValue];
+  const coalSources = snapshotResourceSourceArray(
+    (command as NetworkCommand & {coalSources?: unknown}).coalSources,
+    'Network coalSources must be an array',
+  );
+  const beerSourceForDoubleRailValue = (command as NetworkCommand & {beerSourceForDoubleRail?: unknown}).beerSourceForDoubleRail;
+  const beerSourceForDoubleRail = beerSourceForDoubleRailValue === undefined
+    ? undefined
+    : snapshotResourceSourceValue(beerSourceForDoubleRailValue);
+  const capturedCommand: NetworkCommand = {
+    type: 'network',
+    playerId,
+    cardId,
+    linkLineIds,
+    ...(coalSources !== undefined ? {coalSources} : {}),
+    ...(beerSourceForDoubleRail !== undefined ? {beerSourceForDoubleRail} : {}),
+  };
+  const capturedValidation = validateNetwork(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
   const linkType: LinkType = state.era === 'canal' ? 'canal' : 'rail';
   const baseCost = state.era === 'canal'
     ? staticConfig.rules.canalLinkCost
-    : command.linkLineIds.length === 2
+    : linkLineIds.length === 2
       ? staticConfig.rules.railDoubleLinkCost
       : staticConfig.rules.railSingleLinkCost;
-  const doubleRailBeerSource = selectBeerSourceForDoubleRail(state, command);
+  const doubleRailBeerSource = selectBeerSourceForDoubleRail(state, capturedCommand);
+  const coalSelections: ResourceSource[][] = [];
   let marketCash = 0;
 
   const pendingLinkLineIds: string[] = [];
-  for (const [index, linkLineId] of command.linkLineIds.entries()) {
+  const coalTracker = createResourceSelectionTracker();
+  for (const [index, linkLineId] of linkLineIds.entries()) {
     const line = getLinkLineOrThrow(linkLineId);
     if (state.era === 'rail') {
       const coalSelection = selectResourceSources(
@@ -1619,32 +1933,39 @@ export function executeNetwork(state: GameState, command: NetworkCommand): void 
         'coal',
         1,
         linkDemandLocations(line),
-        command.coalSources ? [command.coalSources[index]] : undefined,
+        coalSources ? [coalSources[index]] : undefined,
         [...pendingLinkLineIds, linkLineId],
+        coalTracker,
       );
       if (!coalSelection.ok) {
         throw new Error(coalSelection.errors.join('; '));
       }
-      marketCash += consumeSelectedResourceSources(state, command.playerId, coalSelection.sources, 'network');
+      coalSelections[index] = coalSelection.sources;
+    }
+    pendingLinkLineIds.push(linkLineId);
+  }
+
+  for (const [index, linkLineId] of linkLineIds.entries()) {
+    if (state.era === 'rail') {
+      marketCash += consumeSelectedResourceSources(state, playerId, coalSelections[index] ?? [], 'network');
     }
     const instance: LinkInstance = {
       id: nextInstanceId(state, 'link'),
-      ownerPlayerId: command.playerId,
+      ownerPlayerId: playerId,
       linkType,
       linkLineId,
     };
     state.board.linkInstances[instance.id] = instance;
     state.board.linkLines[linkLineId] = {occupiedBy: instance.id};
-    state.players[command.playerId].remainingLinks[linkType]--;
+    state.players[playerId].remainingLinks[linkType]--;
     pushEvent(state, {type: 'link_built', instance});
-    pendingLinkLineIds.push(linkLineId);
   }
 
   if (doubleRailBeerSource) {
-    consumeBeerSource(state, command.playerId, doubleRailBeerSource, 'network');
+    consumeBeerSource(state, playerId, doubleRailBeerSource, 'network');
   }
-  spendCash(state, command.playerId, baseCost + marketCash, 'network');
-  discardCard(state, command.playerId, command.cardId);
+  spendCash(state, playerId, baseCost + marketCash, 'network');
+  discardCard(state, playerId, cardId);
 }
 
 export function validateDevelop(state: GameState, command: DevelopCommand): ValidationResult {
@@ -1652,14 +1973,26 @@ export function validateDevelop(state: GameState, command: DevelopCommand): Vali
   if (!base.ok) return base;
   const card = requireKnownCardInHand(state, command.playerId, command.cardId);
   if (!card.ok) return card;
-  if (command.industryTypes.length < 1 || command.industryTypes.length > 2) {
+  const industryTypes = stringArrayValue(
+    (command as DevelopCommand & {industryTypes?: unknown}).industryTypes,
+  ) as IndustryType[] | undefined;
+  if (!industryTypes) {
+    return fail('Develop requires industryTypes as a string array');
+  }
+  const ironSourcesValue = (command as DevelopCommand & {ironSources?: unknown}).ironSources;
+  if (ironSourcesValue !== undefined && !resourceSourceArrayValue(ironSourcesValue)) {
+    return fail('Develop ironSources must be an array');
+  }
+  const ironSources = resourceSourceArrayValue(ironSourcesValue);
+
+  if (industryTypes.length < 1 || industryTypes.length > 2) {
     return fail('Develop removes one or two tiles');
   }
 
-  const tileValidation = validateDevelopIndustryTypes(state, command.playerId, command.industryTypes);
+  const tileValidation = validateDevelopIndustryTypes(state, command.playerId, industryTypes);
   if (!tileValidation.ok) return tileValidation;
 
-  const ironSelection = selectResourceSources(state, 'iron', command.industryTypes.length, getCurrentPlayerId(state), command.ironSources);
+  const ironSelection = selectResourceSources(state, 'iron', industryTypes.length, getCurrentPlayerId(state), ironSources);
   if (!ironSelection.ok) {
     return fail(...ironSelection.errors);
   }
@@ -1675,15 +2008,50 @@ export function executeDevelop(state: GameState, command: DevelopCommand): void 
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
-  const ironSelection = selectResourceSources(state, 'iron', command.industryTypes.length, getCurrentPlayerId(state), command.ironSources);
+  const playerId = command.playerId;
+  const cardId = command.cardId;
+  const industryTypesValue = stringArrayValue(
+    (command as DevelopCommand & {industryTypes?: unknown}).industryTypes,
+  ) as IndustryType[] | undefined;
+  if (!industryTypesValue) {
+    throw new Error('Develop requires industryTypes as a string array');
+  }
+  const industryTypes = [...industryTypesValue];
+  const ironSources = snapshotResourceSourceArray(
+    (command as DevelopCommand & {ironSources?: unknown}).ironSources,
+    'Develop ironSources must be an array',
+  );
+  const capturedCommand: DevelopCommand = {
+    type: 'develop',
+    playerId,
+    cardId,
+    industryTypes,
+    ...(ironSources !== undefined ? {ironSources} : {}),
+  };
+  const capturedValidation = validateDevelop(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
+  if (industryTypes.length < 1 || industryTypes.length > 2) {
+    throw new Error('Develop removes one or two tiles');
+  }
+  const tileValidation = validateDevelopIndustryTypes(state, playerId, industryTypes);
+  if (!tileValidation.ok) {
+    throw new Error(tileValidation.errors.join('; '));
+  }
+  const ironSelection = selectResourceSources(state, 'iron', industryTypes.length, getCurrentPlayerId(state), ironSources);
   if (!ironSelection.ok) {
     throw new Error(ironSelection.errors.join('; '));
   }
-  const marketCash = consumeSelectedResourceSources(state, command.playerId, ironSelection.sources, 'develop');
-  spendCash(state, command.playerId, marketCash, 'develop iron');
+  const marketCash = ironSelection.marketCash;
+  if (state.players[playerId].cash < marketCash) {
+    throw new Error('Player cannot afford iron for Develop');
+  }
+  consumeSelectedResourceSources(state, playerId, ironSelection.sources, 'develop');
+  spendCash(state, playerId, marketCash, 'develop iron');
 
-  developIndustryTiles(state, command.playerId, command.industryTypes);
-  discardCard(state, command.playerId, command.cardId);
+  developIndustryTiles(state, playerId, industryTypes);
+  discardCard(state, playerId, cardId);
 }
 
 function validateSellStep(state: GameState, playerId: string, step: SellStep, beerTracker: BeerSelectionTracker): ValidationResult {
@@ -1722,13 +2090,22 @@ export function validateSell(state: GameState, command: SellCommand): Validation
   if (!base.ok) return base;
   const card = requireKnownCardInHand(state, command.playerId, command.cardId);
   if (!card.ok) return card;
-  if (command.sales.length < 1) {
+  const salesValue = (command as SellCommand & {sales?: unknown}).sales;
+  if (!Array.isArray(salesValue)) {
+    return fail('Sell requires sales as an array');
+  }
+  if (!salesValue.every(isSellStepValue)) {
+    return fail('Sell requires sales as sale step objects');
+  }
+  const sales = salesValue as SellStep[];
+
+  if (sales.length < 1) {
     return fail('Sell requires at least one sale step');
   }
 
   const seenIndustries = new Set<string>();
   const beerTracker = createBeerSelectionTracker();
-  for (const step of command.sales) {
+  for (const step of sales) {
     if (seenIndustries.has(step.industryInstanceId)) {
       return fail('Cannot sell the same industry twice in one action');
     }
@@ -1742,37 +2119,112 @@ export function validateSell(state: GameState, command: SellCommand): Validation
   return ok();
 }
 
+function snapshotSellStepForExecution(step: SellStep): SellStep {
+  const beerSourcesValue = (step as SellStep & {beerSources?: unknown}).beerSources;
+  if (beerSourcesValue !== undefined && !resourceSourceArrayValue(beerSourcesValue)) {
+    throw new Error('Sell beerSources must be an array');
+  }
+  const beerSources = resourceSourceArrayValue(beerSourcesValue);
+  const snapshot: SellStep = {
+    industryInstanceId: step.industryInstanceId,
+    merchantSpaceId: step.merchantSpaceId,
+  };
+  if (beerSources !== undefined) {
+    snapshot.beerSources = beerSources.map(snapshotResourceSourceValue);
+  }
+  return snapshot;
+}
+
 export function executeSell(state: GameState, command: SellCommand): void {
   const validation = validateSell(state, command);
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
 
-  for (const step of command.sales) {
-    const industry = state.board.industryInstances[step.industryInstanceId];
-    const spec = staticConfig.industryTileSpecs[industry.specId];
-    const beerRequired = spec.beerRequiredToSell ?? 0;
-    const beerSources = selectBeerSourcesForSale(state, command.playerId, industry.locationId, step, beerRequired);
-    let usedMerchantBeer = false;
-    for (const source of beerSources) {
-      usedMerchantBeer = consumeBeerSource(state, command.playerId, source, 'sell') || usedMerchantBeer;
-    }
-    if (usedMerchantBeer) {
-      applyMerchantBonus(state, command.playerId, step.merchantSpaceId);
-    }
-
-    industry.flipped = true;
-    changeIncomePosition(
-      state,
-      industry.ownerPlayerId,
-      advanceIncomeSpaces(state.players[industry.ownerPlayerId].incomeTrackPosition, spec.flip.incomeSpaces),
-      `sold ${industry.industryType}`,
-    );
-    pushEvent(state, {type: 'industry_flipped', industryInstanceId: industry.id, ownerPlayerId: industry.ownerPlayerId});
-    pushEvent(state, {type: 'industry_sold', industryInstanceId: industry.id, ownerPlayerId: industry.ownerPlayerId, merchantSpaceId: step.merchantSpaceId});
+  const playerId = command.playerId;
+  const cardId = command.cardId;
+  const salesValue = (command as SellCommand & {sales?: unknown}).sales;
+  if (!Array.isArray(salesValue)) {
+    throw new Error('Sell requires sales as an array');
+  }
+  if (!salesValue.every(isSellStepValue)) {
+    throw new Error('Sell requires sales as sale step objects');
+  }
+  const sales = (salesValue as SellStep[]).map(snapshotSellStepForExecution);
+  if (sales.length < 1) {
+    throw new Error('Sell requires at least one sale step');
+  }
+  const capturedCommand: SellCommand = {type: 'sell', playerId, cardId, sales};
+  const capturedValidation = validateSell(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
   }
 
-  discardCard(state, command.playerId, command.cardId);
+  const seenIndustries = new Set<string>();
+  const validationBeerTracker = createBeerSelectionTracker();
+  const selectionBeerTracker = createBeerSelectionTracker();
+  const preparedSales: Array<{
+    step: SellStep;
+    industry: IndustryInstance;
+    spec: IndustryTileSpec;
+    beerSources: ResourceSource[];
+  }> = [];
+  for (const step of sales) {
+    if (seenIndustries.has(step.industryInstanceId)) {
+      throw new Error('Cannot sell the same industry twice in one action');
+    }
+    seenIndustries.add(step.industryInstanceId);
+    const stepValidation = validateSellStep(state, playerId, step, validationBeerTracker);
+    if (!stepValidation.ok) {
+      throw new Error(stepValidation.errors.join('; '));
+    }
+    const industry = state.board.industryInstances[step.industryInstanceId];
+    if (!industry || !isActiveIndustryInstance(state, industry)) {
+      throw new Error('Selected industry does not exist');
+    }
+    const spec = staticConfig.industryTileSpecs[industry.specId];
+    const beerRequired = spec.beerRequiredToSell ?? 0;
+    const beerSources = selectBeerSourcesForSale(
+      state,
+      playerId,
+      industry.locationId,
+      step,
+      beerRequired,
+      selectionBeerTracker,
+    );
+    preparedSales.push({step, industry, spec, beerSources});
+  }
+
+  for (const sale of preparedSales) {
+    let usedMerchantBeer = false;
+    for (const source of sale.beerSources) {
+      usedMerchantBeer = consumeBeerSource(state, playerId, source, 'sell') || usedMerchantBeer;
+    }
+    if (usedMerchantBeer) {
+      applyMerchantBonus(state, playerId, sale.step.merchantSpaceId);
+    }
+
+    sale.industry.flipped = true;
+    changeIncomePosition(
+      state,
+      sale.industry.ownerPlayerId,
+      advanceIncomeSpaces(state.players[sale.industry.ownerPlayerId].incomeTrackPosition, sale.spec.flip.incomeSpaces),
+      `sold ${sale.industry.industryType}`,
+    );
+    pushEvent(state, {
+      type: 'industry_flipped',
+      industryInstanceId: sale.industry.id,
+      ownerPlayerId: sale.industry.ownerPlayerId,
+    });
+    pushEvent(state, {
+      type: 'industry_sold',
+      industryInstanceId: sale.industry.id,
+      ownerPlayerId: sale.industry.ownerPlayerId,
+      merchantSpaceId: sale.step.merchantSpaceId,
+    });
+  }
+
+  discardCard(state, playerId, cardId);
 }
 
 export function validateLoan(state: GameState, command: {type: 'loan'; playerId: string; cardId: string}): ValidationResult {
@@ -1792,24 +2244,35 @@ export function executeLoan(state: GameState, command: {type: 'loan'; playerId: 
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
-  gainCash(state, command.playerId, staticConfig.rules.loanCash, 'loan');
+  const playerId = command.playerId;
+  const cardId = command.cardId;
+  const capturedCommand = {type: 'loan' as const, playerId, cardId};
+  const capturedValidation = validateLoan(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
+  gainCash(state, playerId, staticConfig.rules.loanCash, 'loan');
   changeIncomePosition(
     state,
-    command.playerId,
-    retreatIncomeLevels(state.players[command.playerId].incomeTrackPosition, staticConfig.rules.loanIncomeLevelPenalty),
+    playerId,
+    retreatIncomeLevels(state.players[playerId].incomeTrackPosition, staticConfig.rules.loanIncomeLevelPenalty),
     'loan',
   );
-  discardCard(state, command.playerId, command.cardId);
-  pushEvent(state, {type: 'loan_taken', playerId: command.playerId});
+  discardCard(state, playerId, cardId);
+  pushEvent(state, {type: 'loan_taken', playerId});
 }
 
 export function validateScout(state: GameState, command: ScoutCommand): ValidationResult {
   const base = validateActingPlayer(state, command.playerId);
   if (!base.ok) return base;
-  if (command.cardIds.length !== 3 || new Set(command.cardIds).size !== 3) {
+  const cardIds = stringArrayValue((command as ScoutCommand & {cardIds?: unknown}).cardIds);
+  if (!cardIds) {
+    return fail('Scout requires cardIds as a string array');
+  }
+  if (cardIds.length !== 3 || new Set(cardIds).size !== 3) {
     return fail('Scout must discard three distinct cards');
   }
-  for (const cardId of command.cardIds) {
+  for (const cardId of cardIds) {
     const card = requireKnownCardInHand(state, command.playerId, cardId);
     if (!card.ok) return card;
   }
@@ -1832,16 +2295,27 @@ export function executeScout(state: GameState, command: ScoutCommand): void {
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
-  for (const cardId of command.cardIds) {
-    discardCard(state, command.playerId, cardId);
+  const playerId = command.playerId;
+  const cardIdsValue = stringArrayValue((command as ScoutCommand & {cardIds?: unknown}).cardIds);
+  if (!cardIdsValue) {
+    throw new Error('Scout requires cardIds as a string array');
+  }
+  const cardIds = [...cardIdsValue];
+  const capturedCommand: ScoutCommand = {type: 'scout', playerId, cardIds};
+  const capturedValidation = validateScout(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
+  for (const cardId of cardIds) {
+    discardCard(state, playerId, cardId);
   }
   const wildLocation = state.cardZones.wildLocationPool.pop();
   const wildIndustry = state.cardZones.wildIndustryPool.pop();
   if (!wildLocation || !wildIndustry) {
     throw new Error('Wild card pool unexpectedly empty');
   }
-  state.players[command.playerId].handCardIds.push(wildLocation, wildIndustry);
-  pushEvent(state, {type: 'scouted', playerId: command.playerId});
+  state.players[playerId].handCardIds.push(wildLocation, wildIndustry);
+  pushEvent(state, {type: 'scouted', playerId});
 }
 
 export function validatePass(state: GameState, command: {type: 'pass'; playerId: string; cardId: string}): ValidationResult {
@@ -1855,7 +2329,14 @@ export function executePass(state: GameState, command: {type: 'pass'; playerId: 
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
-  discardCard(state, command.playerId, command.cardId);
+  const playerId = command.playerId;
+  const cardId = command.cardId;
+  const capturedCommand = {type: 'pass' as const, playerId, cardId};
+  const capturedValidation = validatePass(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
+  discardCard(state, playerId, cardId);
 }
 
 function drawToHandLimit(state: GameState, playerId: string): void {
@@ -2018,11 +2499,18 @@ export function validateResolveNegativeIncome(state: GameState, command: Resolve
     return fail(`Unknown player: ${command.playerId}`);
   }
 
+  const industryInstanceIds = stringArrayValue(
+    (command as ResolveNegativeIncomeCommand & {industryInstanceIds?: unknown}).industryInstanceIds,
+  );
+  if (!industryInstanceIds) {
+    return fail('Negative income requires industryInstanceIds as a string array');
+  }
+
   const errors: string[] = [];
   const selectedIds = new Set<string>();
   let projectedCash = player.cash;
 
-  for (const industryInstanceId of command.industryInstanceIds) {
+  for (const industryInstanceId of industryInstanceIds) {
     if (selectedIds.has(industryInstanceId)) {
       errors.push(`Industry ${industryInstanceId} selected more than once`);
       continue;
@@ -2078,14 +2566,38 @@ export function validateResolveMerchantDevelop(state: GameState, command: Resolv
   if (decision.playerId !== command.playerId) {
     return fail(`Pending merchant develop decision belongs to ${decision.playerId}`);
   }
-  if (command.industryTypes.length > decision.count) {
+
+  if (!state.players[command.playerId]) {
+    return fail(`Unknown player: ${command.playerId}`);
+  }
+
+  const merchantSpaceId = merchantDevelopPrimarySpaceId(decision);
+  const merchantSpaceIds = merchantDevelopSpaceIds(decision);
+  if (
+    !merchantSpaceId ||
+    !isPositiveInteger((decision as {count?: unknown}).count) ||
+    merchantSpaceIds.length === 0 ||
+    !merchantSpaceHasDevelopBonus(state, merchantSpaceId) ||
+    !merchantSpaceIds.every((merchantSpaceId) => merchantSpaceHasDevelopBonus(state, merchantSpaceId))
+  ) {
+    return fail('Invalid pending merchant develop decision');
+  }
+
+  const industryTypes = stringArrayValue(
+    (command as ResolveMerchantDevelopCommand & {industryTypes?: unknown}).industryTypes,
+  ) as IndustryType[] | undefined;
+  if (!industryTypes) {
+    return fail('Merchant develop requires industryTypes as a string array');
+  }
+
+  if (industryTypes.length > decision.count) {
     return fail(`Merchant develop can remove at most ${decision.count} tile${decision.count === 1 ? '' : 's'}`);
   }
   const requiredCount = countAvailableMerchantDevelops(state, command.playerId, decision.count);
-  if (command.industryTypes.length < requiredCount) {
+  if (industryTypes.length < requiredCount) {
     return fail(`Merchant develop must remove ${requiredCount} tile${requiredCount === 1 ? '' : 's'}`);
   }
-  return validateDevelopIndustryTypes(state, command.playerId, command.industryTypes);
+  return validateDevelopIndustryTypes(state, command.playerId, industryTypes);
 }
 
 export function executeResolveMerchantDevelop(state: GameState, command: ResolveMerchantDevelopCommand): void {
@@ -2093,19 +2605,40 @@ export function executeResolveMerchantDevelop(state: GameState, command: Resolve
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
+  const playerId = command.playerId;
+  const industryTypesValue = stringArrayValue(
+    (command as ResolveMerchantDevelopCommand & {industryTypes?: unknown}).industryTypes,
+  ) as IndustryType[] | undefined;
+  if (!industryTypesValue) {
+    throw new Error('Merchant develop requires industryTypes as a string array');
+  }
+  const industryTypes = [...industryTypesValue];
+  const capturedCommand: ResolveMerchantDevelopCommand = {
+    type: 'resolve_merchant_develop',
+    playerId,
+    industryTypes,
+  };
+  const capturedValidation = validateResolveMerchantDevelop(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
   const decision = state.pendingDecision;
   if (!decision || decision.type !== 'merchant_develop') {
     throw new Error('No pending merchant develop decision');
   }
+  const merchantSpaceId = merchantDevelopPrimarySpaceId(decision);
+  if (!merchantSpaceId) {
+    throw new Error('Invalid pending merchant develop decision');
+  }
 
-  const specIds = developIndustryTiles(state, command.playerId, command.industryTypes);
+  const specIds = developIndustryTiles(state, playerId, industryTypes);
   state.pendingDecision = undefined;
   pushEvent(state, {
     type: 'merchant_develop_resolved',
-    playerId: command.playerId,
-    merchantSpaceId: decision.merchantSpaceId,
+    playerId,
+    merchantSpaceId,
     merchantSpaceIds: merchantDevelopSpaceIds(decision),
-    industryTypes: [...command.industryTypes],
+    industryTypes: [...industryTypes],
     specIds,
   });
 }
@@ -2115,25 +2648,42 @@ export function executeResolveNegativeIncome(state: GameState, command: ResolveN
   if (!validation.ok) {
     throw new Error(validation.errors.join('; '));
   }
+  const playerId = command.playerId;
+  const industryInstanceIdValues = stringArrayValue(
+    (command as ResolveNegativeIncomeCommand & {industryInstanceIds?: unknown}).industryInstanceIds,
+  );
+  if (!industryInstanceIdValues) {
+    throw new Error('Negative income requires industryInstanceIds as a string array');
+  }
+  const industryInstanceIds = [...industryInstanceIdValues];
+  const capturedCommand: ResolveNegativeIncomeCommand = {
+    type: 'resolve_negative_income',
+    playerId,
+    industryInstanceIds,
+  };
+  const capturedValidation = validateResolveNegativeIncome(state, capturedCommand);
+  if (!capturedValidation.ok) {
+    throw new Error(capturedValidation.errors.join('; '));
+  }
 
   const decision = state.pendingDecision;
   if (!decision || decision.type !== 'negative_income') {
     throw new Error('No pending negative income decision');
   }
 
-  for (const industryInstanceId of command.industryInstanceIds) {
+  for (const industryInstanceId of industryInstanceIds) {
     removeIndustryForNegativeIncome(state, state.board.industryInstances[industryInstanceId]);
   }
 
-  const {paid, victoryPointLoss} = settleNegativeIncomePayment(state, command.playerId, decision.amountOwed);
+  const {paid, victoryPointLoss} = settleNegativeIncomePayment(state, playerId, decision.amountOwed);
   state.pendingDecision = undefined;
   pushEvent(state, {
     type: 'negative_income_resolved',
-    playerId: command.playerId,
+    playerId,
     amountOwed: decision.amountOwed,
     paid,
     victoryPointLoss,
-    industryInstanceIds: [...command.industryInstanceIds],
+    industryInstanceIds: [...industryInstanceIds],
   });
 
   if (applyRoundIncomeFrom(state, decision.incomePlayerIndex + 1)) {
@@ -2232,7 +2782,7 @@ function buildRailDeckFromDiscards(state: GameState): string[] {
   return shuffle(deck, new SeededRandom(seed));
 }
 
-function determineWinners(state: GameState): string[] {
+export function determineWinners(state: GameState): string[] {
   const playerIds = Object.keys(state.players);
   const rankValue = (playerId: string) => {
     const player = state.players[playerId];
@@ -2253,6 +2803,28 @@ function determineWinners(state: GameState): string[] {
     const rank = rankValue(playerId);
     return rank.every((value, index) => value === bestRank[index]);
   });
+}
+
+function scoreIntroductoryGameBonuses(state: GameState): void {
+  for (const playerId of Object.keys(state.players)) {
+    const player = state.players[playerId];
+    gainVictoryPoints(state, playerId, Math.min(15, Math.floor(player.cash / 4)), 'introductory money scoring');
+
+    const incomeLevel = getIncomeLevel(player.incomeTrackPosition);
+    if (incomeLevel > 0) {
+      gainVictoryPoints(state, playerId, incomeLevel, 'introductory income scoring');
+    } else if (incomeLevel < 0) {
+      loseVictoryPoints(state, playerId, -incomeLevel, 'introductory income scoring');
+    }
+  }
+
+  for (const industry of getActiveIndustries(state)) {
+    if (!industry.flipped || industry.level < 2) {
+      continue;
+    }
+    const points = staticConfig.industryTileSpecs[industry.specId].flip.victoryPoints;
+    gainVictoryPoints(state, industry.ownerPlayerId, points, 'introductory industry scoring');
+  }
 }
 
 function shouldEndEra(state: GameState): boolean {
@@ -2294,6 +2866,9 @@ export function endCurrentEra(state: GameState, options: {turnOrderAlreadyUpdate
   if (state.pendingDecision) {
     throw new Error('Pending decision must be resolved first');
   }
+  if (!shouldEndEra(state)) {
+    throw new Error('Cannot end era before all cards are played');
+  }
 
   const endedEra = state.era;
   const score = scoreCurrentEra(state);
@@ -2303,6 +2878,14 @@ export function endCurrentEra(state: GameState, options: {turnOrderAlreadyUpdate
   }
   state.currentTurnIndex = 0;
   state.actionIndexInTurn = 0;
+
+  if (endedEra === 'canal' && state.variant === 'introductory_canal_only') {
+    scoreIntroductoryGameBonuses(state);
+    state.status = 'ended';
+    pushEvent(state, {type: 'era_ended', era: endedEra, score});
+    pushEvent(state, {type: 'game_ended', winners: determineWinners(state)});
+    return score;
+  }
 
   if (endedEra === 'canal') {
     removeCanalEraIndustries(state);
@@ -2358,7 +2941,18 @@ export function advanceTurnAfterAction(state: GameState): void {
   pushEvent(state, {type: 'turn_advanced', currentPlayerId: getCurrentPlayerId(state), roundNumber: state.roundNumber});
 }
 
+function isCommandEnvelope(command: unknown): command is GameCommand {
+  return command !== null &&
+    typeof command === 'object' &&
+    isNonEmptyString((command as {type?: unknown}).type) &&
+    isNonEmptyString((command as {playerId?: unknown}).playerId);
+}
+
 export function validateCommand(state: GameState, command: GameCommand): ValidationResult {
+  if (!isCommandEnvelope(command)) {
+    return fail('Malformed command');
+  }
+
   switch (command.type) {
     case 'build':
       return validateBuild(state, command);
@@ -2391,6 +2985,10 @@ function replaceGameState(target: GameState, source: GameState): void {
 }
 
 function executeCommandUnchecked(state: GameState, command: GameCommand): void {
+  if (!isCommandEnvelope(command)) {
+    throw new Error('Malformed command');
+  }
+
   switch (command.type) {
     case 'build':
       executeBuild(state, command);
@@ -2462,6 +3060,9 @@ export function canSellToMerchantSpace(state: GameState, industry: IndustryInsta
 
 export function scoreLinkValue(state: GameState, linkLineId: string): number {
   const line = staticConfig.linkLines[linkLineId];
+  if (!line) {
+    throw new Error(`Unknown link line: ${linkLineId}`);
+  }
   const endpointIds = [line.endpointA, line.endpointB, line.viaFarmBreweryId].filter(Boolean) as string[];
   return endpointIds.reduce((sum, locationId) => {
     const location = staticConfig.locations[locationId];

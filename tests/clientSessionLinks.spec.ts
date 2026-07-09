@@ -14,6 +14,12 @@ describe('client session join links', () => {
     expect(hashForGameState('game-123', '#bad%hash')).toBe('#game-123');
   });
 
+  it('ignores malformed query hashes instead of preserving broken join credentials', () => {
+    expect(parseGameJoinHash('#gameId=bad%hash&playerId=p1&sessionToken=token')).toBeUndefined();
+    expect(parseGameJoinHash('#gameId=%E0%A4%A&playerId=p1&sessionToken=token')).toBeUndefined();
+    expect(hashForGameState('game-123', '#gameId=%E0%A4%A&playerId=p1&sessionToken=token')).toBe('#game-123');
+  });
+
   it('parses player session hash fragments for direct player joins', () => {
     const hash = playerSessionHash('game-123', {playerId: 'p2', token: 'token&with=symbols'});
 
@@ -30,10 +36,22 @@ describe('client session join links', () => {
     expect(parseGameJoinHash('#playerId=p2&sessionToken=token')).toBeUndefined();
   });
 
+  it('normalizes generated hashes before storing or sharing join links', () => {
+    const hash = playerSessionHash(' game-123 ', {playerId: ' p2 ', token: ' token with spaces '});
+
+    expect(hash).toBe('#gameId=game-123&playerId=p2&sessionToken=token+with+spaces');
+    expect(parseGameJoinHash(hash)).toEqual({
+      gameId: 'game-123',
+      playerId: 'p2',
+      sessionToken: 'token with spaces',
+    });
+    expect(parseGameJoinHash(playerSessionHash('game-123', {playerId: 'p2', token: '   '}))).toEqual({gameId: 'game-123'});
+  });
+
   it('builds shareable session urls by replacing any existing hash', () => {
-    const url = playerSessionUrl('http://127.0.0.1:5173/play#old-game', 'game 123', {
-      playerId: 'p1',
-      token: 'token&with=symbols',
+    const url = playerSessionUrl('http://127.0.0.1:5173/play#old-game', ' game 123 ', {
+      playerId: ' p1 ',
+      token: ' token&with=symbols ',
     });
 
     expect(url).toBe('http://127.0.0.1:5173/play#gameId=game+123&playerId=p1&sessionToken=token%26with%3Dsymbols');
@@ -48,6 +66,7 @@ describe('client session join links', () => {
     const hash = playerSessionHash('game-123', {playerId: 'p2', token: 'token-2'});
 
     expect(hashForGameState('game-123', hash)).toBe(hash);
+    expect(hashForGameState(' game-123 ', 'gameId= game-123 &playerId= p2 &sessionToken= token-2 ')).toBe(hash);
     expect(hashForGameState('other-game', hash)).toBe('#other-game');
     expect(hashForGameState('game-123', '#game-123')).toBe('#game-123');
   });

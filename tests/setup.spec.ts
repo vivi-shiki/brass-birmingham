@@ -30,6 +30,13 @@ function merchantTileSpecId(merchantTileInstanceId: string): string {
   return merchantTileInstanceId.replace(/-\d+$/, '');
 }
 
+function expectedMerchantTileSpecIds(playerCount: PlayerCount): string[] {
+  return Object.values(staticConfig.merchantTileSpecs)
+    .filter((spec) => spec.minPlayers <= playerCount)
+    .map((spec) => spec.id)
+    .sort();
+}
+
 describe('game setup', () => {
   it('creates a two-player game with hands, facedown discards, markets, and first-round turn state', () => {
     const state = createGame({id: 'g1', playerNames: ['Ada', 'Ben'], seed: 42});
@@ -58,6 +65,23 @@ describe('game setup', () => {
     expect(state.players.p1.industryTileStacks.pottery.availableSpecIdsInOrder[0]).toBe('pottery-1-1');
     expect(staticConfig.industryTileSpecs['pottery-1-1'].canDevelop).toBe(false);
     expect(state.players.p1.remainingLinks).toEqual({canal: 14, rail: 14});
+  });
+
+  it('normalizes player names at the core setup boundary', () => {
+    const state = createGame({id: 'names', playerNames: ['  Ada  ', '   '], seed: 42});
+
+    expect(state.players.p1.name).toBe('Ada');
+    expect(state.players.p2.name).toBe('Player 2');
+  });
+
+  it('creates introductory Canal-only games only when explicitly requested', () => {
+    expect(createGame({id: 'standard', playerNames: ['Ada', 'Ben'], seed: 42}).variant).toBeUndefined();
+    expect(createGame({
+      id: 'introductory',
+      playerNames: ['Ada', 'Ben'],
+      seed: 42,
+      introductoryCanalOnly: true,
+    }).variant).toBe('introductory_canal_only');
   });
 
   it('deals exactly the selected player-count deck and keeps wild cards out of private zones', () => {
@@ -196,6 +220,7 @@ describe('game setup', () => {
       expect(Object.keys(state.board.merchantSpaces)).toHaveLength(expectedMerchantSpaceCounts[playerCount]);
       expect(activeMerchantTileSpecIds).toHaveLength(expectedMerchantSpaceCounts[playerCount]);
       expect(new Set(activeMerchantTileSpecIds).size).toBe(activeMerchantTileSpecIds.length);
+      expect([...activeMerchantTileSpecIds].sort()).toEqual(expectedMerchantTileSpecIds(playerCount));
       expect(activeMerchantTileSpecIds.filter((specId) => staticConfig.merchantTileSpecs[specId].blank))
         .toHaveLength(expectedBlankMerchantTileCounts[playerCount]);
       expect(Object.values(state.board.merchantSpaces).filter((space) => space.beerPresent))

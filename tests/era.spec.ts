@@ -1,8 +1,8 @@
 import {describe, expect, it} from 'vitest';
 import {createGame} from '../src/common/gameSetup';
-import {applyCommand, endCurrentEra, scoreCurrentEra, validateBuild} from '../src/common/gameEngine';
+import {applyCommand, endCurrentEra, scoreCurrentEra, scoreLinkValue, validateBuild} from '../src/common/gameEngine';
 import {retreatIncomeLevels} from '../src/common/income';
-import {getCardIdsForPlayerCount, staticConfig} from '../src/common/staticData';
+import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../src/common/staticData';
 import type {GameState} from '../src/common/types';
 import {addIndustry, addLink, setHand, setMerchantSpace, testGame} from './helpers';
 
@@ -42,7 +42,30 @@ function cardsInPrivateZones(state: GameState): string[] {
   ];
 }
 
+function passUntilEraLeaves(state: GameState, era: GameState['era']): number {
+  let maxRoundSeen = state.roundNumber;
+  let actions = 0;
+  while (state.status === 'playing' && state.era === era) {
+    const playerId = state.turnOrder[state.currentTurnIndex];
+    const cardId = state.players[playerId].handCardIds[0];
+    if (!cardId) {
+      throw new Error(`Player ${playerId} has no card to pass in ${era} round ${state.roundNumber}`);
+    }
+    maxRoundSeen = Math.max(maxRoundSeen, state.roundNumber);
+    applyCommand(state, {type: 'pass', playerId, cardId});
+    actions++;
+    if (actions > 300) {
+      throw new Error(`Pass-only ${era} simulation did not finish`);
+    }
+  }
+  return maxRoundSeen;
+}
+
 describe('era scoring and transition', () => {
+  it('reports unknown link ids explicitly when scoring a link value', () => {
+    expect(() => scoreLinkValue(testGame(), 'missing-link-line')).toThrow('Unknown link line: missing-link-line');
+  });
+
   it('scores links and flipped industries, cleans Canal pieces, and moves into Rail', () => {
     const state = testGame();
     emptyHandsAndPrepareRailDeck(state);
@@ -80,6 +103,110 @@ describe('era scoring and transition', () => {
     expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p1', delta: 3, reason: 'link scoring'});
     expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p1', delta: 5, reason: 'industry scoring'});
     expect(state.eventLog.some((event) => event.type === 'era_ended' && event.era === 'canal')).toBe(true);
+  });
+
+  it('ends an introductory Canal-only game after Canal scoring and applies the extra variant scoring', () => {
+    const state = createGame({
+      id: 'introductory',
+      playerNames: ['Ada', 'Ben'],
+      seed: 5,
+      initialTurnOrder: ['p1', 'p2'],
+      introductoryCanalOnly: true,
+    });
+    emptyHandsAndPrepareRailDeck(state);
+    state.players.p1.cash = 80;
+    state.players.p1.incomeTrackPosition = positionForIncomeLevel(6);
+    state.players.p2.cash = 10;
+    state.players.p2.victoryPoints = 5;
+    state.players.p2.incomeTrackPosition = positionForIncomeLevel(-3);
+
+    const p1Level1 = addIndustry(state, {
+      id: 'p1-cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      flipped: true,
+    });
+    const p1Level2 = addIndustry(state, {
+      id: 'p1-cotton-2',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-2-1',
+      locationId: 'worcester',
+      slotId: 'worcester-0',
+      flipped: true,
+    });
+    const p1UnflippedLevel2 = addIndustry(state, {
+      id: 'p1-unflipped-cotton-2',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-2-1',
+      locationId: 'kidderminster',
+      slotId: 'kidderminster-0',
+      flipped: false,
+    });
+    const p2Level2 = addIndustry(state, {
+      id: 'p2-cotton-2',
+      ownerPlayerId: 'p2',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-2-1',
+      locationId: 'kidderminster',
+      slotId: 'kidderminster-1',
+      flipped: true,
+    });
+
+    const score = endCurrentEra(state);
+
+    expect(score.era).toBe('canal');
+    expect(score.industryVictoryPointsByPlayer).toEqual({p1: 10, p2: 5});
+    expect(state.status).toBe('ended');
+    expect(state.era).toBe('canal');
+    expect(state.variant).toBe('introductory_canal_only');
+    expect(state.players.p1.victoryPoints).toBe(36);
+    expect(state.players.p2.victoryPoints).toBe(14);
+    expect(state.board.industryInstances[p1Level1.id].removedFromGame).toBe(false);
+    expect(state.board.industryInstances[p1Level2.id].removedFromGame).toBe(false);
+    expect(state.board.industryInstances[p1UnflippedLevel2.id].removedFromGame).toBe(false);
+    expect(state.board.industryInstances[p2Level2.id].removedFromGame).toBe(false);
+    expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p1', delta: 15, reason: 'introductory money scoring'});
+    expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p1', delta: 6, reason: 'introductory income scoring'});
+    expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p2', delta: -3, reason: 'introductory income scoring'});
+    expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p1', delta: 5, reason: 'introductory industry scoring'});
+    expect(state.eventLog).toContainEqual({type: 'victory_points_changed', playerId: 'p2', delta: 5, reason: 'introductory industry scoring'});
+    expect(state.eventLog.filter((event) =>
+      event.type === 'victory_points_changed' &&
+      event.reason === 'introductory industry scoring' &&
+      event.playerId === 'p1',
+    )).toHaveLength(1);
+    expect(state.eventLog).toContainEqual({type: 'game_ended', winners: ['p1']});
+  });
+
+  it.each([
+    [2, 10],
+    [3, 9],
+    [4, 8],
+  ] as const)('ends each era after the official %i-player round count', (playerCount, expectedRounds) => {
+    const playerNames = Array.from({length: playerCount}, (_, index) => `Player ${index + 1}`);
+    const playerIds = playerNames.map((_, index) => `p${index + 1}`);
+    const state = createGame({
+      id: `pass-only-${playerCount}`,
+      playerNames,
+      seed: 23,
+      initialTurnOrder: playerIds,
+    });
+
+    expect(passUntilEraLeaves(state, 'canal')).toBe(expectedRounds);
+    expect(state.era).toBe('rail');
+    expect(state.status).toBe('playing');
+    expect(state.roundNumber).toBe(1);
+
+    expect(passUntilEraLeaves(state, 'rail')).toBe(expectedRounds);
+    expect(state.status).toBe('ended');
+    expect(state.eventLog).toContainEqual(expect.objectContaining({type: 'era_ended', era: 'canal'}));
+    expect(state.eventLog).toContainEqual(expect.objectContaining({type: 'era_ended', era: 'rail'}));
+    expect(state.eventLog).toContainEqual(expect.objectContaining({type: 'game_ended'}));
   });
 
   it('ignores stale link instances while scoring an era', () => {
@@ -240,6 +367,20 @@ describe('era scoring and transition', () => {
     expect(state.eventLog.some((event) => event.type === 'era_ended')).toBe(false);
   });
 
+  it('does not allow ending an era before every card has been played', () => {
+    const state = testGame();
+    const drawDeckBefore = [...state.cardZones.drawDeck];
+    const handBefore = [...state.players.p1.handCardIds];
+    const eventLogBefore = structuredClone(state.eventLog);
+
+    expect(() => endCurrentEra(state)).toThrow('Cannot end era before all cards are played');
+    expect(state.era).toBe('canal');
+    expect(state.lastEraScore).toBeUndefined();
+    expect(state.cardZones.drawDeck).toEqual(drawDeckBefore);
+    expect(state.players.p1.handCardIds).toEqual(handBefore);
+    expect(state.eventLog).toEqual(eventLogBefore);
+  });
+
   it('does not allow the same era to be scored twice', () => {
     const state = testGame();
     emptyHandsAndPrepareRailDeck(state);
@@ -291,6 +432,29 @@ describe('era scoring and transition', () => {
     expect(state.status).toBe('ended');
     expect(state.players.p1.victoryPoints).toBe(10);
     expect(state.eventLog).toContainEqual({type: 'game_ended', winners: ['p1']});
+  });
+
+  it('removes level 1 pottery at Canal end even though pottery I is Rail-buildable', () => {
+    const state = testGame();
+    emptyHandsAndPrepareRailDeck(state);
+    const pottery = addIndustry(state, {
+      id: 'pottery-1',
+      ownerPlayerId: 'p1',
+      industryType: 'pottery',
+      specId: 'pottery-1-1',
+      locationId: 'coventry',
+      slotId: 'coventry-0',
+      flipped: true,
+    });
+    state.players.p1.industryTileStacks.pottery.builtInstanceIds = [pottery.id];
+
+    expect(staticConfig.industryTileSpecs['pottery-1-1'].buildableEras).toEqual(['canal', 'rail']);
+
+    endCurrentEra(state);
+
+    expect(state.board.industryInstances[pottery.id].removedFromGame).toBe(true);
+    expect(state.board.slots['coventry-0'].occupiedBy).toBeUndefined();
+    expect(state.players.p1.industryTileStacks.pottery.builtInstanceIds).not.toContain(pottery.id);
   });
 
   it('blocks undeveloped Canal-only level 1 tiles in Rail but keeps pottery I buildable', () => {
@@ -346,6 +510,47 @@ describe('era scoring and transition', () => {
     expect(score.industryVictoryPointsByPlayer.p1).toBe(4);
     expect(score.totalVictoryPointsByPlayer.p1).toBe(6);
     expect(state.players.p1.victoryPoints).toBe(6);
+  });
+
+  it('does not count unflipped industry icons when scoring links', () => {
+    const state = testGame();
+    emptyHandsAndPrepareRailDeck(state);
+    addIndustry(state, {
+      id: 'flipped-cotton',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      flipped: true,
+    });
+    addIndustry(state, {
+      id: 'unflipped-iron',
+      ownerPlayerId: 'p2',
+      industryType: 'iron_works',
+      specId: 'iron_works-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-2',
+      remainingResource: 4,
+    });
+    addIndustry(state, {
+      id: 'unflipped-brewery',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'southern',
+      slotId: 'southern-brewery',
+      remainingResource: 1,
+    });
+    addLink(state, 'merchant-link', 'p1', 'birmingham-oxford');
+    addLink(state, 'farm-link', 'p2', 'kidderminster-worcester');
+
+    const score = scoreCurrentEra(state);
+
+    expect(score.linkVictoryPointsByPlayer.p1).toBe(3);
+    expect(score.linkVictoryPointsByPlayer.p2).toBe(0);
+    expect(state.players.p1.victoryPoints).toBe(8);
+    expect(state.players.p2.victoryPoints).toBe(0);
   });
 
   it('automatically ends an era after the last card is discarded', () => {
@@ -417,6 +622,31 @@ describe('era scoring and transition', () => {
     expect(new Set(cardsInPrivateZones(state)).size).toBe(expectedCards.length);
   });
 
+  it('keeps public wild pools out of the rebuilt Rail deck', () => {
+    const state = testGame();
+    const discardedCards = getCardIdsForPlayerCount(2).slice(0, 3);
+    const wildLocationPoolBefore = [...state.cardZones.wildLocationPool];
+    const wildIndustryPoolBefore = [...state.cardZones.wildIndustryPool];
+
+    state.cardZones.drawDeck = [];
+    state.players.p1.discardCardIds = discardedCards.slice(0, 2);
+    state.players.p1.faceDownDiscardCount = 1;
+    state.players.p2.discardCardIds = discardedCards.slice(2);
+    state.players.p2.faceDownDiscardCount = 1;
+    setHand(state, 'p1', []);
+    setHand(state, 'p2', []);
+
+    endCurrentEra(state);
+
+    expect(state.era).toBe('rail');
+    expect(state.cardZones.wildLocationPool).toEqual(wildLocationPoolBefore);
+    expect(state.cardZones.wildIndustryPool).toEqual(wildIndustryPoolBefore);
+    expect(state.cardZones.wildLocationPool).toEqual(getWildLocationCardIds());
+    expect(state.cardZones.wildIndustryPool).toEqual(getWildIndustryCardIds());
+    expect(cardsInPrivateZones(state).sort()).toEqual([...discardedCards].sort());
+    expect(cardsInPrivateZones(state).some((cardId) => cardId.startsWith('wild-'))).toBe(false);
+  });
+
   it('pays income at the end of the final Canal round before era scoring', () => {
     const state = testGame();
     state.cardZones.drawDeck = [];
@@ -431,6 +661,30 @@ describe('era scoring and transition', () => {
     expect(state.era).toBe('rail');
     expect(state.players.p1.cash).toBe(22);
     expect(state.eventLog).toContainEqual({type: 'cash_changed', playerId: 'p1', delta: 5, reason: 'income'});
+    expect(state.eventLog.some((event) => event.type === 'era_ended' && event.era === 'canal')).toBe(true);
+  });
+
+  it('uses final Canal spending order as the first Rail turn order exactly once', () => {
+    const state = testGame();
+    state.turnOrder = ['p1', 'p2'];
+    state.cardZones.drawDeck = [];
+    state.players.p1.discardCardIds = [];
+    state.players.p2.discardCardIds = [];
+    state.players.p1.spentThisRound = 8;
+    state.players.p2.spentThisRound = 0;
+    setHand(state, 'p1', ['p2-location-birmingham-1']);
+    setHand(state, 'p2', []);
+
+    applyCommand(state, {type: 'pass', playerId: 'p1', cardId: 'p2-location-birmingham-1'});
+
+    expect(state.era).toBe('rail');
+    expect(state.turnOrder).toEqual(['p2', 'p1']);
+    expect(state.currentTurnIndex).toBe(0);
+    expect(state.players.p1.spentThisRound).toBe(0);
+    expect(state.players.p2.spentThisRound).toBe(0);
+    expect(state.eventLog.filter((event) => event.type === 'turn_order_updated')).toEqual([
+      {type: 'turn_order_updated', order: ['p2', 'p1']},
+    ]);
     expect(state.eventLog.some((event) => event.type === 'era_ended' && event.era === 'canal')).toBe(true);
   });
 
@@ -641,6 +895,36 @@ describe('era scoring and transition', () => {
     state.players.p2.incomeTrackPosition = positionForIncomeLevel(5);
     state.players.p1.cash = 10;
     state.players.p2.cash = 10;
+
+    endCurrentEra(state);
+
+    expect(state.eventLog).toContainEqual({type: 'game_ended', winners: ['p1', 'p2']});
+  });
+
+  it('keeps only the tied top players as winners in a multiplayer final tie', () => {
+    const state = createGame({
+      id: 'three-player-final-tie',
+      playerNames: ['Ada', 'Ben', 'Cara'],
+      seed: 5,
+      initialTurnOrder: ['p1', 'p2', 'p3'],
+    });
+    state.era = 'rail';
+    state.players.p1.discardCardIds = [...state.players.p1.handCardIds];
+    state.players.p2.discardCardIds = [...state.players.p2.handCardIds];
+    state.players.p3.discardCardIds = [...state.players.p3.handCardIds];
+    state.players.p1.handCardIds = [];
+    state.players.p2.handCardIds = [];
+    state.players.p3.handCardIds = [];
+    state.cardZones.drawDeck = [];
+    state.players.p1.victoryPoints = 20;
+    state.players.p2.victoryPoints = 20;
+    state.players.p3.victoryPoints = 19;
+    state.players.p1.incomeTrackPosition = positionForIncomeLevel(5);
+    state.players.p2.incomeTrackPosition = positionForIncomeLevel(5);
+    state.players.p3.incomeTrackPosition = positionForIncomeLevel(10);
+    state.players.p1.cash = 10;
+    state.players.p2.cash = 10;
+    state.players.p3.cash = 99;
 
     endCurrentEra(state);
 

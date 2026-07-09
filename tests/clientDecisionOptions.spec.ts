@@ -8,6 +8,7 @@ import {
   resolveMerchantDevelopDecisionReason,
   resolveNegativeIncomeDecisionReason,
 } from '../src/client/decisionOptions';
+import {applyCommand} from '../src/common/gameEngine';
 import {addIndustry, testGame} from './helpers';
 
 describe('client pending decision options', () => {
@@ -25,6 +26,16 @@ describe('client pending decision options', () => {
       merchantSpaceId: 'gloucester-0',
       merchantSpaceIds: ['gloucester-0', 'gloucester-1', 'gloucester-0'],
     })).toBe('gloucester-0, gloucester-1');
+  });
+
+  it('normalizes merchant develop source labels from dirty decision payloads', () => {
+    expect(merchantDevelopSourceLabel({
+      type: 'merchant_develop',
+      playerId: 'p1',
+      count: 2,
+      merchantSpaceId: ' gloucester-0 ',
+      merchantSpaceIds: [' gloucester-1 ', ' ', 'gloucester-1'],
+    })).toBe('gloucester-1, gloucester-0');
   });
 
   it('allows resolving a merchant develop decision with a valid develop selection', () => {
@@ -50,6 +61,15 @@ describe('client pending decision options', () => {
 
     expect(canSubmitResolveMerchantDevelop(state, 'p1', [])).toBe(false);
     expect(resolveMerchantDevelopDecisionReason(state, 'p1', [])).toBe('Merchant develop must remove 1 tile');
+  });
+
+  it('rejects resolving merchant develop with more selections than the merchant bonus allows', () => {
+    const state = testGame();
+    state.pendingDecision = {type: 'merchant_develop', playerId: 'p1', count: 1, merchantSpaceId: 'gloucester-0'};
+
+    expect(canSubmitResolveMerchantDevelop(state, 'p1', ['coal_mine', 'iron_works'])).toBe(false);
+    expect(resolveMerchantDevelopDecisionReason(state, 'p1', ['coal_mine', 'iron_works']))
+      .toBe('Merchant develop can remove at most 1 tile');
   });
 
   it('allows resolving merchant develop with no selections when no developable stack heads remain', () => {
@@ -216,5 +236,62 @@ describe('client pending decision options', () => {
       coal.id,
       flippedCotton.id,
     ]);
+  });
+
+  it('allows submitting the ordered negative-income liquidation options only until the debt is covered', () => {
+    const state = testGame();
+    state.players.p1.cash = 0;
+    state.pendingDecision = {type: 'negative_income', playerId: 'p1', amountOwed: 8, incomePlayerIndex: 0};
+    const cotton = addIndustry(state, {
+      id: 'cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+    });
+    const coal = addIndustry(state, {
+      id: 'coal-1',
+      ownerPlayerId: 'p1',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-1-1',
+      locationId: 'cannock',
+      slotId: 'cannock-1',
+    });
+    const manufacturer = addIndustry(state, {
+      id: 'manufacturer-1',
+      ownerPlayerId: 'p1',
+      industryType: 'manufacturer',
+      specId: 'manufacturer-1-1',
+      locationId: 'walsall',
+      slotId: 'walsall-0',
+    });
+    const orderedIds = negativeIncomeIndustryOptions(state, 'p1').map((industry) => industry.id);
+
+    expect(orderedIds).toEqual([cotton.id, manufacturer.id, coal.id]);
+    expect(canSubmitResolveNegativeIncome(state, 'p1', orderedIds.slice(0, 1))).toBe(false);
+    expect(resolveNegativeIncomeDecisionReason(state, 'p1', orderedIds.slice(0, 1)))
+      .toBe('Negative income requires removing industries until the shortfall is covered or no industries remain');
+    expect(canSubmitResolveNegativeIncome(state, 'p1', orderedIds.slice(0, 2))).toBe(true);
+
+    applyCommand(state, {
+      type: 'resolve_negative_income',
+      playerId: 'p1',
+      industryInstanceIds: orderedIds.slice(0, 2),
+    });
+
+    expect(state.pendingDecision).toBeUndefined();
+    expect(state.players.p1.cash).toBe(2);
+    expect(state.board.industryInstances[cotton.id].removedFromGame).toBe(true);
+    expect(state.board.industryInstances[manufacturer.id].removedFromGame).toBe(true);
+    expect(state.board.industryInstances[coal.id].removedFromGame).toBe(false);
+    expect(state.eventLog).toContainEqual({
+      type: 'negative_income_resolved',
+      playerId: 'p1',
+      amountOwed: 8,
+      paid: 8,
+      victoryPointLoss: 0,
+      industryInstanceIds: [cotton.id, manufacturer.id],
+    });
   });
 });

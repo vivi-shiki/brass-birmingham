@@ -28,7 +28,27 @@ describe('client network link options', () => {
 
     expect(optionIds).not.toContain('birmingham-walsall');
     expect(optionIds).not.toContain('birmingham-nuneaton');
+    expect(optionIds).not.toContain('stokeOnTrent-warrington');
+    expect(optionIds).not.toContain('derby-nottingham');
     expect(optionIds).toContain('cannock-stafford');
+  });
+
+  it('filters high-player-count merchant links from Network options', () => {
+    const threePlayer = testGame();
+    threePlayer.playerCount = 3;
+
+    const threePlayerOptionIds = networkLinkOptionsForSelect(threePlayer, 'p1', [], 0).map((line) => line.id);
+
+    expect(threePlayerOptionIds).toContain('stokeOnTrent-warrington');
+    expect(threePlayerOptionIds).not.toContain('derby-nottingham');
+
+    const fourPlayer = testGame();
+    fourPlayer.playerCount = 4;
+
+    const fourPlayerOptionIds = networkLinkOptionsForSelect(fourPlayer, 'p1', [], 0).map((line) => line.id);
+
+    expect(fourPlayerOptionIds).toContain('stokeOnTrent-warrington');
+    expect(fourPlayerOptionIds).toContain('derby-nottingham');
   });
 
   it('requires the first link to extend from an existing player network', () => {
@@ -109,11 +129,39 @@ describe('client network link options', () => {
     expect(canSubmitNetwork(state, 'p1', firstHandCard(state, 'p1'), [])).toBe(false);
   });
 
+  it('rejects stale network submission targets without throwing', () => {
+    const state = testGame();
+
+    expect(canSubmitNetwork(state, 'p1', firstHandCard(state, 'p1'), ['missing-link-line'])).toBe(false);
+  });
+
   it('rejects Rail network when the player cannot afford the link even with free coal', () => {
     const state = prepareRailNetwork();
     state.players.p1.cash = 4;
 
     expect(canSubmitNetwork(state, 'p1', 'p2-location-cannock-1', ['cannock-stafford'])).toBe(false);
+  });
+
+  it('allows single rail submission with a selected coal source and no beer source', () => {
+    const state = prepareRailNetwork();
+    addIndustry(state, {
+      id: 'unused-brewery',
+      ownerPlayerId: 'p1',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'coalbrookdale',
+      slotId: 'coalbrookdale-0',
+      remainingResource: 1,
+    });
+
+    expect(canSubmitNetwork(
+      state,
+      'p1',
+      'p2-location-cannock-1',
+      ['cannock-stafford'],
+      [{kind: 'industry_tile', industryInstanceId: 'coal-1', resourceType: 'coal'}],
+      undefined,
+    )).toBe(true);
   });
 
   it('rejects double rail submission when no brewery beer is available', () => {
@@ -144,17 +192,41 @@ describe('client network link options', () => {
     )).toBe(true);
   });
 
-  it('only decodes a selected beer source for two-rail submissions in the Rail era', () => {
+  it('only decodes a legal selected beer source for two-rail submissions in the Rail era', () => {
     const rail = prepareRailNetwork();
-    const source = {kind: 'industry_tile' as const, industryInstanceId: 'brewery-1', resourceType: 'beer' as const};
+    const brewery = addIndustry(rail, {
+      id: 'brewery-1',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-2-1',
+      locationId: 'stone',
+      slotId: 'stone-0',
+      remainingResource: 1,
+    });
+    const disconnectedBrewery = addIndustry(rail, {
+      id: 'brewery-disconnected',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-2-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      remainingResource: 1,
+    });
+    const source = {kind: 'industry_tile' as const, industryInstanceId: brewery.id, resourceType: 'beer' as const};
     const encodedSource = encodeSource(source);
+    const disconnectedSource = encodeSource({
+      kind: 'industry_tile' as const,
+      industryInstanceId: disconnectedBrewery.id,
+      resourceType: 'beer' as const,
+    });
 
-    expect(doubleRailBeerSourceForSubmit(rail, ['cannock-stafford', 'stafford-stone'], encodedSource)).toEqual(source);
-    expect(doubleRailBeerSourceForSubmit(rail, ['cannock-stafford'], encodedSource)).toBeUndefined();
-    expect(doubleRailBeerSourceForSubmit(rail, ['cannock-stafford', 'stafford-stone'], '')).toBeUndefined();
-    expect(doubleRailBeerSourceForSubmit(rail, ['cannock-stafford', 'stafford-stone'], 'not-json')).toBeUndefined();
+    expect(doubleRailBeerSourceForSubmit(rail, 'p1', ['cannock-stafford', 'stafford-stone'], encodedSource)).toEqual(source);
+    expect(doubleRailBeerSourceForSubmit(rail, 'p1', ['cannock-stafford', 'stafford-stone'], disconnectedSource)).toBeUndefined();
+    expect(doubleRailBeerSourceForSubmit(rail, 'p1', ['cannock-stafford'], encodedSource)).toBeUndefined();
+    expect(doubleRailBeerSourceForSubmit(rail, 'p1', ['cannock-stafford', 'stafford-stone'], '')).toBeUndefined();
+    expect(doubleRailBeerSourceForSubmit(rail, 'p1', ['cannock-stafford', 'stafford-stone'], 'not-json')).toBeUndefined();
 
     const canal = testGame();
-    expect(doubleRailBeerSourceForSubmit(canal, ['birmingham-walsall', 'walsall-wolverhampton'], encodedSource)).toBeUndefined();
+    expect(doubleRailBeerSourceForSubmit(canal, 'p1', ['birmingham-walsall', 'walsall-wolverhampton'], encodedSource)).toBeUndefined();
   });
 });

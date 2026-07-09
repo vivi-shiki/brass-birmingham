@@ -1,8 +1,9 @@
-import {validateNetwork} from '../common/gameEngine';
-import {hasAnyPlayerNetwork, isInPlayerNetwork, linkLineTouchesLocation} from '../common/selectors';
+import {legalBeerSourcesForNetwork, validateNetwork} from '../common/gameEngine';
+import {hasAnyPlayerNetwork, isInPlayerNetwork, isLinkLineActiveForPlayerCount, linkLineTouchesLocation} from '../common/selectors';
 import {staticConfig} from '../common/staticData';
 import type {GameState, LinkLineSpec, LinkType, ResourceSource} from '../common/types';
 import {optionalSource} from './resourceSources';
+import {validationOk} from './validation';
 
 function linkTypeForEra(game: GameState): LinkType {
   return game.era === 'canal' ? 'canal' : 'rail';
@@ -19,7 +20,7 @@ function isInPlayerNetworkWithPendingLinks(
   }
   return pendingLinkLineIds.some((linkLineId) => {
     const line = staticConfig.linkLines[linkLineId];
-    return line ? linkLineTouchesLocation(line, locationId) : false;
+    return line && isLinkLineActiveForPlayerCount(game, line) ? linkLineTouchesLocation(line, locationId) : false;
   });
 }
 
@@ -32,6 +33,16 @@ function linkExtendsPlayerNetwork(
   return [line.endpointA, line.endpointB, line.viaFarmBreweryId]
     .filter((locationId): locationId is string => Boolean(locationId))
     .some((locationId) => isInPlayerNetworkWithPendingLinks(game, playerId, locationId, pendingLinkLineIds));
+}
+
+function sourceKey(source: ResourceSource): string {
+  if (source.kind === 'industry_tile') {
+    return `industry:${source.industryInstanceId}:${source.resourceType}`;
+  }
+  if (source.kind === 'merchant_beer') {
+    return `merchant:${source.merchantSpaceId}:${source.merchantTileInstanceId}`;
+  }
+  return `market:${source.market}:${source.price}`;
 }
 
 export function networkLinkOptionsForSelect(
@@ -67,12 +78,14 @@ export function networkLinkOptionsForSelect(
     !alreadySelected.has(line.id) &&
     !game.board.linkLines[line.id]?.occupiedBy &&
     line.allowedLinkTypes.includes(linkType) &&
+    isLinkLineActiveForPlayerCount(game, line) &&
     (!mustExtendNetwork || linkExtendsPlayerNetwork(game, playerId, line, pendingLinkLineIds)),
   );
 }
 
 export function doubleRailBeerSourceForSubmit(
   game: GameState,
+  playerId: string,
   linkLineIds: string[],
   encodedBeerSource: string,
 ): ResourceSource | undefined {
@@ -80,7 +93,16 @@ export function doubleRailBeerSourceForSubmit(
     return undefined;
   }
 
-  return optionalSource(encodedBeerSource);
+  const selectedSource = optionalSource(encodedBeerSource);
+  if (!selectedSource) {
+    return undefined;
+  }
+
+  const selectedKey = sourceKey(selectedSource);
+  return legalBeerSourcesForNetwork(game, playerId, linkLineIds)
+    .some((source) => sourceKey(source) === selectedKey)
+    ? selectedSource
+    : undefined;
 }
 
 export function canSubmitNetwork(
@@ -94,12 +116,12 @@ export function canSubmitNetwork(
   if (linkLineIds.length === 0) {
     return false;
   }
-  return validateNetwork(game, {
+  return validationOk(() => validateNetwork(game, {
     type: 'network',
     playerId,
     cardId,
     linkLineIds,
     coalSources,
     beerSourceForDoubleRail,
-  }).ok;
+  }));
 }

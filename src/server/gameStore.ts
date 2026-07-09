@@ -1,15 +1,23 @@
 import {randomUUID} from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import {applyCommand, validateCommand} from '../common/gameEngine';
-import {createGame, INDUSTRY_TYPES, validateGameSeed} from '../common/gameSetup';
-import {getCurrentPlayerId} from '../common/selectors';
+import {
+  cashChangeReasonMatchesDelta,
+  incomeChangeReasonMatchesMove,
+  normalizeGameEventReason,
+  resourceConsumptionReasonMatchesSource,
+  victoryPointReasonMatchesDelta,
+} from '../common/eventLogValidation';
+import {applyCommand, determineWinners, validateCommand} from '../common/gameEngine';
+import {createGame, INDUSTRY_TYPES, LINK_TYPES, validateGameSeed} from '../common/gameSetup';
+import {isLinkLineActiveForPlayerCount} from '../common/selectors';
 import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../common/staticData';
-import type {BoardState, GameCommand, GameState, IndustryInstance, IndustryTileSpec, IndustryType, LinkInstance, PlayerCount} from '../common/types';
+import type {BoardState, GameCommand, GameEvent, GameState, IndustryInstance, IndustryTileSpec, IndustryType, LinkInstance, LinkType, MerchantBonus, PlayerCount, ResourceSource, ResourceType} from '../common/types';
 
 export interface CreateStoredGameInput {
   playerNames: string[];
   seed?: number;
+  introductoryCanalOnly?: boolean;
 }
 
 export interface CommandResult {
@@ -35,8 +43,12 @@ export interface GameSummary {
   roundNumber: number;
   era: GameState['era'];
   status: GameState['status'];
+  variant?: GameState['variant'];
+  connectedClientCount?: number;
   currentPlayerId?: string;
   pendingDecision?: ListedPendingDecision;
+  winners?: string[];
+  victoryPointsByPlayer?: Record<string, number>;
 }
 
 export interface GameStoreOptions {
@@ -49,16 +61,587 @@ interface PersistedGameStore {
   sessions?: Record<string, PlayerSession[]>;
 }
 
-type CommandPayload = Pick<GameCommand, 'type' | 'playerId'> & Record<string, unknown>;
+type CommandPayload = {type: string; playerId: string} & Record<string, unknown>;
+
+const MAX_MERCHANT_DEVELOP_REMOVALS = Object.values(staticConfig.locations).reduce((max, location) =>
+  location.kind === 'merchant' && location.bonus.type === 'develop'
+    ? Math.max(max, location.spaces.length)
+    : max,
+  0,
+);
+
+const GAME_EVENT_TYPES = [
+  'game_created',
+  'card_discarded',
+  'cash_changed',
+  'income_position_changed',
+  'industry_built',
+  'industry_removed',
+  'industry_flipped',
+  'industry_sold',
+  'resource_consumed',
+  'resource_sold_to_market',
+  'link_built',
+  'link_scored',
+  'industry_scored',
+  'merchant_bonus_claimed',
+  'merchant_develop_resolved',
+  'turn_advanced',
+  'turn_order_updated',
+  'negative_income_started',
+  'negative_income_resolved',
+  'victory_points_changed',
+  'era_ended',
+  'game_ended',
+  'loan_taken',
+  'scouted',
+] as const satisfies readonly GameEvent['type'][];
+
+const KNOWN_GAME_EVENT_TYPES = new Set<string>(GAME_EVENT_TYPES);
+
+function isKnownGameEventType(type: string): type is GameEvent['type'] {
+  return KNOWN_GAME_EVENT_TYPES.has(type);
+}
+
+const INDUSTRY_REMOVAL_REASONS = [
+  'overbuild',
+  'develop',
+  'canal_cleanup',
+  'negative_income',
+] as const satisfies readonly Extract<GameEvent, {type: 'industry_removed'}>['reason'][];
+
+const MARKETS = ['coal', 'iron'] as const;
 
 const validIndustryTypes = new Set<string>(INDUSTRY_TYPES);
+const supportedPlayerIds = ['p1', 'p2', 'p3', 'p4'] as const;
+const supportedPlayerIdSet = new Set<string>(supportedPlayerIds);
 
 function isPlayerCount(value: unknown): value is PlayerCount {
   return value === 2 || value === 3 || value === 4;
 }
 
+function expectedPlayerIdsForCount(playerCount: PlayerCount): string[] {
+  return supportedPlayerIds.slice(0, playerCount);
+}
+
 function playerIdsInSeatOrder(game: GameState): string[] {
   return Object.keys(game.players).sort((a, b) => a.localeCompare(b, undefined, {numeric: true}));
+}
+
+function normalizedEventPlayerId(value: unknown, validPlayerIds: ReadonlySet<string>): string | undefined {
+  const playerId = trimmedNonEmptyString(value);
+  return playerId !== undefined && validPlayerIds.has(playerId) ? playerId : undefined;
+}
+
+function normalizedEventPlayerIds(value: unknown, validPlayerIds: ReadonlySet<string>): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const playerIds: string[] = [];
+  for (const item of value) {
+    const playerId = normalizedEventPlayerId(item, validPlayerIds);
+    if (playerId !== undefined && !playerIds.includes(playerId)) {
+      playerIds.push(playerId);
+    }
+  }
+  return playerIds.length > 0 ? playerIds : undefined;
+}
+
+function playerIdSetsMatch(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((playerId) => right.includes(playerId));
+}
+
+function normalizedGameEndedWinners(value: unknown, game: GameState, validPlayerIds: ReadonlySet<string>): string[] | undefined {
+  const winners = normalizedEventPlayerIds(value, validPlayerIds);
+  if (winners === undefined || game.status !== 'ended') {
+    return undefined;
+  }
+  const expectedWinners = determineWinners(game);
+  return playerIdSetsMatch(winners, expectedWinners) ? expectedWinners : undefined;
+}
+
+function positiveIntegerEventValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+function integerEventValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) ? value : undefined;
+}
+
+function nonNegativeIntegerEventValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function isCompletePlayerOrder(order: string[], playerIds: string[]): boolean {
+  return order.length === playerIds.length && playerIds.every((playerId) => order.includes(playerId));
+}
+
+function normalizedEventCardId(value: unknown): string | undefined {
+  const cardId = trimmedNonEmptyString(value);
+  return cardId !== undefined && staticConfig.cardSpecs[cardId] !== undefined ? cardId : undefined;
+}
+
+function discardDestinationForCard(cardId: string): Extract<GameEvent, {type: 'card_discarded'}>['destination'] {
+  const cardType = staticConfig.cardSpecs[cardId]?.type;
+  return cardType === 'wild_location' || cardType === 'wild_industry' ? 'wild_pool' : 'discard';
+}
+
+function normalizedEventReason(value: unknown): string | undefined {
+  return normalizeGameEventReason(value);
+}
+
+function normalizedEventIndustryType(value: unknown): IndustryType | undefined {
+  const industryType = trimmedNonEmptyString(value);
+  return industryType !== undefined && validIndustryTypes.has(industryType) ? industryType as IndustryType : undefined;
+}
+
+function normalizedEventLinkType(value: unknown): LinkType | undefined {
+  const linkType = trimmedNonEmptyString(value);
+  return linkType !== undefined && (LINK_TYPES as readonly string[]).includes(linkType) ? linkType as LinkType : undefined;
+}
+
+function normalizedEventMarket(value: unknown): 'coal' | 'iron' | undefined {
+  const market = trimmedNonEmptyString(value);
+  return market !== undefined && (MARKETS as readonly string[]).includes(market) ? market as 'coal' | 'iron' : undefined;
+}
+
+function normalizedIndustryRemovalReason(value: unknown): Extract<GameEvent, {type: 'industry_removed'}>['reason'] | undefined {
+  const reason = trimmedNonEmptyString(value);
+  return reason !== undefined && (INDUSTRY_REMOVAL_REASONS as readonly string[]).includes(reason)
+    ? reason as Extract<GameEvent, {type: 'industry_removed'}>['reason']
+    : undefined;
+}
+
+function isGeneratedEventInstanceId(id: string, prefix: 'industry' | 'link'): boolean {
+  return new RegExp(`^${prefix}-\\d+$`).test(id);
+}
+
+function maxResourceCapacityForIndustrySpec(spec: IndustryTileSpec): number {
+  return Math.max(
+    resourceCapacityForIndustrySpec(spec, 'canal'),
+    resourceCapacityForIndustrySpec(spec, 'rail'),
+  );
+}
+
+function normalizedEventIndustryInstance(value: unknown, validPlayerIds: ReadonlySet<string>): IndustryInstance | undefined {
+  if (!isObjectMap(value)) {
+    return undefined;
+  }
+
+  const id = trimmedNonEmptyString(value.id);
+  const ownerPlayerId = normalizedEventPlayerId(value.ownerPlayerId, validPlayerIds);
+  const industryType = normalizedEventIndustryType(value.industryType);
+  const specId = trimmedNonEmptyString(value.specId);
+  const locationId = trimmedNonEmptyString(value.locationId);
+  const slotId = trimmedNonEmptyString(value.slotId);
+  const remainingResource = nonNegativeIntegerEventValue(value.remainingResource);
+  const flipped = typeof value.flipped === 'boolean' ? value.flipped : undefined;
+  const removedFromGame = typeof value.removedFromGame === 'boolean' ? value.removedFromGame : false;
+  const spec = specId === undefined ? undefined : staticConfig.industryTileSpecs[specId];
+  const slot = slotId === undefined ? undefined : expectedBoardSlots()[slotId];
+
+  if (
+    id === undefined ||
+    !isGeneratedEventInstanceId(id, 'industry') ||
+    ownerPlayerId === undefined ||
+    industryType === undefined ||
+    specId === undefined ||
+    spec === undefined ||
+    spec.industryType !== industryType ||
+    locationId === undefined ||
+    slotId === undefined ||
+    slot === undefined ||
+    slot.locationId !== locationId ||
+    !slot.allowedIndustryTypes.includes(industryType) ||
+    remainingResource === undefined ||
+    flipped === undefined
+  ) {
+    return undefined;
+  }
+
+  return {
+    id,
+    specId,
+    ownerPlayerId,
+    industryType,
+    level: spec.level,
+    locationId,
+    slotId,
+    flipped,
+    remainingResource: flipped ? 0 : Math.min(remainingResource, maxResourceCapacityForIndustrySpec(spec)),
+    removedFromGame,
+  };
+}
+
+function normalizedEventLinkInstance(value: unknown, validPlayerIds: ReadonlySet<string>, game: GameState): LinkInstance | undefined {
+  if (!isObjectMap(value)) {
+    return undefined;
+  }
+
+  const id = trimmedNonEmptyString(value.id);
+  const ownerPlayerId = normalizedEventPlayerId(value.ownerPlayerId, validPlayerIds);
+  const linkType = normalizedEventLinkType(value.linkType);
+  const linkLineId = trimmedNonEmptyString(value.linkLineId);
+  const line = linkLineId === undefined ? undefined : staticConfig.linkLines[linkLineId];
+
+  if (
+    id === undefined ||
+    !isGeneratedEventInstanceId(id, 'link') ||
+    ownerPlayerId === undefined ||
+    linkType === undefined ||
+    linkLineId === undefined ||
+    line === undefined ||
+    !line.allowedLinkTypes.includes(linkType) ||
+    !isLinkLineActiveForPlayerCount(game, line)
+  ) {
+    return undefined;
+  }
+
+  return {id, ownerPlayerId, linkType, linkLineId};
+}
+
+function normalizedKnownIndustryInstanceId(
+  value: unknown,
+  game: GameState,
+  ownerPlayerId?: string,
+): string | undefined {
+  const industryInstanceId = trimmedNonEmptyString(value);
+  const industry = industryInstanceId === undefined
+    ? undefined
+    : game.board.industryInstances[industryInstanceId];
+  return industry !== undefined && (ownerPlayerId === undefined || industry.ownerPlayerId === ownerPlayerId)
+    ? industryInstanceId
+    : undefined;
+}
+
+function normalizedOwnedIndustryEventIds(value: unknown, game: GameState, playerId: string): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const industryInstanceIds: string[] = [];
+  for (const item of value) {
+    const industryInstanceId = trimmedNonEmptyString(item);
+    const industry = industryInstanceId === undefined
+      ? undefined
+      : game.board.industryInstances[industryInstanceId];
+    if (industryInstanceId === undefined || industry?.ownerPlayerId !== playerId) {
+      return undefined;
+    }
+    if (!industryInstanceIds.includes(industryInstanceId)) {
+      industryInstanceIds.push(industryInstanceId);
+    }
+  }
+  return industryInstanceIds;
+}
+
+function normalizedKnownMerchantSpaceId(value: unknown, game: GameState): string | undefined {
+  const merchantSpaceId = trimmedNonEmptyString(value);
+  return merchantSpaceId !== undefined && game.board.merchantSpaces[merchantSpaceId]
+    ? merchantSpaceId
+    : undefined;
+}
+
+function normalizedKnownMerchantSpaceIds(value: unknown, game: GameState, requiredMerchantSpaceId: string): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const merchantSpaceIds = [requiredMerchantSpaceId];
+  for (const item of value) {
+    const merchantSpaceId = normalizedKnownMerchantSpaceId(item, game);
+    if (merchantSpaceId === undefined) {
+      return undefined;
+    }
+    if (!merchantSpaceIds.includes(merchantSpaceId)) {
+      merchantSpaceIds.push(merchantSpaceId);
+    }
+  }
+  return merchantSpaceIds;
+}
+
+function merchantSpaceAcceptsIndustry(game: GameState, merchantSpaceId: string, industryType: IndustryType): boolean {
+  const merchantTileInstanceId = game.board.merchantSpaces[merchantSpaceId]?.merchantTileInstanceId;
+  const specId = typeof merchantTileInstanceId === 'string'
+    ? merchantTileSpecId(merchantTileInstanceId.trim())
+    : undefined;
+  const spec = specId === undefined ? undefined : staticConfig.merchantTileSpecs[specId];
+  return Boolean(spec && !spec.blank && spec.acceptedIndustryTypes.includes(industryType));
+}
+
+function merchantSpaceHasNonBlankTile(game: GameState, merchantSpaceId: string, merchantTileInstanceId: string): boolean {
+  const specId = merchantTileSpecId(merchantTileInstanceId.trim());
+  const spec = staticConfig.merchantTileSpecs[specId];
+  return Boolean(
+    spec &&
+    !spec.blank &&
+    game.board.merchantSpaces[merchantSpaceId]?.merchantTileInstanceId === merchantTileInstanceId,
+  );
+}
+
+function resourceTypeMatchesIndustry(resourceType: ResourceType, industry: IndustryInstance): boolean {
+  return (
+    (resourceType === 'coal' && industry.industryType === 'coal_mine') ||
+    (resourceType === 'iron' && industry.industryType === 'iron_works') ||
+    (resourceType === 'beer' && industry.industryType === 'brewery')
+  );
+}
+
+function normalizedEventResourceSource(value: unknown, game: GameState): ResourceSource | undefined {
+  if (!isObjectMap(value)) {
+    return undefined;
+  }
+
+  const kind = trimmedNonEmptyString(value.kind);
+  if (kind === 'industry_tile') {
+    const industryInstanceId = trimmedNonEmptyString(value.industryInstanceId);
+    const resourceType = trimmedNonEmptyString(value.resourceType);
+    const industry = industryInstanceId === undefined
+      ? undefined
+      : game.board.industryInstances[industryInstanceId];
+    if (
+      industryInstanceId === undefined ||
+      industry === undefined ||
+      (resourceType !== 'coal' && resourceType !== 'iron' && resourceType !== 'beer') ||
+      !resourceTypeMatchesIndustry(resourceType, industry)
+    ) {
+      return undefined;
+    }
+    return {kind: 'industry_tile', industryInstanceId, resourceType};
+  }
+
+  if (kind === 'market') {
+    const market = normalizedEventMarket(value.market);
+    const price = nonNegativeIntegerEventValue(value.price);
+    if (market === undefined || price === undefined || !isMarketPrice(market, price)) {
+      return undefined;
+    }
+    return {kind: 'market', market, price};
+  }
+
+  if (kind === 'merchant_beer') {
+    const merchantSpaceId = normalizedKnownMerchantSpaceId(value.merchantSpaceId, game);
+    const merchantTileInstanceId = trimmedNonEmptyString(value.merchantTileInstanceId);
+    const merchantSpace = merchantSpaceId === undefined
+      ? undefined
+      : game.board.merchantSpaces[merchantSpaceId];
+    if (
+      merchantSpaceId === undefined ||
+      merchantTileInstanceId === undefined ||
+      merchantSpace?.merchantTileInstanceId !== merchantTileInstanceId ||
+      !merchantSpaceHasNonBlankTile(game, merchantSpaceId, merchantTileInstanceId)
+    ) {
+      return undefined;
+    }
+    return {kind: 'merchant_beer', merchantSpaceId, merchantTileInstanceId};
+  }
+
+  return undefined;
+}
+
+function normalizedMerchantBonus(value: unknown): MerchantBonus | undefined {
+  if (!isObjectMap(value)) {
+    return undefined;
+  }
+
+  const type = trimmedNonEmptyString(value.type);
+  if (type === 'develop') {
+    return value.count === 1 ? {type: 'develop', count: 1} : undefined;
+  }
+
+  if (type === 'income_spaces') {
+    const spaces = positiveIntegerEventValue(value.spaces);
+    return spaces === undefined ? undefined : {type: 'income_spaces', spaces};
+  }
+
+  if (type === 'victory_points') {
+    const points = positiveIntegerEventValue(value.points);
+    return points === undefined ? undefined : {type: 'victory_points', points};
+  }
+
+  if (type === 'cash') {
+    const cash = positiveIntegerEventValue(value.cash);
+    return cash === undefined ? undefined : {type: 'cash', cash};
+  }
+
+  return undefined;
+}
+
+function merchantBonusForSpace(merchantSpaceId: string): MerchantBonus | undefined {
+  const merchant = Object.values(staticConfig.locations).find((location) =>
+    location.kind === 'merchant' && location.spaces.some((space) => space.id === merchantSpaceId),
+  );
+  return merchant?.kind === 'merchant' ? merchant.bonus : undefined;
+}
+
+function merchantBonusesMatch(actual: MerchantBonus, expected: MerchantBonus): boolean {
+  switch (expected.type) {
+    case 'develop':
+      return actual.type === 'develop' && actual.count === expected.count;
+    case 'income_spaces':
+      return actual.type === 'income_spaces' && actual.spaces === expected.spaces;
+    case 'victory_points':
+      return actual.type === 'victory_points' && actual.points === expected.points;
+    case 'cash':
+      return actual.type === 'cash' && actual.cash === expected.cash;
+  }
+}
+
+function merchantBonusMatchesSpace(merchantSpaceId: string, bonus: MerchantBonus): boolean {
+  const expected = merchantBonusForSpace(merchantSpaceId);
+  return expected !== undefined && merchantBonusesMatch(bonus, expected);
+}
+
+function industryIsFlipped(game: GameState, industryInstanceId: string): boolean {
+  return game.board.industryInstances[industryInstanceId]?.flipped === true;
+}
+
+function industryIsRemoved(game: GameState, industryInstanceId: string): boolean {
+  return game.board.industryInstances[industryInstanceId]?.removedFromGame === true;
+}
+
+function negativeIncomeResolutionMatchesRules(
+  game: GameState,
+  industryInstanceIds: readonly string[],
+  amountOwed: number,
+  paid: number,
+  victoryPointLoss: number,
+): boolean {
+  return paid + victoryPointLoss === amountOwed &&
+    industryInstanceIds.every((industryInstanceId) => industryIsRemoved(game, industryInstanceId));
+}
+
+function industryScoreMatchesRules(game: GameState, industryInstanceId: string, points: number): boolean {
+  const industry = game.board.industryInstances[industryInstanceId];
+  const expectedPoints = industry === undefined
+    ? undefined
+    : staticConfig.industryTileSpecs[industry.specId]?.flip.victoryPoints;
+  return expectedPoints === points && (industry?.removedFromGame === true || industry?.flipped === true);
+}
+
+function normalizedEventIndustryTypes(value: unknown): IndustryType[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+
+  const industryTypes: IndustryType[] = [];
+  for (const item of value) {
+    const industryType = normalizedEventIndustryType(item);
+    if (industryType === undefined) {
+      return undefined;
+    }
+    industryTypes.push(industryType);
+  }
+  return industryTypes;
+}
+
+function normalizedEventSpecIdsForIndustryTypes(value: unknown, industryTypes: readonly IndustryType[]): string[] | undefined {
+  if (!Array.isArray(value) || value.length !== industryTypes.length) {
+    return undefined;
+  }
+
+  const specIds: string[] = [];
+  for (const [index, item] of value.entries()) {
+    const specId = trimmedNonEmptyString(item);
+    const spec = specId === undefined ? undefined : staticConfig.industryTileSpecs[specId];
+    if (specId === undefined || spec?.industryType !== industryTypes[index]) {
+      return undefined;
+    }
+    specIds.push(specId);
+  }
+  return specIds;
+}
+
+interface HistoricalLinkReference {
+  ownerPlayerId: string;
+  linkLineId: string;
+  signature: string;
+}
+
+type HistoricalLinkReferenceEntry = HistoricalLinkReference | null;
+
+function historicalLinkSignature(instance: LinkInstance): string {
+  return `${instance.ownerPlayerId}|${instance.linkType}|${instance.linkLineId}`;
+}
+
+function recordHistoricalLinkReference(
+  references: Map<string, HistoricalLinkReferenceEntry>,
+  instance: LinkInstance,
+): void {
+  const reference = {
+    ownerPlayerId: instance.ownerPlayerId,
+    linkLineId: instance.linkLineId,
+    signature: historicalLinkSignature(instance),
+  };
+  if (!references.has(instance.id)) {
+    references.set(instance.id, reference);
+    return;
+  }
+
+  const existingReference = references.get(instance.id);
+  if (
+    existingReference !== undefined &&
+    existingReference !== null &&
+    (existingReference.ownerPlayerId !== reference.ownerPlayerId ||
+      existingReference.signature !== reference.signature)
+  ) {
+    references.set(instance.id, null);
+  }
+}
+
+function normalizedKnownLinkOwner(
+  linkInstanceId: string,
+  ownerPlayerId: string,
+  game: GameState,
+  historicalLinkReferences: ReadonlyMap<string, HistoricalLinkReferenceEntry>,
+): boolean {
+  const link = game.board.linkInstances[linkInstanceId];
+  if (link?.ownerPlayerId === ownerPlayerId) {
+    return true;
+  }
+  const reference = historicalLinkReferences.get(linkInstanceId);
+  return reference !== undefined && reference !== null && reference.ownerPlayerId === ownerPlayerId;
+}
+
+function knownLinkLineIdForScoredLink(
+  game: GameState,
+  linkInstanceId: string,
+  historicalLinkReferences: ReadonlyMap<string, HistoricalLinkReferenceEntry>,
+): string | undefined {
+  const linkLineId = game.board.linkInstances[linkInstanceId]?.linkLineId;
+  if (linkLineId !== undefined) {
+    return linkLineId;
+  }
+  const reference = historicalLinkReferences.get(linkInstanceId);
+  return reference === undefined || reference === null ? undefined : reference.linkLineId;
+}
+
+function linkScoreValueForBoard(game: GameState, linkLineId: string): number | undefined {
+  const line = staticConfig.linkLines[linkLineId];
+  if (!line) {
+    return undefined;
+  }
+  const endpointIds = [line.endpointA, line.endpointB, line.viaFarmBreweryId]
+    .filter((locationId): locationId is string => Boolean(locationId));
+  return endpointIds.reduce((sum, locationId) => {
+    const location = staticConfig.locations[locationId];
+    const printed = location?.printedLinkIcons ?? 0;
+    const industryIcons = Object.values(game.board.industryInstances)
+      .filter((industry) => industry.locationId === locationId && industry.flipped)
+      .reduce((total, industry) => total + (staticConfig.industryTileSpecs[industry.specId]?.flip.linkIcons ?? 0), 0);
+    return sum + printed + industryIcons;
+  }, 0);
+}
+
+function linkScoreMatchesRules(
+  game: GameState,
+  linkInstanceId: string,
+  points: number,
+  historicalLinkReferences: ReadonlyMap<string, HistoricalLinkReferenceEntry>,
+): boolean {
+  const linkLineId = knownLinkLineIdForScoredLink(game, linkInstanceId, historicalLinkReferences);
+  const expectedPoints = linkLineId === undefined ? undefined : linkScoreValueForBoard(game, linkLineId);
+  return expectedPoints === points;
 }
 
 function isCommandEnvelope(command: unknown): command is CommandPayload {
@@ -72,6 +655,42 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function trimmedNonEmptyString(value: unknown): string | undefined {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed || undefined;
+}
+
+function normalizeStringProperty(record: Record<string, unknown>, field: string): string | undefined {
+  const value = trimmedNonEmptyString(record[field]);
+  if (value !== undefined) {
+    record[field] = value;
+  }
+  return value;
+}
+
+function normalizeCommandValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeCommandValue(item));
+  }
+  if (isRecord(value)) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, normalizeCommandValue(item)]),
+    );
+  }
+  return value;
+}
+
+function normalizeCommandEnvelope(command: CommandPayload): CommandPayload {
+  return normalizeCommandValue(command) as CommandPayload;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -80,10 +699,195 @@ function isObjectMap(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function validateStringField(command: CommandPayload, field: string, errors: string[]): void {
-  if (typeof command[field] !== 'string') {
-    errors.push(`${command.type} command requires ${field}`);
+function publicTurnOrder(game: GameState): string[] {
+  const playerIds = playerIdsInSeatOrder(game);
+  const turnOrder: string[] = [];
+  const rawTurnOrder = Array.isArray(game.turnOrder) ? game.turnOrder : [];
+  for (const rawPlayerId of rawTurnOrder) {
+    const playerId = trimmedNonEmptyString(rawPlayerId);
+    if (playerId !== undefined && playerIds.includes(playerId) && !turnOrder.includes(playerId)) {
+      turnOrder.push(playerId);
+    }
   }
+  for (const playerId of playerIds) {
+    if (!turnOrder.includes(playerId)) {
+      turnOrder.push(playerId);
+    }
+  }
+  return turnOrder;
+}
+
+function publicPlayerCount(game: GameState): PlayerCount {
+  const playerCount = playerIdsInSeatOrder(game).length;
+  return isPlayerCount(playerCount)
+    ? playerCount
+    : isPlayerCount(game.playerCount) ? game.playerCount : 2;
+}
+
+function publicRoundNumber(game: GameState): number {
+  return nonNegativeInteger(game.roundNumber, 1) || 1;
+}
+
+function publicEra(game: GameState): GameState['era'] {
+  const era = trimmedNonEmptyString(game.era);
+  return era === 'canal' || era === 'rail' ? era : 'canal';
+}
+
+function publicStatus(game: GameState): GameState['status'] {
+  const status = trimmedNonEmptyString(game.status);
+  return status === 'playing' || status === 'ended' ? status : 'playing';
+}
+
+function publicPlayerName(playerId: string, player: GameState['players'][string]): string {
+  const name = trimmedNonEmptyString((player as {name?: unknown}).name);
+  if (name !== undefined) {
+    return name;
+  }
+  const seat = /^p(\d+)$/.exec(playerId)?.[1];
+  return seat ? `Player ${seat}` : 'Player';
+}
+
+function publicPlayerIdAtTurnIndex(game: GameState, turnIndex: unknown): string | undefined {
+  if (
+    !Array.isArray(game.turnOrder) ||
+    typeof turnIndex !== 'number' ||
+    !Number.isInteger(turnIndex) ||
+    turnIndex < 0 ||
+    turnIndex >= game.turnOrder.length
+  ) {
+    return undefined;
+  }
+  const playerId = trimmedNonEmptyString(game.turnOrder[turnIndex]);
+  return playerId !== undefined && game.players[playerId] ? playerId : undefined;
+}
+
+function publicTurnIndex(game: GameState, turnIndex: unknown): number | undefined {
+  const turnOrder = publicTurnOrder(game);
+  if (turnOrder.length === 0) {
+    return undefined;
+  }
+  const currentPlayerId = publicPlayerIdAtTurnIndex(game, turnIndex);
+  if (currentPlayerId !== undefined) {
+    return turnOrder.indexOf(currentPlayerId);
+  }
+  return typeof turnIndex === 'number' && Number.isInteger(turnIndex) && turnIndex >= 0 && turnIndex < turnOrder.length
+    ? turnIndex
+    : 0;
+}
+
+function publicCurrentPlayerId(game: GameState): string | undefined {
+  if (publicStatus(game) !== 'playing') {
+    return undefined;
+  }
+  const turnOrder = publicTurnOrder(game);
+  const turnIndex = publicTurnIndex(game, (game as {currentTurnIndex?: unknown}).currentTurnIndex);
+  return turnIndex === undefined ? undefined : turnOrder[turnIndex];
+}
+
+function publicPendingDecisionSummary(game: GameState): ListedPendingDecision | undefined {
+  if (publicStatus(game) !== 'playing') {
+    return undefined;
+  }
+  const decision = (game as Partial<GameState>).pendingDecision;
+  if (!isRecord(decision)) {
+    return undefined;
+  }
+  const playerId = trimmedNonEmptyString(decision.playerId);
+  if (playerId === undefined || !game.players[playerId]) {
+    return undefined;
+  }
+
+  if (decision.type === 'negative_income') {
+    const amountOwed = decision.amountOwed;
+    const incomePlayerIndex = decision.incomePlayerIndex;
+    const turnOrder = publicTurnOrder(game);
+    if (
+      typeof amountOwed !== 'number' ||
+      !Number.isFinite(amountOwed) ||
+      Math.floor(amountOwed) <= 0 ||
+      typeof incomePlayerIndex !== 'number' ||
+      !Number.isInteger(incomePlayerIndex) ||
+      incomePlayerIndex < 0 ||
+      incomePlayerIndex >= turnOrder.length ||
+      turnOrder[incomePlayerIndex] !== playerId
+    ) {
+      return undefined;
+    }
+    return {type: 'negative_income', playerId};
+  }
+
+  if (decision.type === 'merchant_develop') {
+    const count = decision.count;
+    const merchantSpaceId = trimmedNonEmptyString(decision.merchantSpaceId);
+    if (
+      typeof count !== 'number' ||
+      !Number.isFinite(count) ||
+      Math.floor(count) <= 0 ||
+      merchantSpaceId === undefined ||
+      !game.board.merchantSpaces[merchantSpaceId] ||
+      !merchantSpaceHasDevelopBonus(merchantSpaceId)
+    ) {
+      return undefined;
+    }
+    return {type: 'merchant_develop', playerId};
+  }
+
+  return undefined;
+}
+
+function publicVictoryPointsByPlayer(game: GameState): Record<string, number> | undefined {
+  if (publicStatus(game) !== 'ended') {
+    return undefined;
+  }
+  const entries = playerIdsInSeatOrder(game).flatMap((playerId) => {
+    const player = game.players[playerId];
+    const victoryPoints = player ? nonNegativeInteger(player.victoryPoints, 0) : undefined;
+    return victoryPoints === undefined ? [] : [[playerId, victoryPoints] as const];
+  });
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+function publicGameWinners(game: GameState): string[] | undefined {
+  if (publicStatus(game) !== 'ended') {
+    return undefined;
+  }
+  const victoryPointsByPlayer = publicVictoryPointsByPlayer(game);
+  if (!victoryPointsByPlayer) {
+    return undefined;
+  }
+  const validPlayerIds = new Set(Object.keys(victoryPointsByPlayer));
+  const endedEvents = Array.isArray(game.eventLog)
+    ? game.eventLog.filter((event): event is Extract<GameEvent, {type: 'game_ended'}> => event.type === 'game_ended')
+    : [];
+  for (let index = endedEvents.length - 1; index >= 0; index--) {
+    const winners = normalizedGameEndedWinners(endedEvents[index].winners, game, validPlayerIds);
+    if (winners !== undefined) {
+      return winners;
+    }
+  }
+  return determineWinners(game);
+}
+
+function validateStringField(command: CommandPayload, field: string, errors: string[]): void {
+  const value = command[field];
+  if (typeof value !== 'string') {
+    errors.push(`${command.type} command requires ${field}`);
+    return;
+  }
+  if (!isNonEmptyString(value)) {
+    errors.push(`${command.type} command field ${field} must be a non-empty string`);
+  }
+}
+
+function validateCommandEnvelopeFields(command: CommandPayload): string[] {
+  const errors: string[] = [];
+  if (!isNonEmptyString(command.type)) {
+    errors.push('Command type must be a non-empty string');
+  }
+  if (!isNonEmptyString(command.playerId)) {
+    errors.push('Command playerId must be a non-empty string');
+  }
+  return errors;
 }
 
 function validateIndustryTypeField(command: CommandPayload, field: string, errors: string[]): void {
@@ -97,18 +901,69 @@ function validateIndustryTypeField(command: CommandPayload, field: string, error
   }
 }
 
-function validateStringArrayField(command: CommandPayload, field: string, errors: string[]): void {
-  if (!isStringArray(command[field])) {
-    errors.push(`${command.type} command requires ${field} as a string array`);
+function isMarketPrice(market: 'coal' | 'iron', price: number): boolean {
+  const config = staticConfig.markets[market];
+  return config.priceSlotsCheapestToMostExpensive.includes(price) || config.fallbackPriceWhenEmpty === price;
+}
+
+function isMarketSlotPrice(market: 'coal' | 'iron', price: number): boolean {
+  return staticConfig.markets[market].priceSlotsCheapestToMostExpensive.includes(price);
+}
+
+type ArrayLengthRule =
+  | {exactly: number}
+  | {min: number; max?: number};
+
+function entryLabel(count: number): string {
+  return count === 1 ? 'entry' : 'entries';
+}
+
+function validateArrayLength(
+  command: CommandPayload,
+  field: string,
+  value: unknown[],
+  errors: string[],
+  rule?: ArrayLengthRule,
+): void {
+  if (!rule) {
+    return;
+  }
+  if ('exactly' in rule) {
+    if (value.length !== rule.exactly) {
+      errors.push(`${command.type} command field ${field} must contain exactly ${rule.exactly} ${entryLabel(rule.exactly)}`);
+    }
+    return;
+  }
+  if (value.length < rule.min) {
+    errors.push(`${command.type} command field ${field} must contain at least ${rule.min} ${entryLabel(rule.min)}`);
+    return;
+  }
+  if (rule.max !== undefined && value.length > rule.max) {
+    errors.push(`${command.type} command field ${field} must contain at most ${rule.max} ${entryLabel(rule.max)}`);
   }
 }
 
-function validateIndustryTypeArrayField(command: CommandPayload, field: string, errors: string[]): void {
+function validateStringArrayField(command: CommandPayload, field: string, errors: string[], rule?: ArrayLengthRule): void {
   const value = command[field];
   if (!isStringArray(value)) {
     errors.push(`${command.type} command requires ${field} as a string array`);
     return;
   }
+  validateArrayLength(command, field, value, errors, rule);
+  for (const [index, item] of value.entries()) {
+    if (!isNonEmptyString(item)) {
+      errors.push(`${command.type} command field ${field}[${index}] must be a non-empty string`);
+    }
+  }
+}
+
+function validateIndustryTypeArrayField(command: CommandPayload, field: string, errors: string[], rule?: ArrayLengthRule): void {
+  const value = command[field];
+  if (!isStringArray(value)) {
+    errors.push(`${command.type} command requires ${field} as a string array`);
+    return;
+  }
+  validateArrayLength(command, field, value, errors, rule);
   for (const [index, industryType] of value.entries()) {
     if (!validIndustryTypes.has(industryType)) {
       errors.push(`${command.type} command field ${field}[${index}] must be a valid industry type`);
@@ -116,7 +971,7 @@ function validateIndustryTypeArrayField(command: CommandPayload, field: string, 
   }
 }
 
-function validateResourceSource(value: unknown, pathName: string, errors: string[]): void {
+function validateResourceSource(value: unknown, pathName: string, errors: string[], expectedResource?: ResourceType): void {
   if (!isRecord(value) || typeof value.kind !== 'string') {
     errors.push(`${pathName} must be a resource source`);
     return;
@@ -125,9 +980,13 @@ function validateResourceSource(value: unknown, pathName: string, errors: string
   if (value.kind === 'industry_tile') {
     if (typeof value.industryInstanceId !== 'string') {
       errors.push(`${pathName}.industryInstanceId must be a string`);
+    } else if (!isNonEmptyString(value.industryInstanceId)) {
+      errors.push(`${pathName}.industryInstanceId must be a non-empty string`);
     }
     if (value.resourceType !== 'coal' && value.resourceType !== 'iron' && value.resourceType !== 'beer') {
       errors.push(`${pathName}.resourceType must be coal, iron, or beer`);
+    } else if (expectedResource !== undefined && value.resourceType !== expectedResource) {
+      errors.push(`${pathName}.resourceType must be ${expectedResource}`);
     }
     return;
   }
@@ -135,21 +994,34 @@ function validateResourceSource(value: unknown, pathName: string, errors: string
   if (value.kind === 'market') {
     if (value.market !== 'coal' && value.market !== 'iron') {
       errors.push(`${pathName}.market must be coal or iron`);
+    } else if (expectedResource === 'beer') {
+      errors.push(`${pathName} cannot be a market source for beer`);
+    } else if (expectedResource !== undefined && value.market !== expectedResource) {
+      errors.push(`${pathName}.market must be ${expectedResource}`);
     }
     if (typeof value.price !== 'number' || !Number.isFinite(value.price)) {
       errors.push(`${pathName}.price must be a finite number`);
     } else if (!Number.isInteger(value.price) || value.price < 0) {
       errors.push(`${pathName}.price must be a non-negative integer`);
+    } else if ((value.market === 'coal' || value.market === 'iron') && !isMarketPrice(value.market, value.price)) {
+      errors.push(`${pathName}.price must match a ${value.market} market price`);
     }
     return;
   }
 
   if (value.kind === 'merchant_beer') {
+    if (expectedResource !== undefined && expectedResource !== 'beer') {
+      errors.push(`${pathName}.kind cannot supply ${expectedResource}`);
+    }
     if (typeof value.merchantSpaceId !== 'string') {
       errors.push(`${pathName}.merchantSpaceId must be a string`);
+    } else if (!isNonEmptyString(value.merchantSpaceId)) {
+      errors.push(`${pathName}.merchantSpaceId must be a non-empty string`);
     }
     if (typeof value.merchantTileInstanceId !== 'string') {
       errors.push(`${pathName}.merchantTileInstanceId must be a string`);
+    } else if (!isNonEmptyString(value.merchantTileInstanceId)) {
+      errors.push(`${pathName}.merchantTileInstanceId must be a non-empty string`);
     }
     return;
   }
@@ -157,7 +1029,13 @@ function validateResourceSource(value: unknown, pathName: string, errors: string
   errors.push(`${pathName}.kind must be industry_tile, market, or merchant_beer`);
 }
 
-function validateOptionalResourceSources(command: CommandPayload, field: string, errors: string[]): void {
+function validateOptionalResourceSources(
+  command: CommandPayload,
+  field: string,
+  errors: string[],
+  rule?: ArrayLengthRule,
+  expectedResource?: ResourceType,
+): void {
   const value = command[field];
   if (value === undefined) {
     return;
@@ -166,8 +1044,9 @@ function validateOptionalResourceSources(command: CommandPayload, field: string,
     errors.push(`${command.type} command field ${field} must be an array`);
     return;
   }
+  validateArrayLength(command, field, value, errors, rule);
   for (const [index, source] of value.entries()) {
-    validateResourceSource(source, `${command.type} command field ${field}[${index}]`, errors);
+    validateResourceSource(source, `${command.type} command field ${field}[${index}]`, errors, expectedResource);
   }
 }
 
@@ -176,6 +1055,7 @@ function validateSellSteps(command: CommandPayload, errors: string[]): void {
     errors.push('sell command requires sales as an array');
     return;
   }
+  validateArrayLength(command, 'sales', command.sales, errors, {min: 1});
   for (const [index, step] of command.sales.entries()) {
     if (typeof step !== 'object' || step === null) {
       errors.push(`sell command sales[${index}] must be an object`);
@@ -184,15 +1064,20 @@ function validateSellSteps(command: CommandPayload, errors: string[]): void {
     const sale = step as Record<string, unknown>;
     if (typeof sale.industryInstanceId !== 'string') {
       errors.push(`sell command sales[${index}] requires industryInstanceId`);
+    } else if (!isNonEmptyString(sale.industryInstanceId)) {
+      errors.push(`sell command sales[${index}].industryInstanceId must be a non-empty string`);
     }
     if (typeof sale.merchantSpaceId !== 'string') {
       errors.push(`sell command sales[${index}] requires merchantSpaceId`);
+    } else if (!isNonEmptyString(sale.merchantSpaceId)) {
+      errors.push(`sell command sales[${index}].merchantSpaceId must be a non-empty string`);
     }
     if (sale.beerSources !== undefined && !Array.isArray(sale.beerSources)) {
       errors.push(`sell command sales[${index}] field beerSources must be an array`);
     } else if (Array.isArray(sale.beerSources)) {
+      validateArrayLength(command, `sales[${index}].beerSources`, sale.beerSources, errors, {min: 0, max: 2});
       for (const [sourceIndex, source] of sale.beerSources.entries()) {
-        validateResourceSource(source, `sell command sales[${index}].beerSources[${sourceIndex}]`, errors);
+        validateResourceSource(source, `sell command sales[${index}].beerSources[${sourceIndex}]`, errors, 'beer');
       }
     }
   }
@@ -206,44 +1091,50 @@ function validateCommandPayloadShape(command: CommandPayload): string[] {
       validateStringField(command, 'locationId', errors);
       validateStringField(command, 'slotId', errors);
       validateIndustryTypeField(command, 'industryType', errors);
-      validateOptionalResourceSources(command, 'coalSources', errors);
-      validateOptionalResourceSources(command, 'ironSources', errors);
+      validateOptionalResourceSources(command, 'coalSources', errors, {min: 0, max: 2}, 'coal');
+      validateOptionalResourceSources(command, 'ironSources', errors, {min: 0, max: 2}, 'iron');
       break;
     case 'network':
       validateStringField(command, 'cardId', errors);
-      validateStringArrayField(command, 'linkLineIds', errors);
-      validateOptionalResourceSources(command, 'coalSources', errors);
+      validateStringArrayField(command, 'linkLineIds', errors, {min: 1, max: 2});
+      validateOptionalResourceSources(command, 'coalSources', errors, {min: 0, max: 2}, 'coal');
       if (command.beerSourceForDoubleRail !== undefined) {
-        validateResourceSource(command.beerSourceForDoubleRail, 'network command field beerSourceForDoubleRail', errors);
+        validateResourceSource(command.beerSourceForDoubleRail, 'network command field beerSourceForDoubleRail', errors, 'beer');
       }
       break;
     case 'develop':
       validateStringField(command, 'cardId', errors);
-      validateIndustryTypeArrayField(command, 'industryTypes', errors);
-      validateOptionalResourceSources(command, 'ironSources', errors);
+      validateIndustryTypeArrayField(command, 'industryTypes', errors, {min: 1, max: 2});
+      validateOptionalResourceSources(command, 'ironSources', errors, {min: 0, max: 2}, 'iron');
       break;
     case 'sell':
       validateStringField(command, 'cardId', errors);
       validateSellSteps(command, errors);
       break;
     case 'resolve_negative_income':
-      validateStringArrayField(command, 'industryInstanceIds', errors);
+      validateStringArrayField(command, 'industryInstanceIds', errors, {
+        min: 0,
+        max: staticConfig.components.industryTilesPerPlayer,
+      });
       break;
     case 'resolve_merchant_develop':
-      validateIndustryTypeArrayField(command, 'industryTypes', errors);
+      validateIndustryTypeArrayField(command, 'industryTypes', errors, {
+        min: 0,
+        max: MAX_MERCHANT_DEVELOP_REMOVALS,
+      });
       break;
     case 'loan':
     case 'pass':
       validateStringField(command, 'cardId', errors);
       break;
     case 'scout':
-      validateStringArrayField(command, 'cardIds', errors);
+      validateStringArrayField(command, 'cardIds', errors, {exactly: 3});
       break;
   }
   return errors;
 }
 
-function snapshotCommandPayload(command: CommandPayload): CommandPayload | undefined {
+function snapshotCommandPayload(command: unknown): CommandPayload | undefined {
   try {
     const snapshot = structuredClone(command) as unknown;
     return isCommandEnvelope(snapshot) ? snapshot : undefined;
@@ -354,16 +1245,19 @@ function normalizeMerchantSpaces(game: GameState): void {
 
   for (const spaceId of activeSpaceIds) {
     const legacySpace = legacySpaces[spaceId];
-    if (isObjectMap(legacySpace) && typeof legacySpace.merchantTileInstanceId === 'string') {
-      const specId = merchantTileSpecId(legacySpace.merchantTileInstanceId);
+    const merchantTileInstanceId = isObjectMap(legacySpace)
+      ? trimmedNonEmptyString(legacySpace.merchantTileInstanceId)
+      : undefined;
+    if (isObjectMap(legacySpace) && merchantTileInstanceId !== undefined) {
+      const specId = merchantTileSpecId(merchantTileInstanceId);
       const spec = staticConfig.merchantTileSpecs[specId];
-      if (spec && spec.minPlayers <= game.playerCount && !usedSpecIds.has(specId) && !usedInstanceIds.has(legacySpace.merchantTileInstanceId)) {
+      if (spec && spec.minPlayers <= game.playerCount && !usedSpecIds.has(specId) && !usedInstanceIds.has(merchantTileInstanceId)) {
         normalizedSpaces[spaceId] = {
           id: spaceId,
-          merchantTileInstanceId: legacySpace.merchantTileInstanceId,
+          merchantTileInstanceId,
           beerPresent: typeof legacySpace.beerPresent === 'boolean' ? legacySpace.beerPresent : !spec.blank,
         };
-        usedInstanceIds.add(legacySpace.merchantTileInstanceId);
+        usedInstanceIds.add(merchantTileInstanceId);
         usedSpecIds.add(specId);
         continue;
       }
@@ -426,12 +1320,17 @@ function normalizeBoardOccupancy(game: GameState): Set<string> {
       continue;
     }
     const industry = rawIndustry as Partial<IndustryInstance> as IndustryInstance;
-    if (typeof industry.id !== 'string' || industry.id.length === 0) {
-      industry.id = mapId;
-    }
-    if (industry.id.length === 0) {
+    const industryRecord = industry as unknown as Record<string, unknown>;
+    const industryId = normalizeStringProperty(industryRecord, 'id') ?? trimmedNonEmptyString(mapId);
+    if (!industryId) {
       continue;
     }
+    industry.id = industryId;
+    normalizeStringProperty(industryRecord, 'ownerPlayerId');
+    normalizeStringProperty(industryRecord, 'industryType');
+    normalizeStringProperty(industryRecord, 'specId');
+    normalizeStringProperty(industryRecord, 'locationId');
+    normalizeStringProperty(industryRecord, 'slotId');
     industry.removedFromGame = typeof industry.removedFromGame === 'boolean' ? industry.removedFromGame : false;
     normalizedIndustryInstances[industry.id] = industry;
   }
@@ -497,12 +1396,15 @@ function normalizeBoardOccupancy(game: GameState): Set<string> {
       continue;
     }
     const link = rawLink as Partial<LinkInstance> as LinkInstance;
-    if (typeof link.id !== 'string' || link.id.length === 0) {
-      link.id = mapId;
-    }
-    if (link.id.length === 0) {
+    const linkRecord = link as unknown as Record<string, unknown>;
+    const linkId = normalizeStringProperty(linkRecord, 'id') ?? trimmedNonEmptyString(mapId);
+    if (!linkId) {
       continue;
     }
+    link.id = linkId;
+    normalizeStringProperty(linkRecord, 'ownerPlayerId');
+    normalizeStringProperty(linkRecord, 'linkType');
+    normalizeStringProperty(linkRecord, 'linkLineId');
     normalizedLinkInstances[link.id] = link;
   }
   game.board.linkInstances = normalizedLinkInstances;
@@ -510,19 +1412,22 @@ function normalizeBoardOccupancy(game: GameState): Set<string> {
   const activeLinks = Object.values(game.board.linkInstances)
     .sort((a, b) => a.id.localeCompare(b.id));
   for (const link of activeLinks) {
-    const line = game.board.linkLines[link.linkLineId];
+    const lineState = game.board.linkLines[link.linkLineId];
+    const lineSpec = staticConfig.linkLines[link.linkLineId];
     if (
-      !line ||
+      !lineState ||
+      !lineSpec ||
       !game.players[link.ownerPlayerId] ||
       link.linkType !== game.era ||
-      !staticConfig.linkLines[link.linkLineId]?.allowedLinkTypes.includes(link.linkType) ||
-      line.occupiedBy
+      !lineSpec.allowedLinkTypes.includes(link.linkType) ||
+      !isLinkLineActiveForPlayerCount(game, lineSpec) ||
+      lineState.occupiedBy
     ) {
       delete game.board.linkInstances[link.id];
       continue;
     }
 
-    line.occupiedBy = link.id;
+    lineState.occupiedBy = link.id;
   }
 
   return invalidActiveIndustryIds;
@@ -601,9 +1506,18 @@ function normalizeTurnState(game: GameState): void {
   const normalizedTurnOrder: string[] = [];
   const seenPlayerIds = new Set<string>();
   const loadedTurnOrder = Array.isArray(game.turnOrder) ? game.turnOrder : [];
+  const loadedTurnIndex = (game as {currentTurnIndex?: unknown}).currentTurnIndex;
+  const loadedCurrentPlayerId = typeof loadedTurnIndex === 'number' &&
+    Number.isFinite(loadedTurnIndex) &&
+    Math.floor(loadedTurnIndex) === loadedTurnIndex &&
+    loadedTurnIndex >= 0 &&
+    loadedTurnIndex < loadedTurnOrder.length
+    ? trimmedNonEmptyString(loadedTurnOrder[loadedTurnIndex])
+    : undefined;
 
-  for (const playerId of loadedTurnOrder) {
-    if (typeof playerId !== 'string' || !validPlayerIds.has(playerId) || seenPlayerIds.has(playerId)) {
+  for (const loadedPlayerId of loadedTurnOrder) {
+    const playerId = trimmedNonEmptyString(loadedPlayerId);
+    if (playerId === undefined || !validPlayerIds.has(playerId) || seenPlayerIds.has(playerId)) {
       continue;
     }
     seenPlayerIds.add(playerId);
@@ -623,8 +1537,12 @@ function normalizeTurnState(game: GameState): void {
     return;
   }
 
-  const loadedTurnIndex = (game as {currentTurnIndex?: unknown}).currentTurnIndex;
-  game.currentTurnIndex = typeof loadedTurnIndex === 'number' &&
+  const restoredCurrentIndex = typeof loadedCurrentPlayerId === 'string' && validPlayerIds.has(loadedCurrentPlayerId)
+    ? game.turnOrder.indexOf(loadedCurrentPlayerId)
+    : -1;
+  game.currentTurnIndex = restoredCurrentIndex >= 0
+    ? restoredCurrentIndex
+    : typeof loadedTurnIndex === 'number' &&
     Number.isFinite(loadedTurnIndex) &&
     Math.floor(loadedTurnIndex) === loadedTurnIndex &&
     loadedTurnIndex >= 0 &&
@@ -632,11 +1550,9 @@ function normalizeTurnState(game: GameState): void {
     ? loadedTurnIndex
     : 0;
 
-  if (game.actionsAllowedThisTurn !== 1 && game.actionsAllowedThisTurn !== 2) {
-    game.actionsAllowedThisTurn = game.era === 'canal' && game.roundNumber === 1
-      ? staticConfig.rules.firstCanalRoundActions
-      : staticConfig.rules.normalActionsPerTurn;
-  }
+  game.actionsAllowedThisTurn = game.era === 'canal' && game.roundNumber === 1
+    ? staticConfig.rules.firstCanalRoundActions
+    : staticConfig.rules.normalActionsPerTurn;
 
   const loadedActionIndex = (game as {actionIndexInTurn?: unknown}).actionIndexInTurn;
   game.actionIndexInTurn = typeof loadedActionIndex === 'number' && Number.isFinite(loadedActionIndex)
@@ -658,12 +1574,38 @@ function nonNegativeInteger(value: unknown, fallback: number): number {
   return Math.max(0, Math.floor(value));
 }
 
+function numericBoardInstanceSuffix(id: string): number | undefined {
+  const match = /^(?:industry|link)-(\d+)$/.exec(id);
+  if (!match) {
+    return undefined;
+  }
+  const suffix = Number(match[1]);
+  return Number.isSafeInteger(suffix) ? suffix : undefined;
+}
+
+function normalizeNextInstanceIdFromBoard(game: GameState): void {
+  let nextInstanceId = game.nextInstanceId;
+  for (const id of [
+    ...Object.keys(game.board.industryInstances),
+    ...Object.keys(game.board.linkInstances),
+  ]) {
+    const suffix = numericBoardInstanceSuffix(id);
+    if (suffix !== undefined) {
+      nextInstanceId = Math.max(nextInstanceId, suffix + 1);
+    }
+  }
+  game.nextInstanceId = nextInstanceId;
+}
+
 function normalizeNumericState(game: GameState): void {
   if (game.era !== 'canal' && game.era !== 'rail') {
     game.era = 'canal';
   }
   if (game.status !== 'playing' && game.status !== 'ended') {
     game.status = 'playing';
+  }
+  if ((game as Partial<GameState>).variant !== 'introductory_canal_only') {
+    delete (game as Partial<GameState>).variant;
   }
   game.roundNumber = nonNegativeInteger(game.roundNumber, 1) || 1;
   game.nextInstanceId = nonNegativeInteger(game.nextInstanceId, 1) || 1;
@@ -715,12 +1657,65 @@ function normalizeNumericState(game: GameState): void {
   }
 }
 
+function normalizeRemainingLinksFromBoard(game: GameState): void {
+  const builtCounts = new Map<string, Record<LinkType, number>>();
+  for (const playerId of Object.keys(game.players)) {
+    builtCounts.set(playerId, {canal: 0, rail: 0});
+  }
+
+  for (const link of Object.values(game.board.linkInstances)) {
+    const counts = builtCounts.get(link.ownerPlayerId);
+    if (!counts) {
+      continue;
+    }
+    counts[link.linkType]++;
+  }
+
+  for (const [playerId, player] of Object.entries(game.players)) {
+    const counts = builtCounts.get(playerId) ?? {canal: 0, rail: 0};
+    for (const linkType of ['canal', 'rail'] as const) {
+      player.remainingLinks[linkType] = Math.max(0, staticConfig.rules.initialLinksPerType - counts[linkType]);
+    }
+  }
+}
+
 function normalizeScoreRecord(value: unknown, playerIds: string[]): Record<string, number> {
   const source = isObjectMap(value) ? value : {};
+  const normalizedSource: Record<string, unknown> = {};
+  for (const [rawPlayerId, score] of Object.entries(source)) {
+    const playerId = trimmedNonEmptyString(rawPlayerId);
+    if (playerId !== undefined && normalizedSource[playerId] === undefined) {
+      normalizedSource[playerId] = score;
+    }
+  }
   return Object.fromEntries(playerIds.map((playerId) => [
     playerId,
-    nonNegativeInteger(source[playerId], 0),
+    nonNegativeInteger(normalizedSource[playerId], 0),
   ]));
+}
+
+function scoreBreakdownTotalsMatch(
+  score: Pick<NonNullable<GameState['lastEraScore']>, 'linkVictoryPointsByPlayer' | 'industryVictoryPointsByPlayer' | 'totalVictoryPointsByPlayer'>,
+  playerIds: readonly string[],
+): boolean {
+  return playerIds.every((playerId) =>
+    score.totalVictoryPointsByPlayer[playerId] ===
+    score.linkVictoryPointsByPlayer[playerId] + score.industryVictoryPointsByPlayer[playerId],
+  );
+}
+
+function normalizeEventEraScore(value: unknown, playerIds: string[]): NonNullable<GameState['lastEraScore']> | undefined {
+  const era = isObjectMap(value) ? trimmedNonEmptyString(value.era) : undefined;
+  if (!isObjectMap(value) || (era !== 'canal' && era !== 'rail')) {
+    return undefined;
+  }
+  const score: NonNullable<GameState['lastEraScore']> = {
+    era,
+    linkVictoryPointsByPlayer: normalizeScoreRecord(value.linkVictoryPointsByPlayer, playerIds),
+    industryVictoryPointsByPlayer: normalizeScoreRecord(value.industryVictoryPointsByPlayer, playerIds),
+    totalVictoryPointsByPlayer: normalizeScoreRecord(value.totalVictoryPointsByPlayer, playerIds),
+  };
+  return scoreBreakdownTotalsMatch(score, playerIds) ? score : undefined;
 }
 
 function normalizeLastEraScore(game: GameState): void {
@@ -739,31 +1734,45 @@ function normalizeLastEraScore(game: GameState): void {
   }
 
   const playerIds = Object.keys(game.players);
-  game.lastEraScore = {
+  const normalizedScore: NonNullable<GameState['lastEraScore']> = {
     era: score.era,
     linkVictoryPointsByPlayer: normalizeScoreRecord(score.linkVictoryPointsByPlayer, playerIds),
     industryVictoryPointsByPlayer: normalizeScoreRecord(score.industryVictoryPointsByPlayer, playerIds),
     totalVictoryPointsByPlayer: normalizeScoreRecord(score.totalVictoryPointsByPlayer, playerIds),
   };
+  game.lastEraScore = scoreBreakdownTotalsMatch(normalizedScore, playerIds)
+    ? normalizedScore
+    : undefined;
 }
 
 function normalizePlayersAndCount(game: GameState): void {
   const loadedPlayers = isObjectMap((game as Partial<GameState>).players) ? game.players : {};
   const normalizedPlayers: GameState['players'] = {};
-  const entries = Object.entries(loadedPlayers)
-    .filter(([, player]) => isObjectMap(player))
-    .sort(([a], [b]) => a.localeCompare(b, undefined, {numeric: true}))
-    .slice(0, 4);
+  const entries: Array<[string, Record<string, unknown>]> = [];
+  for (const [rawPlayerId, player] of Object.entries(loadedPlayers)) {
+    const playerId = trimmedNonEmptyString(rawPlayerId);
+    if (playerId === undefined || !supportedPlayerIdSet.has(playerId) || !isObjectMap(player)) {
+      continue;
+    }
+    entries.push([playerId, player]);
+  }
+  entries.sort(([a], [b]) => a.localeCompare(b, undefined, {numeric: true}));
 
-  for (const [index, [playerId, loadedPlayer]] of entries.entries()) {
-    const player = loadedPlayer as GameState['players'][string];
+  for (const [playerId, loadedPlayer] of entries) {
+    if (normalizedPlayers[playerId]) {
+      continue;
+    }
+    const player = loadedPlayer as unknown as GameState['players'][string];
     player.id = playerId;
     player.name = typeof player.name === 'string' && player.name.trim().length > 0
       ? player.name.trim()
-      : `Player ${index + 1}`;
+      : `Player ${Number(playerId.slice(1))}`;
     player.handCardIds = Array.isArray(player.handCardIds) ? player.handCardIds : [];
     player.discardCardIds = Array.isArray(player.discardCardIds) ? player.discardCardIds : [];
     normalizedPlayers[playerId] = player;
+    if (Object.keys(normalizedPlayers).length >= 4) {
+      break;
+    }
   }
 
   game.players = normalizedPlayers;
@@ -786,14 +1795,19 @@ function normalizeMerchantDevelopSpaceIds(game: GameState, decision: Record<stri
     fallbackSpaceId,
     ...(Array.isArray(decision.merchantSpaceIds) ? decision.merchantSpaceIds : []),
   ];
-  return [...new Set(candidateSpaceIds.filter((spaceId): spaceId is string =>
-    typeof spaceId === 'string' &&
+  return [...new Set(candidateSpaceIds.map(trimmedNonEmptyString).filter((spaceId): spaceId is string =>
+    spaceId !== undefined &&
     Boolean(game.board.merchantSpaces[spaceId]) &&
     merchantSpaceHasDevelopBonus(spaceId),
   ))];
 }
 
 function normalizePendingDecision(game: GameState): void {
+  if (game.status !== 'playing') {
+    game.pendingDecision = undefined;
+    return;
+  }
+
   const decision = (game as Partial<GameState>).pendingDecision;
   if (!isRecord(decision) || typeof decision.type !== 'string') {
     game.pendingDecision = undefined;
@@ -801,9 +1815,9 @@ function normalizePendingDecision(game: GameState): void {
   }
 
   if (decision.type === 'negative_income') {
-    const playerId = decision.playerId;
+    const playerId = trimmedNonEmptyString(decision.playerId);
     const amountOwed = decision.amountOwed;
-    if (typeof playerId !== 'string' || !game.players[playerId] || typeof amountOwed !== 'number' || !Number.isFinite(amountOwed)) {
+    if (playerId === undefined || !game.players[playerId] || typeof amountOwed !== 'number' || !Number.isFinite(amountOwed)) {
       game.pendingDecision = undefined;
       return;
     }
@@ -827,13 +1841,13 @@ function normalizePendingDecision(game: GameState): void {
   }
 
   if (decision.type === 'merchant_develop') {
-    const playerId = decision.playerId;
-    const merchantSpaceId = decision.merchantSpaceId;
+    const playerId = trimmedNonEmptyString(decision.playerId);
+    const merchantSpaceId = trimmedNonEmptyString(decision.merchantSpaceId);
     const count = decision.count;
     if (
-      typeof playerId !== 'string' ||
+      playerId === undefined ||
       !game.players[playerId] ||
-      typeof merchantSpaceId !== 'string' ||
+      merchantSpaceId === undefined ||
       !game.board.merchantSpaces[merchantSpaceId] ||
       !merchantSpaceHasDevelopBonus(merchantSpaceId) ||
       typeof count !== 'number' ||
@@ -895,9 +1909,315 @@ function consumedIndustrySpecIds(
 }
 
 function normalizeEventLog(game: GameState): void {
-  game.eventLog = Array.isArray(game.eventLog)
-    ? game.eventLog.filter((event) => isRecord(event) && typeof event.type === 'string') as GameState['eventLog']
-    : [];
+  const normalizedEvents: GameState['eventLog'] = [];
+  const playerIds = playerIdsInSeatOrder(game);
+  const validPlayerIds = new Set(playerIds);
+  const historicalLinkReferences = new Map<string, HistoricalLinkReferenceEntry>();
+  if (Array.isArray(game.eventLog)) {
+    for (const event of game.eventLog) {
+      if (!isRecord(event) || typeof event.type !== 'string') {
+        continue;
+      }
+      const rawEvent = event as Record<string, unknown>;
+      const type = event.type.trim();
+      if (!isKnownGameEventType(type)) {
+        continue;
+      }
+
+      let normalizedEvent: GameEvent | undefined;
+      if (type === 'game_created') {
+        normalizedEvent = {type: 'game_created', gameId: game.id, playerIds};
+      } else if (type === 'card_discarded') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const cardId = normalizedEventCardId(rawEvent.cardId);
+        if (playerId === undefined || cardId === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'card_discarded', playerId, cardId, destination: discardDestinationForCard(cardId)};
+      } else if (type === 'cash_changed') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const delta = integerEventValue(rawEvent.delta);
+        const reason = normalizedEventReason(rawEvent.reason);
+        if (
+          playerId === undefined ||
+          delta === undefined ||
+          reason === undefined ||
+          !cashChangeReasonMatchesDelta(reason, delta)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'cash_changed', playerId, delta, reason};
+      } else if (type === 'income_position_changed') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const from = integerEventValue(rawEvent.from);
+        const to = integerEventValue(rawEvent.to);
+        const reason = normalizedEventReason(rawEvent.reason);
+        if (
+          playerId === undefined ||
+          from === undefined ||
+          to === undefined ||
+          reason === undefined ||
+          !incomeChangeReasonMatchesMove(reason, from, to)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'income_position_changed', playerId, from, to, reason};
+      } else if (type === 'industry_built') {
+        const instance = normalizedEventIndustryInstance(rawEvent.instance, validPlayerIds);
+        if (instance === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'industry_built', instance};
+      } else if (type === 'industry_removed') {
+        const industryInstanceId = normalizedKnownIndustryInstanceId(rawEvent.industryInstanceId, game);
+        const reason = normalizedIndustryRemovalReason(rawEvent.reason);
+        if (industryInstanceId === undefined || reason === undefined || !industryIsRemoved(game, industryInstanceId)) {
+          continue;
+        }
+        normalizedEvent = {type: 'industry_removed', industryInstanceId, reason};
+      } else if (type === 'industry_flipped') {
+        const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
+        const industryInstanceId = ownerPlayerId === undefined
+          ? undefined
+          : normalizedKnownIndustryInstanceId(rawEvent.industryInstanceId, game, ownerPlayerId);
+        if (
+          industryInstanceId === undefined ||
+          ownerPlayerId === undefined ||
+          !industryIsFlipped(game, industryInstanceId)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'industry_flipped', industryInstanceId, ownerPlayerId};
+      } else if (type === 'industry_sold') {
+        const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
+        const industryInstanceId = ownerPlayerId === undefined
+          ? undefined
+          : normalizedKnownIndustryInstanceId(rawEvent.industryInstanceId, game, ownerPlayerId);
+        const merchantSpaceId = normalizedKnownMerchantSpaceId(rawEvent.merchantSpaceId, game);
+        const industry = industryInstanceId === undefined
+          ? undefined
+          : game.board.industryInstances[industryInstanceId];
+        if (
+          industryInstanceId === undefined ||
+          ownerPlayerId === undefined ||
+          merchantSpaceId === undefined ||
+          industry === undefined ||
+          !industryIsFlipped(game, industryInstanceId) ||
+          !merchantSpaceAcceptsIndustry(game, merchantSpaceId, industry.industryType)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'industry_sold', industryInstanceId, ownerPlayerId, merchantSpaceId};
+      } else if (type === 'resource_consumed') {
+        const source = normalizedEventResourceSource(rawEvent.source, game);
+        const byPlayerId = normalizedEventPlayerId(rawEvent.byPlayerId, validPlayerIds);
+        const reason = normalizedEventReason(rawEvent.reason);
+        if (
+          source === undefined ||
+          byPlayerId === undefined ||
+          reason === undefined ||
+          !resourceConsumptionReasonMatchesSource(source, reason)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'resource_consumed', source, byPlayerId, reason};
+      } else if (type === 'resource_sold_to_market') {
+        const industryInstanceId = normalizedKnownIndustryInstanceId(rawEvent.industryInstanceId, game);
+        const market = normalizedEventMarket(rawEvent.market);
+        const cashReceived = nonNegativeIntegerEventValue(rawEvent.cashReceived);
+        const industry = industryInstanceId === undefined
+          ? undefined
+          : game.board.industryInstances[industryInstanceId];
+        if (
+          industryInstanceId === undefined ||
+          market === undefined ||
+          cashReceived === undefined ||
+          industry === undefined ||
+          !isMarketSlotPrice(market, cashReceived) ||
+          !resourceTypeMatchesIndustry(market, industry)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'resource_sold_to_market', industryInstanceId, market, cashReceived};
+      } else if (type === 'link_built') {
+        const instance = normalizedEventLinkInstance(rawEvent.instance, validPlayerIds, game);
+        if (instance === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'link_built', instance};
+      } else if (type === 'link_scored') {
+        const linkInstanceId = trimmedNonEmptyString(rawEvent.linkInstanceId);
+        const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
+        const points = nonNegativeIntegerEventValue(rawEvent.points);
+        if (
+          linkInstanceId === undefined ||
+          !isGeneratedEventInstanceId(linkInstanceId, 'link') ||
+          ownerPlayerId === undefined ||
+          points === undefined ||
+          !normalizedKnownLinkOwner(linkInstanceId, ownerPlayerId, game, historicalLinkReferences) ||
+          !linkScoreMatchesRules(game, linkInstanceId, points, historicalLinkReferences)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'link_scored', linkInstanceId, ownerPlayerId, points};
+      } else if (type === 'industry_scored') {
+        const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
+        const industryInstanceId = ownerPlayerId === undefined
+          ? undefined
+          : normalizedKnownIndustryInstanceId(rawEvent.industryInstanceId, game, ownerPlayerId);
+        const points = nonNegativeIntegerEventValue(rawEvent.points);
+        if (
+          industryInstanceId === undefined ||
+          ownerPlayerId === undefined ||
+          points === undefined ||
+          !industryScoreMatchesRules(game, industryInstanceId, points)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'industry_scored', industryInstanceId, ownerPlayerId, points};
+      } else if (type === 'merchant_bonus_claimed') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const merchantSpaceId = normalizedKnownMerchantSpaceId(rawEvent.merchantSpaceId, game);
+        const bonus = normalizedMerchantBonus(rawEvent.bonus);
+        if (
+          playerId === undefined ||
+          merchantSpaceId === undefined ||
+          bonus === undefined ||
+          !merchantBonusMatchesSpace(merchantSpaceId, bonus)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'merchant_bonus_claimed', playerId, merchantSpaceId, bonus};
+      } else if (type === 'merchant_develop_resolved') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const merchantSpaceId = normalizedKnownMerchantSpaceId(rawEvent.merchantSpaceId, game);
+        const industryTypes = normalizedEventIndustryTypes(rawEvent.industryTypes);
+        const specIds = industryTypes === undefined
+          ? undefined
+          : normalizedEventSpecIdsForIndustryTypes(rawEvent.specIds, industryTypes);
+        const merchantSpaceIds = merchantSpaceId === undefined
+          ? undefined
+          : rawEvent.merchantSpaceIds === undefined
+            ? [merchantSpaceId]
+            : normalizedKnownMerchantSpaceIds(rawEvent.merchantSpaceIds, game, merchantSpaceId);
+        if (
+          playerId === undefined ||
+          merchantSpaceId === undefined ||
+          !merchantSpaceHasDevelopBonus(merchantSpaceId) ||
+          industryTypes === undefined ||
+          specIds === undefined ||
+          (rawEvent.merchantSpaceIds !== undefined && (
+            merchantSpaceIds === undefined ||
+            !merchantSpaceIds.every(merchantSpaceHasDevelopBonus)
+          ))
+        ) {
+          continue;
+        }
+        normalizedEvent = {
+          type: 'merchant_develop_resolved',
+          playerId,
+          merchantSpaceId,
+          merchantSpaceIds,
+          industryTypes,
+          specIds,
+        };
+      } else if (type === 'turn_advanced') {
+        const currentPlayerId = normalizedEventPlayerId(rawEvent.currentPlayerId, validPlayerIds);
+        const roundNumber = positiveIntegerEventValue(rawEvent.roundNumber);
+        if (currentPlayerId === undefined || roundNumber === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'turn_advanced', currentPlayerId, roundNumber};
+      } else if (type === 'turn_order_updated') {
+        const order = normalizedEventPlayerIds(rawEvent.order, validPlayerIds);
+        if (order === undefined || !isCompletePlayerOrder(order, playerIds)) {
+          continue;
+        }
+        normalizedEvent = {type: 'turn_order_updated', order};
+      } else if (type === 'loan_taken') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        if (playerId === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'loan_taken', playerId};
+      } else if (type === 'scouted') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        if (playerId === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'scouted', playerId};
+      } else if (type === 'negative_income_started') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const amountOwed = positiveIntegerEventValue(rawEvent.amountOwed);
+        const incomePlayerIndex = nonNegativeIntegerEventValue(rawEvent.incomePlayerIndex);
+        if (playerId === undefined || amountOwed === undefined || incomePlayerIndex === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'negative_income_started', playerId, amountOwed, incomePlayerIndex};
+      } else if (type === 'negative_income_resolved') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const amountOwed = positiveIntegerEventValue(rawEvent.amountOwed);
+        const paid = nonNegativeIntegerEventValue(rawEvent.paid);
+        const victoryPointLoss = nonNegativeIntegerEventValue(rawEvent.victoryPointLoss);
+        const industryInstanceIds = playerId === undefined
+          ? undefined
+          : normalizedOwnedIndustryEventIds(rawEvent.industryInstanceIds, game, playerId);
+        if (
+          playerId === undefined ||
+          amountOwed === undefined ||
+          paid === undefined ||
+          victoryPointLoss === undefined ||
+          industryInstanceIds === undefined ||
+          !negativeIncomeResolutionMatchesRules(game, industryInstanceIds, amountOwed, paid, victoryPointLoss)
+        ) {
+          continue;
+        }
+        normalizedEvent = {
+          type: 'negative_income_resolved',
+          playerId,
+          amountOwed,
+          paid,
+          victoryPointLoss,
+          industryInstanceIds,
+        };
+      } else if (type === 'victory_points_changed') {
+        const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
+        const delta = integerEventValue(rawEvent.delta);
+        const reason = normalizedEventReason(rawEvent.reason);
+        if (
+          playerId === undefined ||
+          delta === undefined ||
+          reason === undefined ||
+          !victoryPointReasonMatchesDelta(reason, delta)
+        ) {
+          continue;
+        }
+        normalizedEvent = {type: 'victory_points_changed', playerId, delta, reason};
+      } else if (type === 'era_ended') {
+        const era = trimmedNonEmptyString(rawEvent.era);
+        const score = normalizeEventEraScore(rawEvent.score, playerIds);
+        if ((era !== 'canal' && era !== 'rail') || score === undefined || score.era !== era) {
+          continue;
+        }
+        normalizedEvent = {type: 'era_ended', era, score};
+      } else if (type === 'game_ended') {
+        const winners = normalizedGameEndedWinners(rawEvent.winners, game, validPlayerIds);
+        if (winners === undefined) {
+          continue;
+        }
+        normalizedEvent = {type: 'game_ended', winners};
+      }
+
+      if (normalizedEvent === undefined) {
+        continue;
+      }
+      normalizedEvents.push(normalizedEvent);
+      if (normalizedEvent.type === 'link_built') {
+        recordHistoricalLinkReference(historicalLinkReferences, normalizedEvent.instance);
+      }
+    }
+  }
+  game.eventLog = normalizedEvents;
 }
 
 function isRecoverableLoadedGame(value: unknown): value is GameState {
@@ -905,13 +2225,18 @@ function isRecoverableLoadedGame(value: unknown): value is GameState {
 }
 
 function hasSupportedPlayerSet(game: GameState): boolean {
-  return isPlayerCount(Object.keys(game.players).length);
+  const playerIds = playerIdsInSeatOrder(game);
+  return isPlayerCount(playerIds.length) &&
+    playerIds.join('|') === expectedPlayerIdsForCount(playerIds.length).join('|');
 }
 
 function normalizeLoadedGame(game: GameState): GameState {
+  game.id = game.id.trim();
   normalizePlayersAndCount(game);
   normalizeNumericState(game);
   const invalidActiveIndustryIds = normalizeBoardOccupancy(game);
+  normalizeNextInstanceIdFromBoard(game);
+  normalizeRemainingLinksFromBoard(game);
   normalizeCardZones(game);
   normalizeTurnState(game);
   normalizePendingDecision(game);
@@ -942,15 +2267,11 @@ function normalizeLoadedGame(game: GameState): GameState {
       };
     }
 
+    const maxFaceDownDiscards = game.era === 'canal' ? Math.min(1, player.discardCardIds.length) : 0;
     const loadedCount = (player as {faceDownDiscardCount?: unknown}).faceDownDiscardCount;
-    if (typeof loadedCount === 'number' && Number.isFinite(loadedCount)) {
-      player.faceDownDiscardCount = Math.max(0, Math.min(Math.floor(loadedCount), player.discardCardIds.length));
-      continue;
-    }
-
-    player.faceDownDiscardCount = game.era === 'canal'
-      ? Math.min(1, player.discardCardIds.length)
-      : 0;
+    player.faceDownDiscardCount = typeof loadedCount === 'number' && Number.isFinite(loadedCount)
+      ? Math.max(0, Math.min(Math.floor(loadedCount), maxFaceDownDiscards))
+      : maxFaceDownDiscards;
   }
 
   for (const industry of Object.values(game.board.industryInstances)) {
@@ -970,6 +2291,11 @@ function cloneGame(game: GameState): GameState {
   return structuredClone(game) as GameState;
 }
 
+function normalizeRuntimeStateForApply(game: GameState): void {
+  normalizeTurnState(game);
+  normalizePendingDecision(game);
+}
+
 export class GameStore {
   private readonly games = new Map<string, GameState>();
   private readonly sessions = new Map<string, Map<string, string>>();
@@ -986,6 +2312,7 @@ export class GameStore {
       id: randomUUID(),
       playerNames: input.playerNames.map((name, index) => name.trim() || `Player ${index + 1}`),
       seed,
+      introductoryCanalOnly: input.introductoryCanalOnly,
     });
     this.games.set(game.id, game);
     this.sessions.set(game.id, this.createSessionsForGame(game));
@@ -1000,74 +2327,94 @@ export class GameStore {
   }
 
   get(id: string): GameState | undefined {
-    return this.games.get(id);
+    const gameId = trimmedNonEmptyString(id);
+    return gameId ? this.games.get(gameId) : undefined;
   }
 
   getPlayerSessions(gameId: string): PlayerSession[] {
-    return [...(this.sessions.get(gameId)?.entries() ?? [])].map(([playerId, token]) => ({playerId, token}));
+    const normalizedGameId = trimmedNonEmptyString(gameId);
+    return [...(normalizedGameId ? this.sessions.get(normalizedGameId)?.entries() ?? [] : [])]
+      .map(([playerId, token]) => ({playerId, token}));
   }
 
   getPlayerSession(gameId: string, playerId: string): PlayerSession | undefined {
-    const token = this.sessions.get(gameId)?.get(playerId);
-    return token ? {playerId, token} : undefined;
+    const normalizedGameId = trimmedNonEmptyString(gameId);
+    const normalizedPlayerId = trimmedNonEmptyString(playerId);
+    const token = normalizedGameId && normalizedPlayerId
+      ? this.sessions.get(normalizedGameId)?.get(normalizedPlayerId)
+      : undefined;
+    return token && normalizedPlayerId ? {playerId: normalizedPlayerId, token} : undefined;
   }
 
   verifyPlayerSession(gameId: string, playerId: string, token: string | undefined): boolean {
-    return Boolean(token && this.sessions.get(gameId)?.get(playerId) === token);
+    const session = this.getPlayerSession(gameId, playerId);
+    const normalizedToken = trimmedNonEmptyString(token);
+    return Boolean(normalizedToken && session?.token === normalizedToken);
   }
 
   list(): GameSummary[] {
     return [...this.games.values()].map((game) => {
-      const pendingDecision = game.pendingDecision
-        ? {type: game.pendingDecision.type, playerId: game.pendingDecision.playerId}
-        : undefined;
+      const currentPlayerId = publicCurrentPlayerId(game);
+      const pendingDecision = publicPendingDecisionSummary(game);
+      const winners = publicGameWinners(game);
+      const victoryPointsByPlayer = publicVictoryPointsByPlayer(game);
       return {
         id: game.id,
-        playerNames: playerIdsInSeatOrder(game).map((playerId) => game.players[playerId].name),
-        playerCount: game.playerCount,
-        roundNumber: game.roundNumber,
-        era: game.era,
-        status: game.status,
-        ...(game.status === 'playing' ? {currentPlayerId: getCurrentPlayerId(game)} : {}),
+        playerNames: playerIdsInSeatOrder(game).map((playerId) => publicPlayerName(playerId, game.players[playerId])),
+        playerCount: publicPlayerCount(game),
+        roundNumber: publicRoundNumber(game),
+        era: publicEra(game),
+        status: publicStatus(game),
+        ...(game.variant === 'introductory_canal_only' ? {variant: game.variant} : {}),
+        ...(currentPlayerId ? {currentPlayerId} : {}),
         ...(pendingDecision ? {pendingDecision} : {}),
+        ...(winners ? {winners} : {}),
+        ...(victoryPointsByPlayer ? {victoryPointsByPlayer} : {}),
       };
     });
   }
 
   apply(gameId: string, command: unknown, token?: string): CommandResult {
-    const game = this.games.get(gameId);
-    if (!game) {
+    const normalizedGameId = trimmedNonEmptyString(gameId);
+    if (!normalizedGameId) {
       return {ok: false, errors: [`Unknown game: ${gameId}`]};
     }
-    if (!isCommandEnvelope(command)) {
-      return {ok: false, errors: ['Malformed command']};
+    const game = this.games.get(normalizedGameId);
+    if (!game) {
+      return {ok: false, errors: [`Unknown game: ${gameId}`]};
     }
     const commandSnapshot = snapshotCommandPayload(command);
     if (!commandSnapshot) {
       return {ok: false, errors: ['Malformed command']};
     }
-    if (!this.verifyPlayerSession(gameId, commandSnapshot.playerId, token)) {
-      return {ok: false, errors: [`Invalid session for ${commandSnapshot.playerId}`]};
+    const normalizedCommand = normalizeCommandEnvelope(commandSnapshot);
+    const envelopeErrors = validateCommandEnvelopeFields(normalizedCommand);
+    if (envelopeErrors.length > 0) {
+      return {ok: false, errors: envelopeErrors};
     }
-    const shapeErrors = validateCommandPayloadShape(commandSnapshot);
+    if (!this.verifyPlayerSession(normalizedGameId, normalizedCommand.playerId, token)) {
+      return {ok: false, errors: [`Invalid session for ${normalizedCommand.playerId}`]};
+    }
+    const shapeErrors = validateCommandPayloadShape(normalizedCommand);
     if (shapeErrors.length > 0) {
       return {ok: false, errors: shapeErrors};
     }
 
     try {
-      const gameCommand = commandSnapshot as unknown as GameCommand;
+      const gameCommand = normalizedCommand as unknown as GameCommand;
       const candidate = cloneGame(game);
+      normalizeRuntimeStateForApply(candidate);
       const validation = validateCommand(candidate, gameCommand);
       if (!validation.ok) {
         return {ok: false, errors: validation.errors};
       }
 
       applyCommand(candidate, gameCommand);
-      this.games.set(gameId, candidate);
+      this.games.set(normalizedGameId, candidate);
       try {
         this.persist();
       } catch (error) {
-        this.games.set(gameId, game);
+        this.games.set(normalizedGameId, game);
         throw error;
       }
       return {ok: true, state: candidate};
@@ -1086,24 +2433,28 @@ export class GameStore {
       return this.createSessionsForGame(game);
     }
 
-    const sessions = new Map<string, string>();
+    const loadedSessions = new Map<string, string>();
     const validPlayerIds = new Set(playerIds);
     for (const session of persistedSessions) {
+      const playerId = isObjectMap(session) && typeof session.playerId === 'string'
+        ? session.playerId.trim()
+        : undefined;
+      const token = isObjectMap(session) && typeof session.token === 'string' && session.token.trim().length > 0
+        ? session.token.trim()
+        : undefined;
       if (
-        typeof session === 'object' &&
-        session !== null &&
-        typeof (session as Partial<PlayerSession>).playerId === 'string' &&
-        typeof (session as Partial<PlayerSession>).token === 'string' &&
-        validPlayerIds.has((session as PlayerSession).playerId)
+        playerId &&
+        token &&
+        validPlayerIds.has(playerId) &&
+        !loadedSessions.has(playerId)
       ) {
-        sessions.set((session as PlayerSession).playerId, (session as PlayerSession).token);
+        loadedSessions.set(playerId, token);
       }
     }
 
+    const sessions = new Map<string, string>();
     for (const playerId of playerIds) {
-      if (!sessions.has(playerId)) {
-        sessions.set(playerId, randomUUID());
-      }
+      sessions.set(playerId, loadedSessions.get(playerId) ?? randomUUID());
     }
     return sessions;
   }
@@ -1123,12 +2474,17 @@ export class GameStore {
       if (!isRecoverableLoadedGame(loadedGame)) {
         continue;
       }
+      const loadedGameId = loadedGame.id;
       const game = normalizeLoadedGame(loadedGame);
       if (!hasSupportedPlayerSet(game)) {
         continue;
       }
+      if (this.games.has(game.id)) {
+        continue;
+      }
+      const persistedSessions = parsed.sessions?.[loadedGameId] ?? parsed.sessions?.[game.id];
       this.games.set(game.id, game);
-      this.sessions.set(game.id, this.normalizeSessionsForGame(game, parsed.sessions?.[game.id]));
+      this.sessions.set(game.id, this.normalizeSessionsForGame(game, persistedSessions));
     }
   }
 
@@ -1147,8 +2503,17 @@ export class GameStore {
       ])),
     };
     const temporaryPath = `${this.storagePath}.tmp`;
-    fs.writeFileSync(temporaryPath, JSON.stringify(payload, null, 2));
-    fs.renameSync(temporaryPath, this.storagePath);
+    try {
+      fs.writeFileSync(temporaryPath, JSON.stringify(payload, null, 2));
+      fs.renameSync(temporaryPath, this.storagePath);
+    } catch (error) {
+      try {
+        fs.rmSync(temporaryPath, {force: true});
+      } catch {
+        // Preserve the original persistence error for callers.
+      }
+      throw error;
+    }
   }
 }
 

@@ -484,7 +484,8 @@ interface BuildCommand {
   locationId: string;
   slotId: string;
   industryType: IndustryType;
-  resourcePlan: ResourceConsumptionPlan;
+  coalSources?: ResourceSource[];
+  ironSources?: ResourceSource[];
 }
 ```
 
@@ -536,7 +537,7 @@ interface NetworkCommand {
   playerId: string;
   cardId: string;
   linkLineIds: string[]; // canal最多1条，rail可1或2条
-  coalPlansByLink: ResourceConsumptionPlan[];
+  coalSources?: ResourceSource[];
   beerSourceForDoubleRail?: ResourceSource;
 }
 ```
@@ -567,7 +568,7 @@ interface DevelopCommand {
   playerId: string;
   cardId: string;
   industryTypes: IndustryType[]; // 1或2个，可相同，按顺序处理
-  ironPlan: ResourceConsumptionPlan;
+  ironSources?: ResourceSource[];
 }
 ```
 
@@ -599,8 +600,8 @@ interface SellCommand {
 
 interface SellStep {
   industryInstanceId: string;
-  merchantTileInstanceId: string;
-  beerPlan: ResourceConsumptionPlan;
+  merchantSpaceId: string;
+  beerSources?: ResourceSource[];
 }
 ```
 
@@ -674,6 +675,47 @@ interface PassCommand {
 
 规则：弃任意 1 张牌，不做其他事。
 
+### Resolve Negative Income
+
+命令结构：
+
+```ts
+interface ResolveNegativeIncomeCommand {
+  type: "resolve_negative_income";
+  playerId: string;
+  industryInstanceIds: string[];
+}
+```
+
+规则：
+
+- 只能在 `pendingDecision.type === "negative_income"` 时执行。
+- `playerId` 必须是欠款玩家。
+- 每个 `industryInstanceIds` 必须指向该玩家版图上尚未翻面的产业。
+- 按所选顺序出售产业，每个产业获得其现金成本向下取整的一半，产业从版图移除且不再计分。
+- 若已无合法可出售产业，或通过出售与现金已经足以覆盖欠款，则结算剩余欠款；仍不足的部分转为 VP 损失。
+- 结算完成后清除挂起决策，并继续原本被打断的收入/时代推进流程。
+
+### Resolve Merchant Develop
+
+命令结构：
+
+```ts
+interface ResolveMerchantDevelopCommand {
+  type: "resolve_merchant_develop";
+  playerId: string;
+  industryTypes: IndustryType[];
+}
+```
+
+规则：
+
+- 只能在 `pendingDecision.type === "merchant_develop"` 时执行。
+- `playerId` 必须是获得商人奖励的玩家。
+- `industryTypes` 按顺序处理，每一项都必须能 Develop：只能移除对应产业牌堆当前最低级可用牌，且不能移除带禁止 Develop 标记的 Pottery。
+- 最多移除商人奖励允许的数量；只有在没有更多合法可 Develop 牌时，才允许少移除。
+- 结算完成后清除挂起决策，并继续回合/时代推进。
+
 ## 7. 网络与连通函数
 
 ### 玩家网络
@@ -716,11 +758,10 @@ interface GameState {
   playerCount: PlayerCount;
   era: Era;
   roundNumber: number;
-  currentTurnOrder: string[];
+  turnOrder: string[];
   currentTurnIndex: number;
   actionIndexInTurn: number;
   actionsAllowedThisTurn: 1 | 2;
-  finalRoundOfGame: boolean;
 
   players: Record<string, PlayerState>;
   board: BoardState;
@@ -730,6 +771,11 @@ interface GameState {
     iron: MarketState;
   };
   eventLog: GameEvent[];
+  nextInstanceId: number;
+  status: "playing" | "ended";
+  variant?: GameVariant;
+  pendingDecision?: PendingDecision;
+  lastEraScore?: EraScoreBreakdown;
 }
 
 interface PlayerState {
@@ -782,18 +828,45 @@ interface CardZones {
 interface MarketState {
   occupiedCount: number;
 }
+
+interface EraScoreBreakdown {
+  era: Era;
+  linkVictoryPointsByPlayer: Record<string, number>;
+  industryVictoryPointsByPlayer: Record<string, number>;
+  totalVictoryPointsByPlayer: Record<string, number>;
+}
+
+type PendingDecision = NegativeIncomeDecision | MerchantDevelopDecision;
+
+interface NegativeIncomeDecision {
+  type: "negative_income";
+  playerId: string;
+  amountOwed: number;
+  incomePlayerIndex: number;
+}
+
+interface MerchantDevelopDecision {
+  type: "merchant_develop";
+  playerId: string;
+  count: number;
+  merchantSpaceId: string;
+  merchantSpaceIds?: string[];
+}
 ```
 
 ## 9. 静态配置结构
 
 ```ts
 interface StaticConfig {
+  components: PhysicalComponentManifest;
+  audit: StaticDataAuditManifest;
   incomeTrack: IncomeTrackConfig;
   locations: Record<string, City | MerchantLocation | FarmBreweryLocation>;
   linkLines: Record<string, LinkLine>;
   cardSpecs: Record<string, CardSpec>;
   merchantTileSpecs: Record<string, MerchantTileSpec>;
   industryTileSpecs: Record<string, IndustryTileSpec>;
+  industryStackSpecIds: Record<IndustryType, string[]>;
   markets: {
     coal: ResourceMarket;
     iron: ResourceMarket;
@@ -824,6 +897,31 @@ interface IncomeTrackPosition {
   position: number;
   incomeLevel: number;
 }
+
+type StaticDataAuditStatus =
+  | "manifest_locked"
+  | "manifest_locked_face_audit_pending";
+
+interface StaticDataAuditArea {
+  status: StaticDataAuditStatus;
+  rulebookPages: number[];
+  sourceRefs: string[];
+  coveredByTests: string[];
+  note: string;
+}
+
+interface StaticDataAuditManifest {
+  components: StaticDataAuditArea;
+  setupAndTurnRules: StaticDataAuditArea;
+  locationsAndSlots: StaticDataAuditArea;
+  linkLines: StaticDataAuditArea;
+  regularCards: StaticDataAuditArea;
+  wildCards: StaticDataAuditArea;
+  industryTiles: StaticDataAuditArea;
+  merchantTiles: StaticDataAuditArea;
+  markets: StaticDataAuditArea;
+  incomeTrack: StaticDataAuditArea;
+}
 ```
 
 收入轨建议完整录入每一格，而不是用公式硬推。这样能准确处理“前进格数”和“贷款回退等级到最高格”。
@@ -834,24 +932,65 @@ interface IncomeTrackPosition {
 
 ```ts
 type GameEvent =
+  | { type: "game_created"; gameId: string; playerIds: string[] }
   | { type: "card_discarded"; playerId: string; cardId: string; destination: "discard" | "wild_pool" }
   | { type: "cash_changed"; playerId: string; delta: number; reason: string }
   | { type: "income_position_changed"; playerId: string; from: number; to: number; reason: string }
   | { type: "industry_built"; instance: IndustryInstance }
-  | { type: "industry_removed"; industryInstanceId: string; reason: "overbuild" | "canal_cleanup" | "negative_income" }
+  | { type: "industry_removed"; industryInstanceId: string; reason: "overbuild" | "develop" | "canal_cleanup" | "negative_income" }
   | { type: "industry_flipped"; industryInstanceId: string; ownerPlayerId: string }
+  | { type: "industry_sold"; industryInstanceId: string; ownerPlayerId: string; merchantSpaceId: string }
   | { type: "resource_consumed"; source: ResourceSource; byPlayerId: string; reason: string }
   | { type: "resource_sold_to_market"; industryInstanceId: string; market: "coal" | "iron"; cashReceived: number }
   | { type: "link_built"; instance: LinkInstance }
   | { type: "link_scored"; linkInstanceId: string; ownerPlayerId: string; points: number }
   | { type: "industry_scored"; industryInstanceId: string; ownerPlayerId: string; points: number }
   | { type: "merchant_bonus_claimed"; playerId: string; merchantSpaceId: string; bonus: MerchantBonus }
+  | { type: "merchant_develop_resolved"; playerId: string; merchantSpaceId: string; merchantSpaceIds?: string[]; industryTypes: IndustryType[]; specIds: string[] }
+  | { type: "turn_advanced"; currentPlayerId: string; roundNumber: number }
   | { type: "turn_order_updated"; order: string[] }
-  | { type: "era_ended"; era: Era }
-  | { type: "game_ended"; winners: string[] };
+  | { type: "negative_income_started"; playerId: string; amountOwed: number; incomePlayerIndex: number }
+  | { type: "negative_income_resolved"; playerId: string; amountOwed: number; paid: number; victoryPointLoss: number; industryInstanceIds: string[] }
+  | { type: "victory_points_changed"; playerId: string; delta: number; reason: string }
+  | { type: "era_ended"; era: Era; score: EraScoreBreakdown }
+  | { type: "game_ended"; winners: string[] }
+  | { type: "loan_taken"; playerId: string }
+  | { type: "scouted"; playerId: string };
 ```
 
-## 11. 实现时最容易漏的规则
+服务端恢复存档和对外投影视图都通过 `eventLogValidation` 校验事件
+`reason`、数值方向、收入轨位置和资源来源类型，避免被篡改或旧版日志把
+非法事件泄露给前端。
+
+## 11. 对外房间摘要
+
+`GET /api/games` 返回的是公开房间摘要，不是完整 `GameState`。进行中房间只暴露
+当前行动玩家、待决类型和当前连接的 Socket 数；已结束房间可暴露胜者与每名玩家当前 VP，但不暴露手牌、
+session token、抽牌堆或待决金额等私有状态。Socket.IO 可通过 `games:list:get`
+ACK 拉取同样 payload；创建房间或成功提交命令后，服务端也会广播 `games:list`，
+用于打开中的大厅实时刷新。客户端加入、离开或断开房间时，`connectedClientCount`
+也会随 `games:list` 更新。客户端返回大厅或切换房间时，可通过 `game:leave`
+ACK 显式解除当前 Socket 与旧房间/玩家视图的绑定，避免继续收到旧房间的
+`game:state` 广播：
+
+```ts
+interface GameSummary {
+  id: string;
+  playerNames: string[];
+  playerCount: PlayerCount;
+  roundNumber: number;
+  era: Era;
+  status: "playing" | "ended";
+  variant?: GameVariant;
+  connectedClientCount?: number;
+  currentPlayerId?: string;
+  pendingDecision?: { type: "negative_income" | "merchant_develop"; playerId: string };
+  winners?: string[];
+  victoryPointsByPlayer?: Record<string, number>;
+}
+```
+
+## 12. 实现时最容易漏的规则
 
 - 每个行动都弃 1 张牌，Pass 也弃牌。
 - 第一轮 Canal Era 每人只有 1 个行动，但回合结束仍补牌到 8。
@@ -872,7 +1011,7 @@ type GameEvent =
 - 对手的煤矿/铁厂只有在对应资源在整个版图和市场中都为 0 时才可 Overbuild。
 - 行动花费进入本轮花费统计；收入阶段付款不是行动花费，不影响下轮顺位。
 
-## 12. 可选：入门局变体
+## 13. 可选：入门局变体
 
 入门局只玩 Canal Era。完成 Canal Era 正常结算后，追加：
 
@@ -880,7 +1019,16 @@ type GameEvent =
 - 按收入等级得/失 VP；负收入会扣分。
 - Level 2 或更高的产业牌再计一次产业 VP。
 
-建议把它实现为 `VariantConfig`，不要混入标准规则。
+该规则作为可选变体实现，不混入标准规则。当前实现已将其接入为
+`introductory_canal_only`：
+
+- `createGame({introductoryCanalOnly: true})` 或创建房间 payload 中的
+  `introductoryCanalOnly: true` 会启用该变体。
+- 变体局仍完整执行 Canal Era、末轮收入和 Canal Era 普通计分。
+- Canal 结算后直接结束游戏，不重建 Rail deck，也不进入 Rail Era。
+- 额外计分事件使用 `introductory money scoring`、
+  `introductory income scoring` 和 `introductory industry scoring` reason，
+  以便日志、投影和持久化可审计。
 
 ```ts
 interface VariantConfig {
@@ -896,14 +1044,81 @@ interface VariantConfig {
 ## 13. 静态数据审计状态
 
 当前实现已把以下静态数据录入 `staticConfig`，并通过 `tests/staticData.spec.ts`
-中的 manifest 测试固定：
+中的 manifest 测试固定；`tests/legacyStaticDataParity.spec.ts` 还会把这些核心静态数据
+同旧版 `js/gameData.js` 原型做迁移一致性核对。`staticConfig.audit`
+同步记录每类数据的规则书页码、来源、测试覆盖和审计状态，避免“已固定的
+manifest”和“仍待逐面人工核对”的边界只存在于文档里：
 
 1. 所有城市：`id`、显示名、区域、建筑槽位和允许产业类型。
-2. 所有连接线：两个端点、是否支持 canal/rail、特殊农场酒厂连接。
+2. 所有连接线：两个端点、是否支持 canal/rail、特殊农场酒厂连接，以及按人数启用/停用的高人数商人端点连接。
 3. 所有商人空间：地点、人数限制、奖励、是否提供煤市场连接。
 4. 所有商人牌：人数限制、产业图标、是否空白。
 5. 全部卡牌：类型、位置或产业、人数限制。
 6. 全部产业牌模板：类型、等级、数量、时代限制、现金/煤/铁成本、卖出所需啤酒、翻面收入、VP、连接图标、初始资源、是否可 Develop。
 7. 收入轨每一格：位置到收入等级的映射。
+8. 官方物理组件清单：版图、玩家板、人物/收入/VP 标记、连接牌、产业牌、卡牌、商人牌、资源件、钱币和未使用空白牌。
 
-仍建议在发布前由真人按官方组件逐项复核这些 manifest。UI 坐标和素材映射不应进入规则引擎，可放到渲染配置。
+当前 `staticConfig.audit` 中已标记为 `manifest_locked` 的项目：
+
+- `components`
+- `setupAndTurnRules`
+- `markets`
+- `incomeTrack`
+
+当前 `staticConfig.audit` 中仍标记为
+`manifest_locked_face_audit_pending` 的项目：
+
+- `locationsAndSlots`
+- `linkLines`
+- `regularCards`
+- `wildCards`
+- `industryTiles`
+- `merchantTiles`
+
+本轮重新渲染并抽取了本地官方 PDF 全部 `12` 页。`staticConfig.audit.rulebookPages`
+中的页码均来自这些页面：第 `1` 页组件清单，第 `4-5` 页设置和版图/玩家板示例，
+第 `6-7` 页回合与时代维护，第 `8-12` 页动作、资源、网络和变体规则。规则书图片
+对若干牌面和玩家板只是缩略或局部示例，因此不能替代最终实体/高清素材逐面核对。
+
+### 13.1 官方组件清单核对
+
+已用本地官方 PDF `Brass-Birmingham-Rulebook-2018.11.20-highlights.pdf`
+核对以下页面，并将结果记录到 `staticConfig.components` 和
+`tests/staticData.spec.ts`：
+
+- 第 1 页组件清单：`1` 块版图、`4` 张玩家板、`4` 张人物牌、每色 `14` 条连接牌、每色 `45` 张产业牌、`64` 张位置/产业牌、`8` 张万能牌、`9` 张商人牌、`18` 个铁、`30` 个煤、`15` 个啤酒、`77` 个钱币，以及 `3` 张未使用空白牌。
+- 第 4 页设置：少于 `4` 人时移除高人数卡牌和商人牌；商人啤酒、煤市场和铁市场按设置填充；通用供应是无限的，因此物理资源件数量只作为组件审计数据，不作为规则引擎资源上限。
+- 第 4 页 Location Banners：`2` 人局不使用蓝色和青绿色位置牌。当前数据中蓝色示例牌为 Stoke-on-Trent，对应 `staffordshire`；青绿色示例牌为 Derby，对应 `derbyshire`。因此 `2` 人位置牌排除 `staffordshire` 和 `derbyshire`，`3` 人位置牌排除 `derbyshire`，`4` 人使用全部位置牌区域。
+- 第 5 页玩家设置：每位玩家初始 `£17`、起手 `8` 张牌、另抽 `1` 张面朝下弃牌、收入标记在 `10` 格、VP 在 `0`。
+- 第 6 页回合结构：`4/3/2` 人每时代分别为 `8/9/10` 轮，首个 Canal 轮每人只执行 `1` 个行动，之后每回合 `2` 个行动。
+
+本轮审计使用 `pdfplumber` 抽取第 1、4、5、6 页文本，并用 Poppler 渲染前 6 页 PNG 抽样核对页面可读性。以上项目已经有自动化回归测试覆盖：
+
+- `tests/staticData.spec.ts`：组件清单、卡牌人数分布、位置 banner 对应人数、连接线人数启用状态、商人牌数量、市场初始空位、核心规则常量、收入轨。
+- `tests/setup.spec.ts`：起手 `8` 张、每人 `1` 张面朝下弃牌、初始现金/收入/VP、商人空间、当前人数商人牌精确启用集合、市场初始化、随机初始顺位。
+- `tests/era.spec.ts`：`4/3/2` 人每时代 `8/9/10` 轮、首个 Canal 轮单行动、后续回合双行动、终局最后一轮不收收入。
+- `tests/roundIncome.spec.ts`：负收入短缺时只允许移除产业牌、按建造现金成本半价向下取整、够付后停止、剩余短缺扣 VP。
+
+### 13.2 官方动作规则核对
+
+已用本地官方 PDF `Brass-Birmingham-Rulebook-2018.11.20-highlights.pdf`
+抽取第 7-12 页并对照当前规则引擎测试。以下不是牌面逐面审计，而是动作规则与结算规则的页码级核对：
+
+- 第 7 页 End of Canal & Rail Era：连接按两端地点图标计分、已翻面产业计分、未翻面产业不计、Canal 结算移除版图 Level 1 产业、补商人啤酒、洗弃牌进入 Rail deck、终局按 VP/收入/现金破平。对应 `tests/era.spec.ts`。
+- 第 8 页 Game Play Concepts：翻面触发、收入前进“格”而非等级、玩家网络定义、全玩家连接形成连通路径、煤按最近连通来源/煤市场、铁不需连通、啤酒来源和对手酒厂连通限制。对应 `tests/resourceSources.spec.ts`、`tests/network.spec.ts`、`tests/sell.spec.ts`。
+- 第 9 页 Build Action：Build 是唯一需要特定牌的行动；位置牌/产业牌/Wild 牌限制；纯槽位优先；最低级可用产业牌；Build 时支付成本并消耗煤/铁；煤矿/铁厂仅在建造当次卖入市场；农场酒厂建造限制和特殊连接。对应 `tests/actions.spec.ts`、`tests/clientBuildSlots.spec.ts`、`tests/resourceSources.spec.ts`。
+- 第 10 页 Build Continued / Sell Action：Canal 每玩家每地点最多 1 个产业，Rail 可多个；自己可用更高级同产业 overbuild，替换对手仅限资源耗尽的煤矿/铁厂；Sell 需连接对应商人牌、消耗啤酒、可在一个 Sell 行动内重复出售，商人啤酒奖励按 Gloucester/Oxford/Nottingham/Shrewsbury/Warrington 生效。对应 `tests/actions.spec.ts`、`tests/sell.spec.ts`、`tests/clientSellOptions.spec.ts`。
+- 第 11 页 Loan / Develop / Scout / Network：贷款拿 `£30` 且收入后退 `3` 个收入等级到目标等级最高格，不能低于 `-10`；Develop 移除 1-2 个最低级可用产业牌并每个耗 1 铁，lightbulb Pottery 不能 Develop；Scout 弃 3 张并拿 2 张 Wild，已有 Wild 时禁止；Network 的 canal/rail 数量、成本、单 rail 不耗啤酒、双 rail 耗啤酒、每条 rail 单独耗煤和网络延伸要求。对应 `tests/actions.spec.ts`、`tests/network.spec.ts`、`tests/clientNetworkOptions.spec.ts`。
+- 第 12 页 Things to Remember / Introductory Game：每行动弃 1 张牌、同一回合可重复行动、只有 Build 需要匹配的特定牌、Wild 牌弃出后回公共池、Build 地点网络例外、自己酒厂啤酒不限连接、对手酒厂啤酒必须连通、Level 1 Pottery 可在 Rail Era 建造、入门局是独立变体。标准规则部分对应 `tests/actions.spec.ts`、`tests/sell.spec.ts`、`tests/era.spec.ts`；Level 1 Pottery 是唯一 Rail 可建 Level 1 产业的静态数据例外，对应 `tests/staticData.spec.ts`；入门局变体作为可选 `introductory_canal_only` 规则，对应 `tests/era.spec.ts`、`tests/setup.spec.ts`、`tests/server/gameStore.spec.ts`、`tests/server/createServer.spec.ts`。
+
+### 13.3 发布前逐面核对清单
+
+以下项目仍需要真人对照官方实体或高清 PDF 逐面确认。完成后应把结果同步到 `staticConfig` 的 manifest 测试，而不是只更新文档：
+
+1. 全部 `64` 张 Location/Industry 普通牌的实体牌面：地点/产业、人数角标和数量分布。当前 `tests/staticData.spec.ts` 已固定普通牌人数前缀、地点/产业分布、连续 copy 编号和 `cardSpecs` 实体 `id` 展开；仍需人工逐面确认牌面地点/产业与官方实体/高清 PDF 完全一致。
+2. 全部 `8` 张 Wild 牌：`4` 张 Wild Location 与 `4` 张 Wild Industry。当前 `tests/staticData.spec.ts` 已固定 Wild 牌数量和 `wild-location-1..4` / `wild-industry-1..4` 实体 `id` 展开；仍需人工确认牌面类型和数量。
+3. 地图上 `20` 个城市的全部产业槽位图标、混合槽位、地点 banner 颜色和印刷连接图标。
+4. 全部连接线的端点、canal/rail 支持、人数适用性，以及 Cannock 北侧酒厂、Kidderminster-Worcester 南侧酒厂这类特殊连接。当前 `tests/staticData.spec.ts` 已固定连接线端点、canal/rail 支持、特殊 farm brewery 连接和高人数商人端点导致的连接线启用/停用清单；仍需实体或高清 PDF 逐线目视确认端点和印刷线型。
+5. 全部 `45` 张每色产业牌的等级、数量、建造时代、现金/煤/铁成本、出售啤酒需求、翻面收入、VP、连接图标、产出资源和禁止 Develop 标记。当前 `tests/staticData.spec.ts` 已固定每类型数量、每等级 `count`、实体牌 `id` 展开和玩家板顺序；仍需人工逐面确认这些字段与官方实体/高清 PDF 完全一致。
+6. 全部 `9` 张商人牌的产业图标、空白牌、人数角标，以及 Gloucester/Oxford/Shrewsbury/Warrington/Nottingham 的奖励。当前 `tests/staticData.spec.ts` 已固定商人牌数量、空白牌、ID 中的商人地点前缀、产业图标后缀、人数角标和商人奖励 manifest；仍需人工逐面确认牌面与官方实体/高清 PDF 完全一致。
+7. 规则书以外的 UI 坐标、图像裁切和素材映射；这些不应进入规则引擎，可另放渲染配置。

@@ -1,5 +1,6 @@
 import {validateSell} from '../common/gameEngine';
 import type {GameState, SellStep} from '../common/types';
+import {validationOk} from './validation';
 
 export function canSubmitSell(
   game: GameState,
@@ -10,10 +11,10 @@ export function canSubmitSell(
   if (sales.length === 0) {
     return false;
   }
-  return validateSell(game, {
+  return validationOk(() => validateSell(game, {
     type: 'sell',
     playerId,
     cardId,
     sales,
-  }).ok;
+  }));
 }

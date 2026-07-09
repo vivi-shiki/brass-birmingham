@@ -43,6 +43,31 @@ describe('client action availability options', () => {
     expect(canSubmitLoan(state, 'p1', 'missing-card')).toBe(false);
   });
 
+  it('disables Loan outside the active ordinary turn', () => {
+    const state = testGame();
+
+    expect(canLoan(state, 'p2')).toBe(false);
+  });
+
+  it('disables Loan while a pending decision blocks ordinary actions', () => {
+    const state = testGame();
+    state.pendingDecision = {
+      type: 'negative_income',
+      playerId: 'p1',
+      amountOwed: 5,
+      incomePlayerIndex: 0,
+    };
+
+    expect(canLoan(state, 'p1')).toBe(false);
+  });
+
+  it('disables Loan when the player has no card to discard', () => {
+    const state = testGame();
+    setHand(state, 'p1', []);
+
+    expect(canLoan(state, 'p1')).toBe(false);
+  });
+
   it('allows Scout with three distinct non-wild hand cards', () => {
     const state = testGame();
     setHand(state, 'p1', [

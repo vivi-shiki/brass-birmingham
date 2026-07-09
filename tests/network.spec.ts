@@ -1,7 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import {applyCommand, validateNetwork} from '../src/common/gameEngine';
+import {applyCommand, executeNetwork, validateNetwork} from '../src/common/gameEngine';
 import {areLocationsConnected, getConnectedLocationsForDebug} from '../src/common/gameEngine';
 import {hasAnyPlayerNetwork, isInPlayerNetwork} from '../src/common/selectors';
+import {staticConfig} from '../src/common/staticData';
 import {addIndustry, addLink, firstHandCard, setHand, testGame} from './helpers';
 
 function prepareRailDoubleNetwork() {
@@ -32,6 +33,68 @@ describe('network connectivity', () => {
     expect(isInPlayerNetwork(state, 'p1', 'walsall')).toBe(true);
     expect(isInPlayerNetwork(state, 'p2', 'birmingham')).toBe(false);
     expect(areLocationsConnected(state, 'birmingham', 'walsall')).toBe(true);
+  });
+
+  it('single rail Network consumes one coal and does not consume beer', () => {
+    const state = testGame();
+    state.era = 'rail';
+    state.actionsAllowedThisTurn = 2;
+    state.players.p1.cash = 50;
+    setHand(state, 'p1', ['p2-location-cannock-1']);
+    const coal = addIndustry(state, {
+      id: 'coal-1',
+      ownerPlayerId: 'p2',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-2-1',
+      locationId: 'cannock',
+      slotId: 'cannock-1',
+      remainingResource: 1,
+    });
+    addIndustry(state, {
+      id: 'network-anchor',
+      ownerPlayerId: 'p1',
+      industryType: 'manufacturer',
+      specId: 'manufacturer-2-1',
+      locationId: 'stafford',
+      slotId: 'stafford-0',
+    });
+    const brewery = addIndustry(state, {
+      id: 'brewery-1',
+      ownerPlayerId: 'p1',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'coalbrookdale',
+      slotId: 'coalbrookdale-0',
+      remainingResource: 1,
+    });
+
+    applyCommand(state, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: 'p2-location-cannock-1',
+      linkLineIds: ['cannock-stafford'],
+      coalSources: [{kind: 'industry_tile', industryInstanceId: coal.id, resourceType: 'coal'}],
+    });
+
+    expect(state.board.industryInstances[coal.id].remainingResource).toBe(0);
+    expect(state.board.industryInstances[coal.id].flipped).toBe(true);
+    expect(state.board.industryInstances[brewery.id].remainingResource).toBe(1);
+    expect(state.board.industryInstances[brewery.id].flipped).toBe(false);
+    expect(state.board.linkLines['cannock-stafford'].occupiedBy).toBeDefined();
+    expect(state.players.p1.remainingLinks.rail).toBe(staticConfig.rules.initialLinksPerType - 1);
+    expect(state.players.p1.cash).toBe(50 - staticConfig.rules.railSingleLinkCost);
+    expect(state.eventLog).toContainEqual({
+      type: 'resource_consumed',
+      source: {kind: 'industry_tile', industryInstanceId: coal.id, resourceType: 'coal'},
+      byPlayerId: 'p1',
+      reason: 'network',
+    });
+    expect(state.eventLog.some((event) =>
+      event.type === 'resource_consumed' &&
+      event.reason === 'network' &&
+      event.source.kind === 'industry_tile' &&
+      event.source.resourceType === 'beer',
+    )).toBe(false);
   });
 
   it('enforces canal and rail link count limits', () => {
@@ -95,6 +158,50 @@ describe('network connectivity', () => {
 
     expect(railResult.ok).toBe(false);
     expect(railResult.errors.join(' ')).toContain('does not support rail');
+  });
+
+  it('rejects Network links to merchant locations disabled by player count', () => {
+    const twoPlayer = testGame();
+    const twoPlayerResult = validateNetwork(twoPlayer, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: firstHandCard(twoPlayer, 'p1'),
+      linkLineIds: ['stokeOnTrent-warrington'],
+    });
+
+    expect(twoPlayerResult.ok).toBe(false);
+    expect(twoPlayerResult.errors.join(' ')).toContain('not available for 2 players');
+
+    const threePlayer = testGame();
+    threePlayer.playerCount = 3;
+    setHand(threePlayer, 'p1', ['p3-location-birmingham-1']);
+    const nottinghamResult = validateNetwork(threePlayer, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: firstHandCard(threePlayer, 'p1'),
+      linkLineIds: ['derby-nottingham'],
+    });
+
+    expect(nottinghamResult.ok).toBe(false);
+    expect(nottinghamResult.errors.join(' ')).toContain('not available for 3 players');
+
+    const warringtonResult = validateNetwork(threePlayer, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: firstHandCard(threePlayer, 'p1'),
+      linkLineIds: ['stokeOnTrent-warrington'],
+    });
+
+    expect(warringtonResult.ok).toBe(true);
+  });
+
+  it('ignores stale links to merchant locations disabled by player count', () => {
+    const state = testGame();
+    addLink(state, 'inactive-link', 'p1', 'stokeOnTrent-warrington');
+
+    expect(hasAnyPlayerNetwork(state, 'p1')).toBe(false);
+    expect(isInPlayerNetwork(state, 'p1', 'stokeOnTrent')).toBe(false);
+    expect(areLocationsConnected(state, 'stokeOnTrent', 'warrington')).toBe(false);
   });
 
   it('rejects network actions when the player has no links of the current type remaining', () => {
@@ -534,6 +641,51 @@ describe('network connectivity', () => {
     expect(state.board.linkLines['stafford-stone'].occupiedBy).toEqual(expect.any(String));
   });
 
+  it('snapshots explicit double rail beer source objects before direct execution', () => {
+    const state = prepareRailDoubleNetwork();
+    const connectedBrewery = addIndustry(state, {
+      id: 'brewery-connected',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-2-1',
+      locationId: 'stone',
+      slotId: 'stone-0',
+      remainingResource: 1,
+    });
+    const disconnectedBrewery = addIndustry(state, {
+      id: 'brewery-disconnected',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-2-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      remainingResource: 1,
+    });
+    let sourceIdReads = 0;
+    const beerSourceForDoubleRail = {
+      kind: 'industry_tile' as const,
+      get industryInstanceId() {
+        sourceIdReads++;
+        return sourceIdReads <= 4 ? connectedBrewery.id : disconnectedBrewery.id;
+      },
+      resourceType: 'beer' as const,
+    };
+
+    executeNetwork(state, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: 'p2-location-cannock-1',
+      linkLineIds: ['cannock-stafford', 'stafford-stone'],
+      beerSourceForDoubleRail,
+    });
+
+    expect(state.board.industryInstances[connectedBrewery.id].remainingResource).toBe(0);
+    expect(state.board.industryInstances[connectedBrewery.id].flipped).toBe(true);
+    expect(state.board.industryInstances[disconnectedBrewery.id].remainingResource).toBe(1);
+    expect(state.board.linkLines['cannock-stafford'].occupiedBy).toEqual(expect.any(String));
+    expect(state.board.linkLines['stafford-stone'].occupiedBy).toEqual(expect.any(String));
+  });
+
   it('rejects non-brewery resource sources for double rail beer', () => {
     const state = prepareRailDoubleNetwork();
 
@@ -586,6 +738,42 @@ describe('network connectivity', () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors.join(' ')).toContain('Selected double rail beer source is not available');
+  });
+
+  it('rejects an unavailable double rail beer source before mutating the game', () => {
+    const state = prepareRailDoubleNetwork();
+    const brewery = addIndustry(state, {
+      id: 'brewery-1',
+      ownerPlayerId: 'p2',
+      industryType: 'brewery',
+      specId: 'brewery-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      remainingResource: 1,
+    });
+    const coalBefore = structuredClone(state.board.industryInstances['coal-1']);
+    const breweryBefore = structuredClone(state.board.industryInstances[brewery.id]);
+    const handBefore = [...state.players.p1.handCardIds];
+    const cashBefore = state.players.p1.cash;
+    const railLinksBefore = state.players.p1.remainingLinks.rail;
+    const eventLogBefore = structuredClone(state.eventLog);
+
+    expect(() => applyCommand(state, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: 'p2-location-cannock-1',
+      linkLineIds: ['cannock-stafford', 'stafford-stone'],
+      beerSourceForDoubleRail: {kind: 'industry_tile', industryInstanceId: brewery.id, resourceType: 'beer'},
+    })).toThrow('Selected double rail beer source is not available');
+
+    expect(state.board.industryInstances['coal-1']).toEqual(coalBefore);
+    expect(state.board.industryInstances[brewery.id]).toEqual(breweryBefore);
+    expect(state.board.linkLines['cannock-stafford'].occupiedBy).toBeUndefined();
+    expect(state.board.linkLines['stafford-stone'].occupiedBy).toBeUndefined();
+    expect(state.players.p1.handCardIds).toEqual(handBefore);
+    expect(state.players.p1.cash).toBe(cashBefore);
+    expect(state.players.p1.remainingLinks.rail).toBe(railLinksBefore);
+    expect(state.eventLog).toEqual(eventLogBefore);
   });
 
   it('rejects opponent brewery beer connected only to the first rail of a double rail action', () => {

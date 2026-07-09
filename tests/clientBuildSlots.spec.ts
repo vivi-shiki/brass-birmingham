@@ -73,6 +73,16 @@ describe('client build slot options', () => {
     expect(buildIndustryOptionsForLocation(state, 'p1', 'birmingham')).not.toContain('manufacturer');
   });
 
+  it('ignores missing dirty industry stacks when listing build options', () => {
+    const state = testGame();
+    delete (state.players.p1.industryTileStacks as Partial<typeof state.players.p1.industryTileStacks>).coal_mine;
+
+    expect(() => buildIndustryOptionsForLocation(state, 'p1', 'cannock')).not.toThrow();
+    expect(buildIndustryOptionsForLocation(state, 'p1', 'cannock')).not.toContain('coal_mine');
+    expect(buildIndustryOptionsForLocation(state, 'p1', 'birmingham')).toEqual(['cotton_mill', 'iron_works', 'manufacturer']);
+    expect(buildSlotOptionsForIndustry(state, 'cannock', 'coal_mine', 'p1')).toEqual([]);
+  });
+
   it('hides Build options blocked by the Canal one-industry-per-location rule', () => {
     const state = testGame();
     addIndustry(state, {
@@ -239,6 +249,16 @@ describe('client build slot options', () => {
       .toEqual([]);
   });
 
+  it('keeps high-player-count cities available for matching industry cards in two-player games', () => {
+    const state = testGame();
+    expect(state.playerCount).toBe(2);
+
+    expect(buildLocationOptionsForCard(state, 'p1', 'p2-industry-brewery-5').map((location) => location.id))
+      .toContain('derby');
+    expect(buildIndustryOptionsForLocationAndCard(state, 'p1', 'p2-industry-brewery-5', 'derby'))
+      .toEqual(['brewery']);
+  });
+
   it('requires industry card Build locations to be inside the player network once a network exists', () => {
     const state = testGame();
     addLink(state, 'link-1', 'p1', 'birmingham-tamworth');
@@ -247,6 +267,16 @@ describe('client build slot options', () => {
 
     expect(optionIds).toContain('tamworth');
     expect(optionIds).not.toContain('cannock');
+  });
+
+  it('keeps matching Location and Wild Location Build options outside the player network', () => {
+    const state = testGame();
+    addLink(state, 'link-1', 'p1', 'birmingham-tamworth');
+
+    expect(buildLocationOptionsForCard(state, 'p1', 'p2-location-cannock-1').map((location) => location.id))
+      .toEqual(['cannock']);
+    expect(buildLocationOptionsForCard(state, 'p1', 'wild-location-1').map((location) => location.id))
+      .toEqual(expect.arrayContaining(['birmingham', 'cannock', 'tamworth']));
   });
 
   it('allows farm brewery Build locations only for brewery industry cards or Wild Industry', () => {
@@ -262,6 +292,20 @@ describe('client build slot options', () => {
       .toEqual(expect.arrayContaining(['northern', 'southern']));
   });
 
+  it('only offers farm brewery Build locations inside an existing player network', () => {
+    const state = testGame();
+    addLink(state, 'link-1', 'p1', 'cannock-northern');
+
+    expect(buildLocationOptionsForCard(state, 'p1', 'p2-industry-brewery-5').map((location) => location.id))
+      .toContain('northern');
+    expect(buildLocationOptionsForCard(state, 'p1', 'p2-industry-brewery-5').map((location) => location.id))
+      .not.toContain('southern');
+    expect(buildLocationOptionsForCard(state, 'p1', 'wild-industry-1').map((location) => location.id))
+      .toContain('northern');
+    expect(buildLocationOptionsForCard(state, 'p1', 'wild-industry-1').map((location) => location.id))
+      .not.toContain('southern');
+  });
+
   it('allows a valid Build submission for a matching location card', () => {
     const state = testGame();
     setHand(state, 'p1', ['p2-location-birmingham-1']);
@@ -274,6 +318,13 @@ describe('client build slot options', () => {
     const state = testGame();
 
     expect(canSubmitBuild(state, 'p1', firstHandCard(state, 'p1'), '', '', '')).toBe(false);
+  });
+
+  it('rejects stale Build submission targets without throwing', () => {
+    const state = testGame();
+
+    expect(canSubmitBuild(state, 'p1', firstHandCard(state, 'p1'), 'missing-location', 'missing-slot', 'cotton_mill'))
+      .toBe(false);
   });
 
   it('rejects Build submission when the selected card cannot build at that location', () => {

@@ -14,6 +14,7 @@ export interface CreateGameOptions {
   playerNames: string[];
   seed?: number;
   initialTurnOrder?: string[];
+  introductoryCanalOnly?: boolean;
 }
 
 export const INDUSTRY_TYPES: IndustryType[] = [
@@ -144,7 +145,10 @@ export function createGame(options: CreateGameOptions): GameState {
   const playerCount = coercePlayerCount(options.playerNames.length);
   const random = new SeededRandom(validateGameSeed(options.seed) ?? Date.now());
   const playerIds = options.playerNames.map((_, index) => `p${index + 1}`);
-  const players = Object.fromEntries(playerIds.map((id, index) => [id, createPlayer(id, options.playerNames[index] || `Player ${index + 1}`)]));
+  const players = Object.fromEntries(playerIds.map((id, index) => {
+    const name = options.playerNames[index].trim() || `Player ${index + 1}`;
+    return [id, createPlayer(id, name)];
+  }));
   const turnOrder = createInitialTurnOrder(playerIds, options.initialTurnOrder, random);
 
   const drawDeck = shuffle(getCardIdsForPlayerCount(playerCount), random);
@@ -185,5 +189,6 @@ export function createGame(options: CreateGameOptions): GameState {
     eventLog: [{type: 'game_created', gameId: options.id, playerIds}],
     nextInstanceId: 1,
     status: 'playing',
+    ...(options.introductoryCanalOnly ? {variant: 'introductory_canal_only' as const} : {}),
   };
 }
