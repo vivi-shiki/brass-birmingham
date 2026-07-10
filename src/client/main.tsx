@@ -61,15 +61,24 @@ import {
   faceAuditAreaCompletionCountsLabel,
   faceAuditAreaReviewTemplateFromPayload,
   faceAuditAreaReviewTemplatePath,
+  faceAuditAreaReviewTemplateDownloadLabel,
+  faceAuditAreaReviewTemplateFileName,
   buildFaceAuditEvidenceSourceTemplateArtifact,
   faceAuditEvidenceSourceLabel,
   faceAuditEvidenceSourceFromPayload,
   faceAuditEvidenceSourcesFromPayload,
+  faceAuditEvidenceSourceTemplateDownloadLabel,
+  faceAuditEvidenceSourceTemplateFileName,
   faceAuditEvidenceSourceTemplateLabel,
+  faceAuditEvidenceSourceTemplateFromPayload,
+  faceAuditEvidenceRefTemplateDownloadLabel,
+  faceAuditEvidenceRefTemplateFileName,
   faceAuditEvidenceRefTemplateFromPayload,
   faceAuditEvidenceRefTemplateLabel,
   faceAuditEvidenceRefTemplatePath,
   fillFaceAuditAreaReviewArtifact,
+  faceAuditAreaReviewTodoSummaryDownloadLabel,
+  faceAuditAreaReviewTodoSummaryFileName,
   faceAuditAreaReviewTodoSummaryFromPayload,
   faceAuditAreaReviewTodoSummaryLabel,
   faceAuditAreaReviewTodoSummaryPath,
@@ -110,6 +119,8 @@ import {
   faceAuditReviewStatusLabel,
   faceAuditReviewStatusPath,
   faceAuditReviewPlanAreaLabel,
+  faceAuditReviewPlanDownloadLabel,
+  faceAuditReviewPlanFileName,
   faceAuditReviewPlanFromPayload,
   faceAuditReviewPlanLabel,
   faceAuditReviewPlanPath,
@@ -126,14 +137,25 @@ import {
   faceAuditReviewSubmissionPath,
   faceAuditStaticLockGateFromPayload,
   faceAuditStaticLockGateLabel,
+  faceAuditSourceIdsByAreaDownloadLabel,
+  faceAuditSourceIdsByAreaFileName,
   faceAuditSourceIdsByAreaFromPayload,
   faceAuditSourceIdsByAreaPayload,
   faceAuditSourceIdsByAreaTemplatePath,
   faceAuditReviewTemplateFromPayload,
+  faceAuditReviewTemplateDownloadLabel,
+  faceAuditReviewTemplateFileName,
   faceAuditReviewTodoAreaLabel,
+  faceAuditReviewTodoDownloadLabel,
+  faceAuditReviewTodoFileName,
   faceAuditReviewTodoFromPayload,
   faceAuditReviewTodoLabel,
   faceAuditReviewTodoPath,
+  faceAuditReviewTodoSummaryDownloadLabel,
+  faceAuditReviewTodoSummaryFileName,
+  faceAuditReviewTodoSummaryFromPayload,
+  faceAuditReviewTodoSummaryLabel,
+  faceAuditReviewTodoSummaryPath,
   faceAuditReviewValidationLabel,
   faceAuditReviewValidationFromPayload,
   type FaceAuditLockArtifactValidationView,
@@ -680,6 +702,45 @@ function FaceAuditPanel() {
     }
   }
 
+  async function downloadFaceAuditReviewTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}/api/face-audit-review-template`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json() as unknown;
+      const template = faceAuditReviewTemplateFromPayload(payload);
+      const templateArtifact = isRecord(payload) && isRecord(payload.faceAuditReview)
+        ? payload.faceAuditReview
+        : undefined;
+      if (!template || templateArtifact === undefined) {
+        throw new Error('Invalid face-audit review template payload');
+      }
+      const artifactText = `${JSON.stringify(templateArtifact, null, 2)}\n`;
+      setReviewArtifactText(artifactText.trimEnd());
+      downloadTextArtifact(
+        faceAuditReviewTemplateFileName(),
+        artifactText,
+        'application/json',
+      );
+      setReviewArtifactMessage(faceAuditReviewTemplateDownloadLabel(template));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
   async function loadFaceAuditAreaReviewTemplate() {
     setReviewArtifactLoading(true);
     setReviewArtifactMessage(undefined);
@@ -709,6 +770,49 @@ function FaceAuditPanel() {
       setReviewArtifactMessage(
         `Loaded ${template.area} review template ${template.checklistFingerprint} with ${template.areaItemCount} items.`,
       );
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditAreaReviewTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a valid face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditAreaReviewTemplatePath(area)}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json() as unknown;
+      const template = faceAuditAreaReviewTemplateFromPayload(payload);
+      const templateArtifact = isRecord(payload) && isRecord(payload.faceAuditAreaReview)
+        ? payload.faceAuditAreaReview
+        : undefined;
+      if (!template || templateArtifact === undefined) {
+        throw new Error('Invalid face-audit area review template payload');
+      }
+      const artifactText = `${JSON.stringify(templateArtifact, null, 2)}\n`;
+      setReviewArtifactText(artifactText.trimEnd());
+      downloadTextArtifact(
+        faceAuditAreaReviewTemplateFileName(area),
+        artifactText,
+        'application/json',
+      );
+      setReviewArtifactMessage(faceAuditAreaReviewTemplateDownloadLabel(template));
     } catch (caught) {
       setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -818,6 +922,99 @@ function FaceAuditPanel() {
     }
   }
 
+  async function downloadFaceAuditReviewTodoArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewTodoPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review todo'),
+      });
+      const payload = await response.json() as unknown;
+      const todo = faceAuditReviewTodoFromPayload(payload);
+      setReviewTodoReport(todo);
+      if (response.ok) {
+        const todoArtifact = isRecord(payload) && isRecord(payload.faceAuditReviewTodo)
+          ? payload.faceAuditReviewTodo
+          : undefined;
+        if (!todoArtifact) {
+          throw new Error('Invalid face-audit review todo payload');
+        }
+        downloadTextArtifact(
+          faceAuditReviewTodoFileName(),
+          `${JSON.stringify(todoArtifact, null, 2)}\n`,
+          'application/json',
+        );
+        setReviewArtifactMessage(
+          `${faceAuditReviewTodoDownloadLabel(todo)}. ${faceAuditReviewTodoLabel(todo)}`,
+        );
+        return;
+      }
+      setReviewArtifactMessage(faceAuditReviewTodoLabel(todo));
+      if (todo.issueCount === 0) {
+        setReviewArtifactMessage(`Review todo request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditReviewTodoSummaryArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewTodoSummaryPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review todo summary'),
+      });
+      const payload = await response.json() as unknown;
+      const summary = faceAuditReviewTodoSummaryFromPayload(payload);
+      if (response.ok) {
+        const summaryArtifact = isRecord(payload) && isRecord(payload.faceAuditReviewTodoSummary)
+          ? payload.faceAuditReviewTodoSummary
+          : undefined;
+        if (!summaryArtifact) {
+          throw new Error('Invalid face-audit review todo summary payload');
+        }
+        downloadTextArtifact(
+          faceAuditReviewTodoSummaryFileName(),
+          `${JSON.stringify(summaryArtifact, null, 2)}\n`,
+          'application/json',
+        );
+        setReviewArtifactMessage(
+          `${faceAuditReviewTodoSummaryDownloadLabel(summary)}. ${faceAuditReviewTodoSummaryLabel(summary)}`,
+        );
+        return;
+      }
+      setReviewArtifactMessage(faceAuditReviewTodoSummaryLabel(summary));
+      if (summary.issueCount === 0) {
+        setReviewArtifactMessage(`Review todo summary request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
   async function summarizeFaceAuditAreaReviewTodoArtifacts() {
     setReviewArtifactLoading(true);
     setReviewArtifactMessage(undefined);
@@ -851,6 +1048,57 @@ function FaceAuditPanel() {
     }
   }
 
+  async function downloadFaceAuditAreaReviewTodoSummaryArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a valid face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditAreaReviewTodoSummaryPath(area)}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Area todo summary'),
+      });
+      const payload = await response.json() as unknown;
+      const summary = faceAuditAreaReviewTodoSummaryFromPayload(payload);
+      setReviewAreaTodoSummaryReport(summary);
+      if (response.ok) {
+        const summaryArtifact = isRecord(payload) && isRecord(payload.faceAuditAreaReviewTodoSummary)
+          ? payload.faceAuditAreaReviewTodoSummary
+          : undefined;
+        if (!summaryArtifact) {
+          throw new Error('Invalid face-audit area todo summary payload');
+        }
+        downloadTextArtifact(
+          faceAuditAreaReviewTodoSummaryFileName(area),
+          `${JSON.stringify(summaryArtifact, null, 2)}\n`,
+          'application/json',
+        );
+        setReviewArtifactMessage(
+          `${faceAuditAreaReviewTodoSummaryDownloadLabel(summary)}. ${faceAuditAreaReviewTodoSummaryLabel(summary)}`,
+        );
+        return;
+      }
+      setReviewArtifactMessage(faceAuditAreaReviewTodoSummaryLabel(summary));
+      if (summary.issueCount === 0) {
+        setReviewArtifactMessage(`Area todo summary request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
   async function buildFaceAuditReviewPlanArtifacts() {
     setReviewArtifactLoading(true);
     setReviewArtifactMessage(undefined);
@@ -871,6 +1119,53 @@ function FaceAuditPanel() {
       setReviewPlanReport(plan);
       setReviewArtifactMessage(faceAuditReviewPlanLabel(plan));
       if (!response.ok && plan.issueCount === 0) {
+        setReviewArtifactMessage(`Review plan request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditReviewPlanArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewPlanPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review plan'),
+      });
+      const payload = await response.json() as unknown;
+      const plan = faceAuditReviewPlanFromPayload(payload);
+      setReviewPlanReport(plan);
+      if (response.ok) {
+        const planArtifact = isRecord(payload) && isRecord(payload.faceAuditReviewPlan)
+          ? payload.faceAuditReviewPlan
+          : undefined;
+        if (!planArtifact) {
+          throw new Error('Invalid face-audit review plan payload');
+        }
+        downloadTextArtifact(
+          faceAuditReviewPlanFileName(),
+          `${JSON.stringify(planArtifact, null, 2)}\n`,
+          'application/json',
+        );
+        setReviewArtifactMessage(
+          `${faceAuditReviewPlanDownloadLabel(plan)}. ${faceAuditReviewPlanLabel(plan)}`,
+        );
+        return;
+      }
+      setReviewArtifactMessage(faceAuditReviewPlanLabel(plan));
+      if (plan.issueCount === 0) {
         setReviewArtifactMessage(`Review plan request failed with HTTP ${response.status}`);
       }
     } catch (caught) {
@@ -1393,6 +1688,62 @@ function FaceAuditPanel() {
     }
   }
 
+  async function downloadFaceAuditSourceIdsByAreaTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const sourceArtifact = faceAuditMatchSourceArtifactFromInputs();
+      const defaultSourceId = faceAuditSourceIdFromInputs();
+      const sourceIdsByArea = faceAuditSourceIdsByAreaPayload(reviewMatchSourceIdsByArea, defaultSourceId);
+      if (sourceIdsByArea === undefined) {
+        throw new Error('Select a default evidence source id before generating source ids by area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditSourceIdsByAreaTemplatePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          sourceArtifact,
+          defaultSourceId,
+          sourceIdsByArea,
+        }),
+      });
+      const payload = await response.json() as unknown;
+      const generated = faceAuditSourceIdsByAreaFromPayload(payload);
+      if (!response.ok || generated === undefined) {
+        const validation = isRecord(payload) && isRecord(payload.faceAuditSourceIdsByAreaTemplateValidation)
+          ? payload.faceAuditSourceIdsByAreaTemplateValidation
+          : undefined;
+        const issues = isRecord(validation) && Array.isArray(validation.issues)
+          ? validation.issues
+            .filter(isRecord)
+            .map((issue) => `${String(issue.field)}: ${String(issue.message)}`)
+          : [`HTTP ${response.status}`];
+        throw new Error(issues.join('; '));
+      }
+      const artifactText = `${JSON.stringify(generated, null, 2)}\n`;
+      setReviewMatchSourceIdsByArea(generated);
+      setReviewArtifactText(artifactText.trimEnd());
+      downloadTextArtifact(
+        faceAuditSourceIdsByAreaFileName(),
+        artifactText,
+        'application/json',
+      );
+      setReviewArtifactMessage(faceAuditSourceIdsByAreaDownloadLabel(generated));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
   function useFaceAuditSourceIdsByAreaFromReviewArtifactText() {
     setReviewArtifactMessage(undefined);
     setReviewValidation(undefined);
@@ -1453,6 +1804,25 @@ function FaceAuditPanel() {
     }
   }
 
+  function downloadFaceAuditEvidenceSourceArtifact() {
+    setEvidenceSourceArtifactMessage(undefined);
+    try {
+      const payload = JSON.parse(evidenceSourceArtifactText) as unknown;
+      const template = faceAuditEvidenceSourceTemplateFromPayload(payload);
+      if (template === undefined) {
+        throw new Error('Evidence source artifact must be valid source-template JSON');
+      }
+      downloadTextArtifact(
+        faceAuditEvidenceSourceTemplateFileName(),
+        `${JSON.stringify(template, null, 2)}\n`,
+        'application/json',
+      );
+      setEvidenceSourceArtifactMessage(faceAuditEvidenceSourceTemplateDownloadLabel(template));
+    } catch (caught) {
+      setEvidenceSourceArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
   function useFirstFaceAuditEvidenceSourceFromArtifact() {
     setEvidenceSourceArtifactMessage(undefined);
     try {
@@ -1507,6 +1877,59 @@ function FaceAuditPanel() {
       const template = faceAuditEvidenceRefTemplateFromPayload(payload);
       setEvidenceRefTemplate(template);
       setReviewArtifactMessage(faceAuditEvidenceRefTemplateLabel(template));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditEvidenceRefTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setEvidenceRefTemplate(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a known face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditEvidenceRefTemplatePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          sourceId: faceAuditSourceIdFromInputs(),
+          area,
+          mode: reviewFillEvidenceRefMode(),
+        }),
+      });
+      const payload = await response.json() as unknown;
+      if (!response.ok) {
+        const validation = isRecord(payload) && isRecord(payload.faceAuditEvidenceRefTemplateValidation)
+          ? payload.faceAuditEvidenceRefTemplateValidation
+          : undefined;
+        const issues = isRecord(validation) && Array.isArray(validation.issues)
+          ? validation.issues
+            .filter(isRecord)
+            .map((issue) => `${String(issue.field)}: ${String(issue.message)}`)
+          : [`HTTP ${response.status}`];
+        throw new Error(issues.join('; '));
+      }
+      const template = faceAuditEvidenceRefTemplateFromPayload(payload);
+      const templateArtifact = isRecord(payload) && isRecord(payload.faceAuditEvidenceRefTemplate)
+        ? payload.faceAuditEvidenceRefTemplate
+        : undefined;
+      if (templateArtifact === undefined) {
+        throw new Error('Invalid face-audit evidence ref template payload');
+      }
+      setEvidenceRefTemplate(template);
+      downloadTextArtifact(
+        faceAuditEvidenceRefTemplateFileName(template),
+        `${JSON.stringify(templateArtifact, null, 2)}\n`,
+        'application/json',
+      );
+      setReviewArtifactMessage(
+        `${faceAuditEvidenceRefTemplateDownloadLabel(template)}. ${faceAuditEvidenceRefTemplateLabel(template)}`,
+      );
     } catch (caught) {
       setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -1746,10 +2169,24 @@ function FaceAuditPanel() {
             </button>
             <button
               type="button"
+              onClick={() => void downloadFaceAuditReviewTemplate()}
+              disabled={reviewArtifactLoading}
+            >
+              Download review template
+            </button>
+            <button
+              type="button"
               onClick={() => void loadFaceAuditAreaReviewTemplate()}
               disabled={reviewArtifactLoading || checklist.areas.length === 0}
             >
               Load area template
+            </button>
+            <button
+              type="button"
+              onClick={() => void downloadFaceAuditAreaReviewTemplate()}
+              disabled={reviewArtifactLoading || checklist.areas.length === 0}
+            >
+              Download area template
             </button>
             <button
               type="button"
@@ -1845,6 +2282,20 @@ function FaceAuditPanel() {
           </button>
           <button
             type="button"
+            onClick={() => void downloadFaceAuditReviewTodoArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            Download review todo
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadFaceAuditReviewTodoSummaryArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            Download review todo summary
+          </button>
+          <button
+            type="button"
             onClick={() => void summarizeFaceAuditAreaReviewTodoArtifacts()}
             disabled={reviewArtifactLoading}
           >
@@ -1852,10 +2303,24 @@ function FaceAuditPanel() {
           </button>
           <button
             type="button"
+            onClick={() => void downloadFaceAuditAreaReviewTodoSummaryArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            Download area todo summary
+          </button>
+          <button
+            type="button"
             onClick={() => void buildFaceAuditReviewPlanArtifacts()}
             disabled={reviewArtifactLoading}
           >
             Build review plan
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadFaceAuditReviewPlanArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            Download review plan
           </button>
           <button
             type="button"
@@ -2043,6 +2508,13 @@ function FaceAuditPanel() {
             >
               Use selected evidence source
             </button>
+            <button
+              type="button"
+              onClick={downloadFaceAuditEvidenceSourceArtifact}
+              disabled={evidenceSourceArtifactLoading || evidenceSourceArtifactText.trim().length === 0}
+            >
+              Download evidence sources
+            </button>
             <div>
               <div>Full match area sources</div>
               <button
@@ -2058,6 +2530,13 @@ function FaceAuditPanel() {
                 disabled={reviewArtifactLoading || reviewMatchAreaSourceOptions.length === 0}
               >
                 Generate source ids by area
+              </button>
+              <button
+                type="button"
+                onClick={() => void downloadFaceAuditSourceIdsByAreaTemplate()}
+                disabled={reviewArtifactLoading || reviewMatchAreaSourceOptions.length === 0}
+              >
+                Download source ids by area
               </button>
               <button
                 type="button"
@@ -2104,6 +2583,13 @@ function FaceAuditPanel() {
               disabled={reviewArtifactLoading}
             >
               Generate evidence refs
+            </button>
+            <button
+              type="button"
+              onClick={() => void downloadFaceAuditEvidenceRefTemplate()}
+              disabled={reviewArtifactLoading}
+            >
+              Download evidence refs
             </button>
             <button
               type="button"

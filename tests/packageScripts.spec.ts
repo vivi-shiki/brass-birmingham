@@ -34,6 +34,11 @@ describe('package scripts', () => {
       .toBe('tsx src/tools/faceAuditCli.ts verify-ci-artifacts');
     expect(packageJson.scripts['face-audit:ci-artifacts-self-check'])
       .toBe('tsx src/tools/faceAuditCli.ts ci-artifacts-self-check');
+    expect(packageJson.scripts['face-audit:review-kit']).toBe('tsx src/tools/faceAuditCli.ts review-kit');
+    expect(packageJson.scripts['face-audit:verify-review-kit'])
+      .toBe('tsx src/tools/faceAuditCli.ts verify-review-kit');
+    expect(packageJson.scripts['face-audit:review-kit-self-check'])
+      .toBe('tsx src/tools/faceAuditCli.ts review-kit-self-check');
     expect(packageJson.scripts['face-audit:handoff']).toBe('tsx src/tools/faceAuditCli.ts handoff');
     expect(packageJson.scripts['face-audit:verify-handoff'])
       .toBe('tsx src/tools/faceAuditCli.ts verify-handoff');
@@ -53,7 +58,7 @@ describe('package scripts', () => {
     expect(packageJson.scripts['face-audit:review-match-template-by-area'])
       .toBe('tsx src/tools/faceAuditCli.ts review-match-template-by-area');
     expect(packageJson.scripts.verify)
-      .toBe('npm run build && npm test -- --reporter=dot && npm run face-audit:release-gate && npm run face-audit:ci-artifacts-self-check');
+      .toBe('npm run build && npm test -- --reporter=dot && npm run face-audit:release-gate && npm run face-audit:ci-artifacts-self-check && npm run face-audit:review-kit-self-check');
 
     const verifySteps = packageJson.scripts.verify.split(' && ');
     expect(verifySteps).toEqual([
@@ -61,6 +66,7 @@ describe('package scripts', () => {
       'npm test -- --reporter=dot',
       'npm run face-audit:release-gate',
       'npm run face-audit:ci-artifacts-self-check',
+      'npm run face-audit:review-kit-self-check',
     ]);
   });
 });

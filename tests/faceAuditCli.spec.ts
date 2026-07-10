@@ -999,6 +999,8 @@ describe('face-audit CLI', () => {
         areaTodoSummaryArtifactCount: number;
         areaReviewSheetArtifactCount: number;
         areaReviewerInstructionsArtifactCount: number;
+        sourceIdsByAreaTemplateArtifactCount: number;
+        areaEvidenceRefTemplateArtifactCount: number;
         unfinishedAreas: Array<{
           area: string;
           remainingItemCount: number;
@@ -1014,9 +1016,12 @@ describe('face-audit CLI', () => {
     const planPath = path.join('out', 'face-audit-review-plan.json');
     const handoffPath = path.join('out', 'face-audit-reviewer-handoff.json');
     const sheetPath = path.join('out', 'face-audit-review-sheet.tsv');
+    const sourceIdsByAreaPath = path.join('out', 'source-ids-by-area.json');
     const instructionsPath = path.join('out', 'face-audit-reviewer-instructions.md');
     const industryAreaPath = path.join('out', 'face-audit-area-industryTiles-review.json');
     const industryAreaTodoSummaryPath = path.join('out', 'face-audit-area-industryTiles-todo-summary.json');
+    const industryAreaEvidenceRefsPath = path.join('out', 'face-audit-area-industryTiles-area-evidence-refs.json');
+    const industryItemEvidenceRefsPath = path.join('out', 'face-audit-area-industryTiles-items-evidence-refs.json');
     const industryAreaReviewSheetPath = path.join('out', 'face-audit-area-industryTiles-review-sheet.tsv');
     const industryAreaReviewerInstructionsPath = path.join('out', 'face-audit-area-industryTiles-reviewer-instructions.md');
     const status = JSON.parse(io.textFile(statusPath)) as {
@@ -1054,6 +1059,7 @@ describe('face-audit CLI', () => {
       areas: Array<{area: string; reviewArtifact: {artifactType: string; area: string}}>;
     };
     const reviewSheet = io.textFile(sheetPath);
+    const sourceIdsByArea = JSON.parse(io.textFile(sourceIdsByAreaPath)) as Record<string, string>;
     const industryAreaReview = JSON.parse(io.textFile(industryAreaPath)) as ReturnType<typeof buildFaceAuditAreaReviewTemplate>;
     const industryAreaTodoSummary = JSON.parse(io.textFile(industryAreaTodoSummaryPath)) as {
       artifactType: string;
@@ -1064,6 +1070,20 @@ describe('face-audit CLI', () => {
       remainingItemCount: number;
       reviewedItemCount: number;
       unreviewedItemCount: number;
+    };
+    const industryAreaEvidenceRefs = JSON.parse(io.textFile(industryAreaEvidenceRefsPath)) as {
+      artifactType: string;
+      sourceId: string;
+      area: string;
+      mode: string;
+      evidenceRefs: string[];
+    };
+    const industryItemEvidenceRefs = JSON.parse(io.textFile(industryItemEvidenceRefsPath)) as {
+      artifactType: string;
+      sourceId: string;
+      area: string;
+      mode: string;
+      evidenceRefs: string[];
     };
     const industryAreaReviewSheet = io.textFile(industryAreaReviewSheetPath);
     const industryAreaReviewerInstructions = io.textFile(industryAreaReviewerInstructionsPath);
@@ -1094,6 +1114,8 @@ describe('face-audit CLI', () => {
         areaTodoSummaryArtifactCount: 4,
         areaReviewSheetArtifactCount: 4,
         areaReviewerInstructionsArtifactCount: 4,
+        sourceIdsByAreaTemplateArtifactCount: 1,
+        areaEvidenceRefTemplateArtifactCount: 8,
         unfinishedAreas: [
           {
             area: 'industryTiles',
@@ -1124,20 +1146,29 @@ describe('face-audit CLI', () => {
         ciFileSummary(planPath, 'face_audit_review_plan'),
         ciFileSummary(handoffPath, 'face_audit_reviewer_handoff'),
         ciFileSummary(sheetPath, 'face_audit_review_sheet_tsv'),
+        ciFileSummary(sourceIdsByAreaPath, 'face_audit_source_ids_by_area_template'),
         ciFileSummary(industryAreaPath, 'face_audit_area_review'),
         ciFileSummary(industryAreaTodoSummaryPath, 'face_audit_area_review_todo_summary'),
+        ciFileSummary(industryAreaEvidenceRefsPath, 'face_audit_evidence_ref_template'),
+        ciFileSummary(industryItemEvidenceRefsPath, 'face_audit_evidence_ref_template'),
         ciFileSummary(industryAreaReviewSheetPath, 'face_audit_area_review_sheet_tsv'),
         ciFileSummary(industryAreaReviewerInstructionsPath, 'face_audit_area_reviewer_instructions'),
         ciFileSummary(path.join('out', 'face-audit-area-linkLines-review.json'), 'face_audit_area_review'),
         ciFileSummary(path.join('out', 'face-audit-area-linkLines-todo-summary.json'), 'face_audit_area_review_todo_summary'),
+        ciFileSummary(path.join('out', 'face-audit-area-linkLines-area-evidence-refs.json'), 'face_audit_evidence_ref_template'),
+        ciFileSummary(path.join('out', 'face-audit-area-linkLines-items-evidence-refs.json'), 'face_audit_evidence_ref_template'),
         ciFileSummary(path.join('out', 'face-audit-area-linkLines-review-sheet.tsv'), 'face_audit_area_review_sheet_tsv'),
         ciFileSummary(path.join('out', 'face-audit-area-linkLines-reviewer-instructions.md'), 'face_audit_area_reviewer_instructions'),
         ciFileSummary(path.join('out', 'face-audit-area-locationsAndSlots-review.json'), 'face_audit_area_review'),
         ciFileSummary(path.join('out', 'face-audit-area-locationsAndSlots-todo-summary.json'), 'face_audit_area_review_todo_summary'),
+        ciFileSummary(path.join('out', 'face-audit-area-locationsAndSlots-area-evidence-refs.json'), 'face_audit_evidence_ref_template'),
+        ciFileSummary(path.join('out', 'face-audit-area-locationsAndSlots-items-evidence-refs.json'), 'face_audit_evidence_ref_template'),
         ciFileSummary(path.join('out', 'face-audit-area-locationsAndSlots-review-sheet.tsv'), 'face_audit_area_review_sheet_tsv'),
         ciFileSummary(path.join('out', 'face-audit-area-locationsAndSlots-reviewer-instructions.md'), 'face_audit_area_reviewer_instructions'),
         ciFileSummary(path.join('out', 'face-audit-area-merchantTiles-review.json'), 'face_audit_area_review'),
         ciFileSummary(path.join('out', 'face-audit-area-merchantTiles-todo-summary.json'), 'face_audit_area_review_todo_summary'),
+        ciFileSummary(path.join('out', 'face-audit-area-merchantTiles-area-evidence-refs.json'), 'face_audit_evidence_ref_template'),
+        ciFileSummary(path.join('out', 'face-audit-area-merchantTiles-items-evidence-refs.json'), 'face_audit_evidence_ref_template'),
         ciFileSummary(path.join('out', 'face-audit-area-merchantTiles-review-sheet.tsv'), 'face_audit_area_review_sheet_tsv'),
         ciFileSummary(path.join('out', 'face-audit-area-merchantTiles-reviewer-instructions.md'), 'face_audit_area_reviewer_instructions'),
         ciFileSummary(instructionsPath, 'face_audit_reviewer_instructions'),
@@ -1152,6 +1183,24 @@ describe('face-audit CLI', () => {
     expect(reviewSheet.trimEnd().split('\n')).toHaveLength(186);
     expect(reviewSheet.split('\n')[0])
       .toBe('area\titemId\titemKey\tlabel\texpectedFields\treviewStatus\tnextStep\treviewer\treviewedAt\tevidenceRef\tnotes');
+    expect(sourceIdsByArea).toEqual(Object.fromEntries(FACE_AUDIT_AREAS.map((area) => [
+      area,
+      'placeholder-source-id',
+    ])));
+    expect(industryAreaEvidenceRefs).toMatchObject({
+      artifactType: 'face_audit_evidence_ref_template',
+      sourceId: 'placeholder-source-id',
+      area: 'industryTiles',
+      mode: 'area',
+      evidenceRefs: ['official-component:placeholder-source-id#industryTiles'],
+    });
+    expect(industryItemEvidenceRefs).toMatchObject({
+      artifactType: 'face_audit_evidence_ref_template',
+      sourceId: 'placeholder-source-id',
+      area: 'industryTiles',
+      mode: 'items',
+    });
+    expect(industryItemEvidenceRefs.evidenceRefs).toHaveLength(45);
     expect(industryAreaReviewSheet).toBe(buildFaceAuditAreaReviewSheet([industryAreaReview], 'industryTiles').tsv);
     expect(industryAreaReviewSheet.trimEnd().split('\n')).toHaveLength(46);
     expect(industryAreaReviewSheet.trimEnd().split('\n').slice(1).every((line) => line.startsWith('industryTiles\t')))
@@ -1159,6 +1208,12 @@ describe('face-audit CLI', () => {
     expect(instructions).toContain('# Face Audit Reviewer Instructions');
     expect(instructions).toContain('- `face-audit-review.json`: merged full review artifact used to rebuild derived exports.');
     expect(instructions).toContain('- `face-audit-review-sheet.tsv`: spreadsheet-friendly assignment and tracking view.');
+    expect(instructions)
+      .toContain('- `source-ids-by-area.json`: replaceable area-to-source-id template for mapped full-review generation.');
+    expect(instructions)
+      .toContain('- `face-audit-area-<area>-area-evidence-refs.json`: area-level evidence refs using the configured source id.');
+    expect(instructions)
+      .toContain('- `face-audit-area-<area>-items-evidence-refs.json`: item-specific evidence refs using the configured source id.');
     expect(instructions)
       .toContain('- `face-audit-area-<area>-review-sheet.tsv`: spreadsheet-friendly tracking view for one unfinished area.');
     expect(instructions)
@@ -1179,6 +1234,8 @@ describe('face-audit CLI', () => {
     expect(industryAreaReviewerInstructions).toContain('- Review artifact: `face-audit-area-industryTiles-review.json`');
     expect(industryAreaReviewerInstructions).toContain('- Review sheet: `face-audit-area-industryTiles-review-sheet.tsv`');
     expect(industryAreaReviewerInstructions).toContain('- Todo summary: `face-audit-area-industryTiles-todo-summary.json`');
+    expect(industryAreaReviewerInstructions).toContain('- Area evidence refs: `face-audit-area-industryTiles-area-evidence-refs.json`');
+    expect(industryAreaReviewerInstructions).toContain('- Item evidence refs: `face-audit-area-industryTiles-items-evidence-refs.json`');
     expect(industryAreaReviewerInstructions).toContain('- Next step: `review_unreviewed_items`');
     expect(industryAreaReviewerInstructions).toContain('- Remaining items: 45 / 45');
     expect(industryAreaReviewerInstructions)
@@ -1211,13 +1268,16 @@ describe('face-audit CLI', () => {
       issueCount: 0,
       issues: [],
     });
-    expect(verification.fileCount).toBe(24);
+    expect(verification.fileCount).toBe(33);
     expect(verification.files).toContainEqual(ciFileSummary(manifestPath, 'face_audit_ci_artifacts'));
     expect(verification.files).toContainEqual(ciFileSummary(fullReviewPath, 'face_audit_review'));
     expect(verification.files).toContainEqual(ciFileSummary(sheetPath, 'face_audit_review_sheet_tsv'));
+    expect(verification.files).toContainEqual(ciFileSummary(sourceIdsByAreaPath, 'face_audit_source_ids_by_area_template'));
     expect(verification.files).toContainEqual(ciFileSummary(instructionsPath, 'face_audit_reviewer_instructions'));
     expect(verification.files).toContainEqual(ciFileSummary(industryAreaPath, 'face_audit_area_review'));
     expect(verification.files).toContainEqual(ciFileSummary(industryAreaTodoSummaryPath, 'face_audit_area_review_todo_summary'));
+    expect(verification.files).toContainEqual(ciFileSummary(industryAreaEvidenceRefsPath, 'face_audit_evidence_ref_template'));
+    expect(verification.files).toContainEqual(ciFileSummary(industryItemEvidenceRefsPath, 'face_audit_evidence_ref_template'));
     expect(verification.files).toContainEqual(ciFileSummary(industryAreaReviewSheetPath, 'face_audit_area_review_sheet_tsv'));
     expect(verification.files)
       .toContainEqual(ciFileSummary(industryAreaReviewerInstructionsPath, 'face_audit_area_reviewer_instructions'));
@@ -1272,6 +1332,50 @@ describe('face-audit CLI', () => {
       expect.objectContaining({
         field: 'face-audit-area-industryTiles-todo-summary.json',
         message: 'CI area todo summary artifact file face-audit-area-industryTiles-todo-summary.json does not match the reviewer handoff embedded todo area',
+      }),
+    ]));
+
+    const tamperedSourceIdsByAreaIO = new MemoryFaceAuditCliIO({
+      ...files,
+      [sourceIdsByAreaPath]: JSON.stringify({
+        ...sourceIdsByArea,
+        industryTiles: 'tiles-source',
+      }),
+    });
+    const tamperedSourceIdsByAreaExitCode =
+      await runFaceAuditCli(['verify-ci-artifacts', 'out'], tamperedSourceIdsByAreaIO);
+    const tamperedSourceIdsByAreaVerification = JSON.parse(tamperedSourceIdsByAreaIO.stdout) as {
+      ok: boolean;
+      issues: Array<{field: string; message: string}>;
+    };
+    expect(tamperedSourceIdsByAreaExitCode).toBe(1);
+    expect(tamperedSourceIdsByAreaVerification.ok).toBe(false);
+    expect(tamperedSourceIdsByAreaVerification.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'source-ids-by-area.json',
+        message: 'CI source ids by area template file source-ids-by-area.json must map every face-audit area to placeholder-source-id',
+      }),
+    ]));
+
+    const tamperedEvidenceRefsIO = new MemoryFaceAuditCliIO({
+      ...files,
+      [industryAreaEvidenceRefsPath]: JSON.stringify({
+        ...industryAreaEvidenceRefs,
+        evidenceRefs: ['official-component:other-source#industryTiles'],
+      }),
+    });
+    const tamperedEvidenceRefsExitCode =
+      await runFaceAuditCli(['verify-ci-artifacts', 'out'], tamperedEvidenceRefsIO);
+    const tamperedEvidenceRefsVerification = JSON.parse(tamperedEvidenceRefsIO.stdout) as {
+      ok: boolean;
+      issues: Array<{field: string; message: string}>;
+    };
+    expect(tamperedEvidenceRefsExitCode).toBe(1);
+    expect(tamperedEvidenceRefsVerification.ok).toBe(false);
+    expect(tamperedEvidenceRefsVerification.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'face-audit-area-industryTiles-area-evidence-refs.json',
+        message: 'CI evidence ref template file face-audit-area-industryTiles-area-evidence-refs.json does not match the unfinished area and placeholder source id',
       }),
     ]));
 
@@ -1609,7 +1713,7 @@ describe('face-audit CLI', () => {
       cleanedUp: true,
       pendingAreaCount: 4,
       readyAreaCount: 2,
-      fileCount: 24,
+      fileCount: 33,
       issueCount: 0,
       issues: [],
     });
@@ -2302,6 +2406,336 @@ describe('face-audit CLI', () => {
         notes: '',
       },
     ]);
+  });
+
+  it('writes a local face-audit review kit from official-component evidence files', async () => {
+    const io = new MemoryFaceAuditCliIO({
+      'reviewer-photos/Official Board Scan.PNG': new Uint8Array([0, 1, 2, 255]),
+      'archive-a/regular-cards.zip': 'regular card photos',
+    });
+
+    const exitCode = await runFaceAuditCli([
+      'review-kit',
+      'kit',
+      'official_high_res_component_image',
+      'reviewer-photos/Official Board Scan.PNG',
+      'archive-a/regular-cards.zip',
+    ], io);
+    const manifest = JSON.parse(io.stdout) as {
+      artifactType: string;
+      version: number;
+      ok: boolean;
+      outputDirectory: string;
+      sourceType: string;
+      sourceCount: number;
+      defaultSourceId: string;
+      checklistFingerprint: string;
+      checklistItemCount: number;
+      areaCount: number;
+      fileCount: number;
+      files: Array<{path: string; artifactType: string; ok: boolean; contentHash: string}>;
+      issueCount: number;
+      issues: unknown[];
+    };
+    const evidenceSourcesPath = path.join('kit', 'evidence-sources.json');
+    const manifestPath = path.join('kit', 'face-audit-review-kit-manifest.json');
+    const sourceIdsByAreaPath = path.join('kit', 'source-ids-by-area.json');
+    const statusPath = path.join('kit', 'face-audit-review-status.json');
+    const reviewPath = path.join('kit', 'face-audit-review.json');
+    const todoPath = path.join('kit', 'face-audit-review-todo.json');
+    const planPath = path.join('kit', 'face-audit-review-plan.json');
+    const handoffPath = path.join('kit', 'face-audit-reviewer-handoff.json');
+    const reviewSheetPath = path.join('kit', 'face-audit-review-sheet.tsv');
+    const reviewerInstructionsPath = path.join('kit', 'face-audit-reviewer-instructions.md');
+    const regularAreaPath = path.join('kit', 'face-audit-area-regularCards-review.json');
+    const regularAreaTodoSummaryPath = path.join('kit', 'face-audit-area-regularCards-todo-summary.json');
+    const regularAreaSheetPath = path.join('kit', 'face-audit-area-regularCards-review-sheet.tsv');
+    const regularAreaEvidenceRefsPath = path.join('kit', 'face-audit-area-regularCards-area-evidence-refs.json');
+    const regularItemEvidenceRefsPath = path.join('kit', 'face-audit-area-regularCards-items-evidence-refs.json');
+    const regularAreaInstructionsPath = path.join('kit', 'face-audit-area-regularCards-reviewer-instructions.md');
+    const evidenceSources = JSON.parse(io.textFile(evidenceSourcesPath)) as ReturnType<typeof evidenceSourceTemplateArtifact>;
+    const sourceIdsByArea = JSON.parse(io.textFile(sourceIdsByAreaPath)) as Record<string, string>;
+    const review = JSON.parse(io.textFile(reviewPath)) as ReturnType<typeof buildFaceAuditReviewTemplate>;
+    const regularAreaReview = JSON.parse(io.textFile(regularAreaPath)) as ReturnType<typeof buildFaceAuditAreaReviewTemplate>;
+    const regularAreaEvidenceRefs = JSON.parse(io.textFile(regularAreaEvidenceRefsPath)) as {
+      artifactType: string;
+      sourceId: string;
+      area: string;
+      mode: string;
+      evidenceRefs: string[];
+    };
+    const regularItemEvidenceRefs = JSON.parse(io.textFile(regularItemEvidenceRefsPath)) as {
+      artifactType: string;
+      sourceId: string;
+      area: string;
+      mode: string;
+      evidenceRefs: string[];
+    };
+
+    expect(exitCode).toBe(0);
+    expect(io.stderr).toBe('');
+    expect(io.directories.has('kit')).toBe(true);
+    expect(manifest).toMatchObject({
+      artifactType: 'face_audit_review_kit_manifest',
+      version: 1,
+      ok: true,
+      outputDirectory: 'kit',
+      sourceType: 'official_high_res_component_image',
+      sourceCount: 2,
+      defaultSourceId: 'official-board-scan',
+      checklistItemCount: 185,
+      areaCount: 6,
+      fileCount: 45,
+      issueCount: 0,
+      issues: [],
+    });
+    expect(manifest.checklistFingerprint).toMatch(/^fnv1a32:[0-9a-f]{8}$/);
+    expect(JSON.parse(io.textFile(manifestPath))).toEqual(manifest);
+    expect(manifest.files).toEqual([
+      ciFileSummary(evidenceSourcesPath, 'face_audit_evidence_source_template'),
+      ciFileSummary(sourceIdsByAreaPath, 'face_audit_source_ids_by_area_template'),
+      ciFileSummary(statusPath, 'face_audit_review_status'),
+      ciFileSummary(reviewPath, 'face_audit_review'),
+      ciFileSummary(todoPath, 'face_audit_review_todo'),
+      ciFileSummary(planPath, 'face_audit_review_plan'),
+      ciFileSummary(handoffPath, 'face_audit_reviewer_handoff'),
+      ciFileSummary(reviewSheetPath, 'face_audit_review_sheet_tsv'),
+      ...FACE_AUDIT_AREAS.flatMap((area) => [
+        ciFileSummary(path.join('kit', `face-audit-area-${area}-review.json`), 'face_audit_area_review'),
+        ciFileSummary(path.join('kit', `face-audit-area-${area}-todo-summary.json`), 'face_audit_area_review_todo_summary'),
+        ciFileSummary(path.join('kit', `face-audit-area-${area}-review-sheet.tsv`), 'face_audit_area_review_sheet_tsv'),
+        ciFileSummary(path.join('kit', `face-audit-area-${area}-area-evidence-refs.json`), 'face_audit_evidence_ref_template'),
+        ciFileSummary(path.join('kit', `face-audit-area-${area}-items-evidence-refs.json`), 'face_audit_evidence_ref_template'),
+        ciFileSummary(path.join('kit', `face-audit-area-${area}-reviewer-instructions.md`), 'face_audit_area_reviewer_instructions'),
+      ]),
+      ciFileSummary(reviewerInstructionsPath, 'face_audit_reviewer_instructions'),
+    ]);
+    expect(evidenceSources).toMatchObject({
+      artifactType: 'face_audit_evidence_source_template',
+      version: 1,
+      sourceType: 'official_high_res_component_image',
+      sourceCount: 2,
+    });
+    expect(evidenceSources.evidenceSources).toEqual([
+      {
+        id: 'official-board-scan',
+        label: 'Official Board Scan.PNG',
+        sourceType: 'official_high_res_component_image',
+        citation: 'Official Brass: Birmingham component evidence: reviewer-photos/Official Board Scan.PNG',
+        locator: 'reviewer-photos/Official Board Scan.PNG',
+        contentHash: 'sha256:3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56',
+        notes: '',
+      },
+      {
+        id: 'regular-cards',
+        label: 'regular-cards.zip',
+        sourceType: 'official_high_res_component_image',
+        citation: 'Official Brass: Birmingham component evidence: archive-a/regular-cards.zip',
+        locator: 'archive-a/regular-cards.zip',
+        contentHash: 'sha256:ed805955cfc9b2ff646db3506535a88b17e7d45e98b91dc73bccb1394bf66c3c',
+        notes: '',
+      },
+    ]);
+    expect(sourceIdsByArea).toEqual(Object.fromEntries(FACE_AUDIT_AREAS.map((area) => [
+      area,
+      'official-board-scan',
+    ])));
+    expect(review.evidenceSources).toEqual(evidenceSources.evidenceSources);
+    expect(review.completion.status).toBe('not_started');
+    expect(review.items.every((item) => item.reviewStatus === 'unreviewed')).toBe(true);
+    expect(io.textFile(reviewSheetPath)).toBe(buildFaceAuditReviewSheet([review]).tsv);
+    expect(JSON.parse(io.textFile(statusPath))).toMatchObject({
+      artifactType: 'face_audit_review_status',
+      checklistItemCount: 185,
+      completion: {status: 'not_started', unreviewedItemCount: 185},
+    });
+    expect(JSON.parse(io.textFile(todoPath))).toMatchObject({
+      artifactType: 'face_audit_review_todo',
+      pendingAreaCount: 6,
+      completion: {unreviewedItemCount: 185},
+    });
+    expect(JSON.parse(io.textFile(planPath))).toMatchObject({
+      artifactType: 'face_audit_review_plan',
+      pendingAreaCount: 6,
+      pendingItemCount: 185,
+    });
+    expect(JSON.parse(io.textFile(handoffPath))).toMatchObject({
+      artifactType: 'face_audit_reviewer_handoff',
+      pendingAreaCount: 6,
+      evidenceSourceCount: 2,
+    });
+    expect(io.textFile(reviewerInstructionsPath)).toContain('# Face Audit Reviewer Instructions');
+    expect(io.textFile(reviewerInstructionsPath))
+      .toContain('instructions `face-audit-area-regularCards-reviewer-instructions.md`');
+    expect(regularAreaReview.evidenceSources).toEqual(evidenceSources.evidenceSources);
+    expect(regularAreaReview.area).toBe('regularCards');
+    expect(regularAreaReview.items).toHaveLength(64);
+    expect(JSON.parse(io.textFile(regularAreaTodoSummaryPath))).toMatchObject({
+      artifactType: 'face_audit_area_review_todo_summary',
+      area: 'regularCards',
+      remainingItemCount: 64,
+    });
+    expect(io.textFile(regularAreaSheetPath))
+      .toBe(buildFaceAuditAreaReviewSheet([regularAreaReview], 'regularCards').tsv);
+    expect(io.textFile(regularAreaInstructionsPath))
+      .toContain('# Face Audit Area Reviewer Instructions: regularCards');
+    expect(io.textFile(regularAreaInstructionsPath))
+      .toContain('- Area evidence refs: `face-audit-area-regularCards-area-evidence-refs.json`');
+    expect(regularAreaEvidenceRefs).toMatchObject({
+      artifactType: 'face_audit_evidence_ref_template',
+      sourceId: 'official-board-scan',
+      area: 'regularCards',
+      mode: 'area',
+      evidenceRefs: ['official-component:official-board-scan#regularCards'],
+    });
+    expect(regularItemEvidenceRefs).toMatchObject({
+      artifactType: 'face_audit_evidence_ref_template',
+      sourceId: 'official-board-scan',
+      area: 'regularCards',
+      mode: 'items',
+    });
+    expect(regularItemEvidenceRefs.evidenceRefs).toHaveLength(64);
+
+    io.stdout = '';
+    const verifyExitCode = await runFaceAuditCli(['verify-review-kit', 'kit'], io);
+    const verification = JSON.parse(io.stdout) as {
+      artifactType: string;
+      version: number;
+      ok: boolean;
+      outputDirectory: string;
+      sourceCount: number;
+      checklistFingerprint: string;
+      checklistItemCount: number;
+      areaCount: number;
+      fileCount: number;
+      files: Array<{path: string; artifactType: string; ok: boolean; contentHash?: string}>;
+      issueCount: number;
+      issues: unknown[];
+    };
+    expect(verifyExitCode).toBe(0);
+    expect(verification).toMatchObject({
+      artifactType: 'face_audit_review_kit_verification',
+      version: 1,
+      ok: true,
+      outputDirectory: 'kit',
+      sourceCount: 2,
+      checklistFingerprint: review.checklistFingerprint,
+      checklistItemCount: 185,
+      areaCount: 6,
+      fileCount: 46,
+      issueCount: 0,
+      issues: [],
+    });
+    expect(verification.files).toContainEqual(ciFileSummary(manifestPath, 'face_audit_review_kit_manifest'));
+    expect(verification.files).toContainEqual(ciFileSummary(statusPath, 'face_audit_review_status'));
+    expect(verification.files).toContainEqual(ciFileSummary(evidenceSourcesPath, 'face_audit_evidence_source_template'));
+    expect(verification.files).toContainEqual(ciFileSummary(sourceIdsByAreaPath, 'face_audit_source_ids_by_area_template'));
+    expect(verification.files).toContainEqual(ciFileSummary(reviewPath, 'face_audit_review'));
+    expect(verification.files).toContainEqual(ciFileSummary(handoffPath, 'face_audit_reviewer_handoff'));
+    expect(verification.files).toContainEqual(ciFileSummary(regularAreaEvidenceRefsPath, 'face_audit_evidence_ref_template'));
+    expect(verification.files).toContainEqual(ciFileSummary(regularAreaInstructionsPath, 'face_audit_area_reviewer_instructions'));
+
+    await io.writeTextFile(manifestPath, JSON.stringify({
+      ...manifest,
+      version: 2,
+      outputDirectory: 'wrong-kit',
+      fileCount: 1,
+    }, null, 2));
+    io.stdout = '';
+    const tamperedManifestExitCode = await runFaceAuditCli(['verify-review-kit', 'kit'], io);
+    const tamperedManifestVerification = JSON.parse(io.stdout) as {
+      ok: boolean;
+      issues: Array<{field: string; message: string}>;
+    };
+    expect(tamperedManifestExitCode).toBe(1);
+    expect(tamperedManifestVerification.ok).toBe(false);
+    expect(tamperedManifestVerification.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'face-audit-review-kit-manifest.json.version',
+        message: 'Review kit manifest version must be 1',
+      }),
+      expect.objectContaining({
+        field: 'face-audit-review-kit-manifest.json.outputDirectory',
+        message: 'Review kit manifest outputDirectory must match the verified directory: kit',
+      }),
+      expect.objectContaining({
+        field: 'face-audit-review-kit-manifest.json.fileCount',
+        message: 'Review kit manifest fileCount must match files length',
+      }),
+      expect.objectContaining({
+        field: 'face-audit-review-kit-manifest.json',
+        message: 'Review kit manifest file face-audit-review-kit-manifest.json does not match the files in the directory',
+      }),
+    ]));
+
+    await io.writeTextFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    await io.writeTextFile(sourceIdsByAreaPath, JSON.stringify({
+      ...sourceIdsByArea,
+      regularCards: 'missing-source',
+    }));
+    io.stdout = '';
+    const tamperedExitCode = await runFaceAuditCli(['verify-review-kit', 'kit'], io);
+    const tamperedVerification = JSON.parse(io.stdout) as {
+      ok: boolean;
+      issues: Array<{field: string; message: string}>;
+    };
+    expect(tamperedExitCode).toBe(1);
+    expect(tamperedVerification.ok).toBe(false);
+    expect(tamperedVerification.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        field: 'source-ids-by-area.json.regularCards',
+        message: 'Review kit source id for regularCards is not declared in evidence-sources.json: missing-source',
+      }),
+      expect.objectContaining({
+        field: 'face-audit-review-kit-manifest.json',
+        message: 'Review kit manifest file face-audit-review-kit-manifest.json does not match the files in the directory',
+      }),
+    ]));
+  });
+
+  it('self-checks a temporary face-audit review kit and cleans it up', async () => {
+    const io = new MemoryFaceAuditCliIO();
+
+    const exitCode = await runFaceAuditCli(['review-kit-self-check'], io);
+    const report = JSON.parse(io.stdout) as {
+      artifactType: string;
+      version: number;
+      ok: boolean;
+      temporaryDirectory: string;
+      outputDirectory: string;
+      cleanedUp: boolean;
+      sourceType: string;
+      sourceCount: number;
+      defaultSourceId: string;
+      checklistFingerprint: string;
+      checklistItemCount: number;
+      areaCount: number;
+      fileCount: number;
+      issueCount: number;
+      issues: unknown[];
+    };
+
+    expect(exitCode).toBe(0);
+    expect(io.stderr).toBe('');
+    expect(report).toMatchObject({
+      artifactType: 'face_audit_review_kit_self_check',
+      version: 1,
+      ok: true,
+      temporaryDirectory: path.join('tmp', 'face-audit-review-kit-1'),
+      outputDirectory: path.join('tmp', 'face-audit-review-kit-1', 'review-kit'),
+      cleanedUp: true,
+      sourceType: 'official_high_res_component_image',
+      sourceCount: 1,
+      defaultSourceId: 'official-component-self-check-evidence',
+      checklistItemCount: 185,
+      areaCount: 6,
+      fileCount: 46,
+      issueCount: 0,
+      issues: [],
+    });
+    expect(report.checklistFingerprint).toMatch(/^fnv1a32:[0-9a-f]{8}$/);
+    expect(io.removedDirectories.has(report.temporaryDirectory)).toBe(true);
+    expect(io.directories.has(report.temporaryDirectory)).toBe(false);
   });
 
   it('prints source-id maps for full match review artifacts by area', async () => {
@@ -3122,6 +3556,9 @@ describe('face-audit CLI', () => {
     expect(helpIO.stdout).toContain('faceAuditCli ci-artifacts <output-dir> [review-artifact.json]...');
     expect(helpIO.stdout).toContain('faceAuditCli verify-ci-artifacts <output-dir>');
     expect(helpIO.stdout).toContain('faceAuditCli ci-artifacts-self-check [review-artifact.json]...');
+    expect(helpIO.stdout).toContain('faceAuditCli review-kit <output-dir> <source-type> <evidence-file>...');
+    expect(helpIO.stdout).toContain('faceAuditCli verify-review-kit <output-dir>');
+    expect(helpIO.stdout).toContain('faceAuditCli review-kit-self-check');
     expect(helpIO.stdout).toContain('faceAuditCli handoff [review-artifact.json]...');
     expect(helpIO.stdout).toContain('faceAuditCli verify-handoff <handoff-artifact.json>');
     expect(helpIO.stdout).toContain('faceAuditCli handoff-response <handoff-artifact.json> [area-review-artifact.json]...');
@@ -3146,6 +3583,37 @@ describe('face-audit CLI', () => {
     const extraArgIO = new MemoryFaceAuditCliIO();
     expect(await runFaceAuditCli(['checklist', 'unexpected.json'], extraArgIO)).toBe(2);
     expect(extraArgIO.stderr).toContain('The checklist command does not accept file arguments.');
+
+    const missingReviewKitArgsIO = new MemoryFaceAuditCliIO();
+    expect(await runFaceAuditCli(['review-kit', 'out', 'official_high_res_component_image'], missingReviewKitArgsIO))
+      .toBe(2);
+    expect(missingReviewKitArgsIO.stderr)
+      .toContain('The review-kit command expects output directory, source type, and at least one evidence file path.');
+
+    const invalidReviewKitSourceTypeIO = new MemoryFaceAuditCliIO();
+    expect(await runFaceAuditCli(['review-kit', 'out', 'community_scan', 'scan.png'], invalidReviewKitSourceTypeIO))
+      .toBe(2);
+    expect(invalidReviewKitSourceTypeIO.stderr)
+      .toContain('The review-kit command expects source type official_physical_component or official_high_res_component_image.');
+
+    const missingReviewKitFileIO = new MemoryFaceAuditCliIO();
+    expect(await runFaceAuditCli([
+      'review-kit',
+      'out',
+      'official_physical_component',
+      'missing.png',
+    ], missingReviewKitFileIO)).toBe(2);
+    expect(missingReviewKitFileIO.stderr).toContain('Could not read evidence source file: Missing file missing.png');
+
+    const missingVerifyReviewKitArgsIO = new MemoryFaceAuditCliIO();
+    expect(await runFaceAuditCli(['verify-review-kit'], missingVerifyReviewKitArgsIO)).toBe(2);
+    expect(missingVerifyReviewKitArgsIO.stderr)
+      .toContain('The verify-review-kit command expects exactly one output directory.');
+
+    const extraReviewKitSelfCheckArgIO = new MemoryFaceAuditCliIO();
+    expect(await runFaceAuditCli(['review-kit-self-check', 'out'], extraReviewKitSelfCheckArgIO)).toBe(2);
+    expect(extraReviewKitSelfCheckArgIO.stderr)
+      .toContain('The review-kit-self-check command does not accept file arguments.');
 
     const unknownIO = new MemoryFaceAuditCliIO();
     expect(await runFaceAuditCli(['unknown'], unknownIO)).toBe(2);

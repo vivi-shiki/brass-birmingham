@@ -23,18 +23,26 @@ import {
   buildFaceAuditEvidenceSourceTemplateArtifact,
   fillFaceAuditAreaReviewArtifact,
   faceAuditAreaReviewTemplateFromPayload,
+  faceAuditAreaReviewTemplateDownloadLabel,
+  faceAuditAreaReviewTemplateFileName,
   faceAuditAreaReviewTemplatePath,
   faceAuditAreaReviewTodoSummaryFromPayload,
+  faceAuditAreaReviewTodoSummaryDownloadLabel,
+  faceAuditAreaReviewTodoSummaryFileName,
   faceAuditAreaReviewTodoSummaryLabel,
   faceAuditAreaReviewTodoSummaryPath,
   faceAuditEvidenceCoverageLabel,
   faceAuditEvidenceRefTemplateFromPayload,
+  faceAuditEvidenceRefTemplateDownloadLabel,
+  faceAuditEvidenceRefTemplateFileName,
   faceAuditEvidenceRefTemplateLabel,
   faceAuditEvidenceRefTemplatePath,
   faceAuditEvidenceSourceLabel,
   faceAuditEvidenceSourceFromPayload,
   faceAuditEvidenceSourcesFromPayload,
   faceAuditEvidenceSourceTemplateFromPayload,
+  faceAuditEvidenceSourceTemplateDownloadLabel,
+  faceAuditEvidenceSourceTemplateFileName,
   faceAuditEvidenceSourceTemplateLabel,
   faceAuditLockArtifactFromPayload,
   faceAuditLockArtifactLabel,
@@ -70,6 +78,8 @@ import {
   faceAuditReviewMergeLabel,
   faceAuditReviewMergePath,
   faceAuditReviewPlanAreaLabel,
+  faceAuditReviewPlanDownloadLabel,
+  faceAuditReviewPlanFileName,
   faceAuditReviewPlanFromPayload,
   faceAuditReviewPlanLabel,
   faceAuditReviewPlanPath,
@@ -89,15 +99,23 @@ import {
   faceAuditReviewSubmissionLabel,
   faceAuditReviewSubmissionPath,
   faceAuditSourceIdsByAreaFromPayload,
+  faceAuditSourceIdsByAreaDownloadLabel,
+  faceAuditSourceIdsByAreaFileName,
   faceAuditSourceIdsByAreaPayload,
   faceAuditSourceIdsByAreaTemplatePath,
   faceAuditStaticLockGateFromPayload,
   faceAuditStaticLockGateLabel,
   faceAuditReviewTemplateFromPayload,
+  faceAuditReviewTemplateDownloadLabel,
+  faceAuditReviewTemplateFileName,
   faceAuditReviewTodoAreaLabel,
+  faceAuditReviewTodoDownloadLabel,
+  faceAuditReviewTodoFileName,
   faceAuditReviewTodoFromPayload,
   faceAuditReviewTodoLabel,
   faceAuditReviewTodoPath,
+  faceAuditReviewTodoSummaryDownloadLabel,
+  faceAuditReviewTodoSummaryFileName,
   faceAuditReviewTodoSummaryFromPayload,
   faceAuditReviewTodoSummaryLabel,
   faceAuditReviewTodoSummaryPath,
@@ -120,13 +138,20 @@ describe('client face-audit review options', () => {
 
   it('parses public review template metadata for display', () => {
     const template = buildFaceAuditReviewTemplate();
+    const parsed = faceAuditReviewTemplateFromPayload({faceAuditReview: template});
 
-    expect(faceAuditReviewTemplateFromPayload({faceAuditReview: template})).toEqual({
+    expect(parsed).toEqual({
       version: 1,
       checklistFingerprint: template.checklistFingerprint,
       checklistItemCount: template.checklistItemCount,
       evidenceSourceCount: 0,
     });
+    if (parsed === undefined) {
+      throw new Error('Expected review template');
+    }
+    expect(faceAuditReviewTemplateFileName()).toBe('face-audit-review.json');
+    expect(faceAuditReviewTemplateDownloadLabel(parsed))
+      .toBe(`Face-audit review template downloaded: 185 item(s), checklist ${template.checklistFingerprint}`);
   });
 
   it('returns undefined for malformed review template payloads', () => {
@@ -159,8 +184,9 @@ describe('client face-audit review options', () => {
 
   it('parses public area review template metadata for display', () => {
     const template = buildFaceAuditAreaReviewTemplate('regularCards');
+    const parsed = faceAuditAreaReviewTemplateFromPayload({faceAuditAreaReview: template});
 
-    expect(faceAuditAreaReviewTemplateFromPayload({faceAuditAreaReview: template})).toEqual({
+    expect(parsed).toEqual({
       artifactType: 'face_audit_area_review',
       version: 1,
       area: 'regularCards',
@@ -169,7 +195,13 @@ describe('client face-audit review options', () => {
       areaItemCount: 64,
       evidenceSourceCount: 0,
     });
+    if (parsed === undefined) {
+      throw new Error('Expected area review template');
+    }
     expect(faceAuditAreaReviewTemplatePath('regularCards')).toBe('/api/face-audit-review-template/regularCards');
+    expect(faceAuditAreaReviewTemplateFileName('regularCards')).toBe('face-audit-area-regularCards-review.json');
+    expect(faceAuditAreaReviewTemplateDownloadLabel(parsed))
+      .toBe(`Face-audit regularCards review template downloaded: 64 item(s), checklist ${template.checklistFingerprint}`);
   });
 
   it('returns undefined for malformed area review template payloads', () => {
@@ -214,6 +246,10 @@ describe('client face-audit review options', () => {
     });
     expect(faceAuditEvidenceRefTemplateLabel(parsed))
       .toBe('8 evidence ref(s) for wildCards from photo-set (items)');
+    expect(faceAuditEvidenceRefTemplateFileName(parsed))
+      .toBe('face-audit-area-wildCards-items-evidence-refs.json');
+    expect(faceAuditEvidenceRefTemplateDownloadLabel(parsed))
+      .toBe('Face-audit evidence refs downloaded: 8 evidence ref(s) for wildCards from photo-set (items)');
     expect(faceAuditEvidenceRefTemplatePath()).toBe('/api/face-audit-evidence-ref-template');
     expect(faceAuditReviewMatchPath()).toBe('/api/face-audit-review-template/match');
     expect(faceAuditReviewMatchPath('regularCards')).toBe('/api/face-audit-review-template/regularCards/match');
@@ -228,6 +264,8 @@ describe('client face-audit review options', () => {
       evidenceRefs: [],
       items: [],
     });
+    expect(faceAuditEvidenceRefTemplateFileName(faceAuditEvidenceRefTemplateFromPayload({})))
+      .toBe('face-audit-evidence-refs.json');
   });
 
   it('builds full match source-id payloads by face-audit area', () => {
@@ -268,6 +306,13 @@ describe('client face-audit review options', () => {
       },
     })).toBeUndefined();
     expect(faceAuditSourceIdsByAreaTemplatePath()).toBe('/api/face-audit-source-ids-by-area-template');
+    expect(faceAuditSourceIdsByAreaFileName()).toBe('source-ids-by-area.json');
+    expect(faceAuditSourceIdsByAreaDownloadLabel({
+      ...fallbackPayload,
+      industryTiles: 'tile-photos',
+      linkLines: 'board-photo',
+      locationsAndSlots: 'board-photo',
+    })).toBe('Face-audit source ids by area downloaded: 6 area(s), 3 source id(s)');
   });
 
   it('builds browser evidence source template artifacts from hashed files', () => {
@@ -331,6 +376,9 @@ describe('client face-audit review options', () => {
     });
     expect(faceAuditEvidenceSourceTemplateLabel(result.artifact))
       .toBe('3 official_high_res_component_image evidence source(s)');
+    expect(faceAuditEvidenceSourceTemplateFileName()).toBe('evidence-sources.json');
+    expect(faceAuditEvidenceSourceTemplateDownloadLabel(result.artifact))
+      .toBe('Face-audit evidence sources downloaded: 3 official_high_res_component_image evidence source(s)');
 
     expect(buildFaceAuditEvidenceSourceTemplateArtifact('community_scan' as 'official_physical_component', [
       {locator: 'board.png', contentHash: firstHash},
@@ -859,6 +907,7 @@ describe('client face-audit review options', () => {
     });
 
     expect(faceAuditReviewTodoPath()).toBe('/api/face-audit-review-template/todo');
+    expect(faceAuditReviewTodoFileName()).toBe('face-audit-review-todo.json');
     expect(parsed.artifactType).toBe('face_audit_review_todo');
     expect(parsed.version).toBe(1);
     expect(parsed.ok).toBe(true);
@@ -915,6 +964,8 @@ describe('client face-audit review options', () => {
       .toBe('industryTiles: review_unreviewed_items; 45 remaining, 0 / 45 reviewed, 0 evidence ref(s)');
     expect(faceAuditReviewTodoLabel(parsed))
       .toBe(`Review todo is valid for 1 artifact(s). in_progress: 64 / 185 reviewed, 64 matched, 0 differences, 0 need better reference, 5 unfinished area(s), 1 ready area(s), review ${report.reviewFingerprint}`);
+    expect(faceAuditReviewTodoDownloadLabel(parsed))
+      .toBe(`Face-audit review todo downloaded: 5 unfinished area(s), 121 pending item(s), 1 ready area(s), review ${report.reviewFingerprint}`);
   });
 
   it('parses review todo summary reports and endpoint paths', () => {
@@ -956,6 +1007,7 @@ describe('client face-audit review options', () => {
     });
 
     expect(faceAuditReviewTodoSummaryPath()).toBe('/api/face-audit-review-template/todo-summary');
+    expect(faceAuditReviewTodoSummaryFileName()).toBe('face-audit-review-todo-summary.json');
     expect(parsed.artifactType).toBe('face_audit_review_todo_summary');
     expect(parsed.version).toBe(1);
     expect(parsed.ok).toBe(true);
@@ -975,6 +1027,8 @@ describe('client face-audit review options', () => {
     });
     expect(faceAuditReviewTodoSummaryLabel(parsed))
       .toBe(`Review todo summary is valid for 1 artifact(s). in_progress: 64 / 185 reviewed, 64 matched, 0 differences, 0 need better reference, 5 unfinished area(s), 121 item(s), 1 ready area(s), review ${summary.reviewFingerprint}`);
+    expect(faceAuditReviewTodoSummaryDownloadLabel(parsed))
+      .toBe(`Face-audit review todo summary downloaded: 5 unfinished area(s), 121 pending item(s), 1 ready area(s), review ${summary.reviewFingerprint}`);
   });
 
   it('parses area review todo summary reports and endpoint paths', () => {
@@ -1014,6 +1068,8 @@ describe('client face-audit review options', () => {
 
     expect(faceAuditAreaReviewTodoSummaryPath('wildCards'))
       .toBe('/api/face-audit-review-template/wildCards/todo-summary');
+    expect(faceAuditAreaReviewTodoSummaryFileName('wildCards'))
+      .toBe('face-audit-area-wildCards-todo-summary.json');
     expect(parsed.artifactType).toBe('face_audit_area_review_todo_summary');
     expect(parsed.version).toBe(1);
     expect(parsed.ok).toBe(true);
@@ -1042,6 +1098,8 @@ describe('client face-audit review options', () => {
     expect(parsed.issues).toEqual([]);
     expect(faceAuditAreaReviewTodoSummaryLabel(parsed))
       .toBe(`Area todo summary is valid for wildCards. needs_better_reference: 8 remaining, 1 / 8 reviewed, 1 evidence ref(s), next find_better_reference, review ${report.reviewFingerprint}`);
+    expect(faceAuditAreaReviewTodoSummaryDownloadLabel(parsed))
+      .toBe(`Face-audit area todo summary downloaded: wildCards, 8 remaining item(s), 1 evidence ref(s), review ${report.reviewFingerprint}`);
 
     const readyReport = buildFaceAuditAreaReviewTodoSummary([{
       ...wildCards,
@@ -1116,6 +1174,7 @@ describe('client face-audit review options', () => {
     });
 
     expect(faceAuditReviewPlanPath()).toBe('/api/face-audit-review-template/review-plan');
+    expect(faceAuditReviewPlanFileName()).toBe('face-audit-review-plan.json');
     expect(faceAuditReviewSheetPath()).toBe('/api/face-audit-review-template/review-sheet');
     expect(faceAuditAreaReviewSheetPath('industryTiles'))
       .toBe('/api/face-audit-review-template/industryTiles/review-sheet');
@@ -1208,6 +1267,8 @@ describe('client face-audit review options', () => {
       .toBe('industryTiles: 45 item(s) to assign; industryTiles: review_unreviewed_items; 45 remaining, 0 / 45 reviewed, 0 evidence ref(s)');
     expect(faceAuditReviewPlanLabel(parsed))
       .toBe(`Review plan is valid for 1 artifact(s). in_progress: 64 / 185 reviewed, 64 matched, 0 differences, 0 need better reference, 5 unfinished area(s), 121 item(s), 1 ready area(s), review ${report.reviewFingerprint}`);
+    expect(faceAuditReviewPlanDownloadLabel(parsed))
+      .toBe(`Face-audit review plan downloaded: 5 unfinished area(s), 121 pending item(s), 1 ready area(s), review ${report.reviewFingerprint}`);
 
     expect(faceAuditReviewPlanFromPayload({})).toEqual({
       artifactType: undefined,

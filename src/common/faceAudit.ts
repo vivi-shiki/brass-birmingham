@@ -2616,6 +2616,37 @@ export function faceAuditAreaReviewArtifactFileName(area: FaceAuditArea): string
   return `face-audit-area-${area}-review.json`;
 }
 
+export function faceAuditReviewArtifactFileName(): string {
+  return 'face-audit-review.json';
+}
+
+export function faceAuditReviewTodoArtifactFileName(): string {
+  return 'face-audit-review-todo.json';
+}
+
+export function faceAuditReviewTodoSummaryArtifactFileName(): string {
+  return 'face-audit-review-todo-summary.json';
+}
+
+export function faceAuditReviewPlanArtifactFileName(): string {
+  return 'face-audit-review-plan.json';
+}
+
+export function faceAuditSourceIdsByAreaArtifactFileName(): string {
+  return 'source-ids-by-area.json';
+}
+
+export function faceAuditEvidenceSourceTemplateArtifactFileName(): string {
+  return 'evidence-sources.json';
+}
+
+export function faceAuditEvidenceRefTemplateArtifactFileName(
+  area: FaceAuditArea,
+  mode: FaceAuditEvidenceRefMode,
+): string {
+  return `face-audit-area-${area}-${mode}-evidence-refs.json`;
+}
+
 export function faceAuditAreaReviewTodoSummaryArtifactFileName(area: FaceAuditArea): string {
   return `face-audit-area-${area}-todo-summary.json`;
 }
@@ -2649,6 +2680,8 @@ export function buildFaceAuditAreaReviewerInstructions(options: FaceAuditAreaRev
     `- Review artifact: \`${options.reviewFileName}\``,
     `- Review sheet: \`${reviewSheetFileName}\``,
     `- Todo summary: \`${options.todoSummaryFileName}\``,
+    `- Area evidence refs: \`${faceAuditEvidenceRefTemplateArtifactFileName(todo.area, 'area')}\``,
+    `- Item evidence refs: \`${faceAuditEvidenceRefTemplateArtifactFileName(todo.area, 'items')}\``,
     `- Completion status: \`${todo.completionStatus}\``,
     `- Next step: \`${todo.nextStep}\``,
     `- Remaining items: ${todo.remainingItemCount} / ${todo.itemCount}`,
@@ -2665,9 +2698,10 @@ export function buildFaceAuditAreaReviewerInstructions(options: FaceAuditAreaRev
     `1. Open \`${options.reviewFileName}\` and edit only the \`${todo.area}\` area artifact.`,
     `2. Use \`${reviewSheetFileName}\` when spreadsheet assignment or offline row tracking is easier.`,
     '3. Compare each remaining item against official Brass: Birmingham component evidence.',
-    '4. For checked items, set `reviewStatus`, `reviewer`, `reviewedAt`, and `evidenceRef`.',
-    '5. Leave unchecked items as `unreviewed` with blank reviewer, timestamp, evidence, and notes.',
-    `6. Return the edited \`${options.reviewFileName}\` for merge and handoff-response verification.`,
+    '4. Use the area evidence refs file when one official source covers the full area; use item refs when each component face needs its own ref.',
+    '5. For checked items, set `reviewStatus`, `reviewer`, `reviewedAt`, and `evidenceRef`.',
+    '6. Leave unchecked items as `unreviewed` with blank reviewer, timestamp, evidence, and notes.',
+    `7. Return the edited \`${options.reviewFileName}\` for merge and handoff-response verification.`,
     '',
     '## Useful Commands',
     `- Summarize this area: \`npm run face-audit:todo -- --summary --area ${todo.area} .\\${options.reviewFileName}\``,
@@ -2784,7 +2818,10 @@ export function buildFaceAuditReviewerInstructions(options: FaceAuditReviewerIns
     '- `face-audit-review-plan.json`: every unfinished item grouped by area.',
     '- `face-audit-review-sheet.tsv`: spreadsheet-friendly assignment and tracking view.',
     '- `face-audit-reviewer-handoff.json`: todo plus editable area artifacts for unfinished areas.',
+    '- `source-ids-by-area.json`: replaceable area-to-source-id template for mapped full-review generation.',
     '- `face-audit-area-<area>-review.json`: one ready-to-fill artifact per unfinished area.',
+    '- `face-audit-area-<area>-area-evidence-refs.json`: area-level evidence refs using the configured source id.',
+    '- `face-audit-area-<area>-items-evidence-refs.json`: item-specific evidence refs using the configured source id.',
     '- `face-audit-area-<area>-review-sheet.tsv`: spreadsheet-friendly tracking view for one unfinished area.',
     '- `face-audit-area-<area>-todo-summary.json`: counts-only progress for one unfinished area.',
     '- `face-audit-area-<area>-reviewer-instructions.md`: area-specific reviewer workflow and focus keys.',

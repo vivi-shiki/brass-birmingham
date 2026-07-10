@@ -3,6 +3,14 @@ import {
   FACE_AUDIT_EVIDENCE_SOURCE_TYPES,
   FACE_AUDIT_REVIEW_STATUSES,
   faceAuditAreaReviewArtifactFileName,
+  faceAuditAreaReviewTodoSummaryArtifactFileName,
+  faceAuditEvidenceRefTemplateArtifactFileName,
+  faceAuditEvidenceSourceTemplateArtifactFileName,
+  faceAuditReviewPlanArtifactFileName,
+  faceAuditReviewArtifactFileName,
+  faceAuditSourceIdsByAreaArtifactFileName,
+  faceAuditReviewTodoArtifactFileName,
+  faceAuditReviewTodoSummaryArtifactFileName,
   type FaceAuditArea,
   type FaceAuditEvidenceRefMode,
   type FaceAuditEvidenceSourceType,
@@ -1297,6 +1305,24 @@ export function faceAuditAreaReviewTemplateFromPayload(payload: unknown): FaceAu
   return areaReviewTemplateFromPayload(root);
 }
 
+export function faceAuditReviewTemplateFileName(): string {
+  return faceAuditReviewArtifactFileName();
+}
+
+export function faceAuditAreaReviewTemplateFileName(area: FaceAuditArea): string {
+  return faceAuditAreaReviewArtifactFileName(area);
+}
+
+export function faceAuditReviewTemplateDownloadLabel(template: FaceAuditReviewTemplateView): string {
+  return `Face-audit review template downloaded: ${template.checklistItemCount} item(s), ` +
+    `checklist ${template.checklistFingerprint}`;
+}
+
+export function faceAuditAreaReviewTemplateDownloadLabel(template: FaceAuditAreaReviewTemplateView): string {
+  return `Face-audit ${template.area} review template downloaded: ${template.areaItemCount} item(s), ` +
+    `checklist ${template.checklistFingerprint}`;
+}
+
 export function faceAuditMergedReviewArtifactFromPayload(payload: unknown): unknown | undefined {
   const root = isRecord(payload) ? payload.faceAuditReviewValidation : undefined;
   return isRecord(root) ? root.review : undefined;
@@ -1763,8 +1789,28 @@ export function faceAuditEvidenceRefTemplateLabel(template: FaceAuditEvidenceRef
   return `${template.evidenceRefCount} evidence ref(s) for ${areaLabel} from ${sourceLabel} (${modeLabel})`;
 }
 
+export function faceAuditEvidenceRefTemplateFileName(template: FaceAuditEvidenceRefTemplateView): string {
+  const area = template.area ?? 'unknown';
+  const mode = template.mode ?? 'unknown';
+  return area === 'unknown' || mode === 'unknown'
+    ? 'face-audit-evidence-refs.json'
+    : faceAuditEvidenceRefTemplateArtifactFileName(area, mode);
+}
+
+export function faceAuditEvidenceRefTemplateDownloadLabel(template: FaceAuditEvidenceRefTemplateView): string {
+  return `Face-audit evidence refs downloaded: ${faceAuditEvidenceRefTemplateLabel(template)}`;
+}
+
 export function faceAuditEvidenceSourceTemplateLabel(template: FaceAuditEvidenceSourceTemplateView): string {
   return `${template.sourceCount} ${template.sourceType} evidence source(s)`;
+}
+
+export function faceAuditEvidenceSourceTemplateFileName(): string {
+  return faceAuditEvidenceSourceTemplateArtifactFileName();
+}
+
+export function faceAuditEvidenceSourceTemplateDownloadLabel(template: FaceAuditEvidenceSourceTemplateView): string {
+  return `Face-audit evidence sources downloaded: ${faceAuditEvidenceSourceTemplateLabel(template)}`;
 }
 
 export function faceAuditEvidenceSourceLabel(source: FaceAuditEvidenceSourceView): string {
@@ -1933,6 +1979,19 @@ export function faceAuditSourceIdsByAreaTemplatePath(): string {
   return '/api/face-audit-source-ids-by-area-template';
 }
 
+export function faceAuditSourceIdsByAreaFileName(): string {
+  return faceAuditSourceIdsByAreaArtifactFileName();
+}
+
+export function faceAuditSourceIdsByAreaDownloadLabel(sourceIdsByArea: Record<FaceAuditArea, string>): string {
+  const mappedAreaCount = FACE_AUDIT_AREAS.filter((area) =>
+    nonEmptyString(sourceIdsByArea[area]) !== undefined).length;
+  const sourceIdCount = new Set(FACE_AUDIT_AREAS
+    .map((area) => nonEmptyString(sourceIdsByArea[area]))
+    .filter((sourceId): sourceId is string => sourceId !== undefined)).size;
+  return `Face-audit source ids by area downloaded: ${mappedAreaCount} area(s), ${sourceIdCount} source id(s)`;
+}
+
 export function faceAuditReviewSubmissionPath(type: FaceAuditReviewSubmissionType): string {
   return `/api/face-audit-review-template/${type}`;
 }
@@ -1959,16 +2018,58 @@ export function faceAuditReviewTodoPath(): string {
   return '/api/face-audit-review-template/todo';
 }
 
+export function faceAuditReviewTodoFileName(): string {
+  return faceAuditReviewTodoArtifactFileName();
+}
+
+export function faceAuditReviewTodoDownloadLabel(todo: FaceAuditReviewTodoView): string {
+  const reviewFingerprint = todo.reviewFingerprint ?? 'unknown review';
+  const pendingItemCount = todo.areas.reduce((total, area) => total + area.remainingItemCount, 0);
+  return `Face-audit review todo downloaded: ${todo.pendingAreaCount} unfinished area(s), ` +
+    `${pendingItemCount} pending item(s), ${todo.readyAreaCount} ready area(s), review ${reviewFingerprint}`;
+}
+
 export function faceAuditReviewTodoSummaryPath(): string {
   return '/api/face-audit-review-template/todo-summary';
+}
+
+export function faceAuditReviewTodoSummaryFileName(): string {
+  return faceAuditReviewTodoSummaryArtifactFileName();
+}
+
+export function faceAuditReviewTodoSummaryDownloadLabel(summary: FaceAuditReviewTodoSummaryView): string {
+  const reviewFingerprint = summary.reviewFingerprint ?? 'unknown review';
+  return `Face-audit review todo summary downloaded: ${summary.pendingAreaCount} unfinished area(s), ` +
+    `${summary.pendingItemCount} pending item(s), ${summary.readyAreaCount} ready area(s), review ${reviewFingerprint}`;
 }
 
 export function faceAuditAreaReviewTodoSummaryPath(area: FaceAuditArea): string {
   return `/api/face-audit-review-template/${area}/todo-summary`;
 }
 
+export function faceAuditAreaReviewTodoSummaryFileName(area: FaceAuditArea): string {
+  return faceAuditAreaReviewTodoSummaryArtifactFileName(area);
+}
+
+export function faceAuditAreaReviewTodoSummaryDownloadLabel(summary: FaceAuditAreaReviewTodoSummaryView): string {
+  const area = summary.area ?? 'unknown area';
+  const reviewFingerprint = summary.reviewFingerprint ?? 'unknown review';
+  return `Face-audit area todo summary downloaded: ${area}, ${summary.remainingItemCount} remaining item(s), ` +
+    `${summary.evidenceRefCount} evidence ref(s), review ${reviewFingerprint}`;
+}
+
 export function faceAuditReviewPlanPath(): string {
   return '/api/face-audit-review-template/review-plan';
+}
+
+export function faceAuditReviewPlanFileName(): string {
+  return faceAuditReviewPlanArtifactFileName();
+}
+
+export function faceAuditReviewPlanDownloadLabel(plan: FaceAuditReviewPlanView): string {
+  const reviewFingerprint = plan.reviewFingerprint ?? 'unknown review';
+  return `Face-audit review plan downloaded: ${plan.pendingAreaCount} unfinished area(s), ` +
+    `${plan.pendingItemCount} pending item(s), ${plan.readyAreaCount} ready area(s), review ${reviewFingerprint}`;
 }
 
 export function faceAuditReviewSheetPath(): string {

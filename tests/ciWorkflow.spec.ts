@@ -11,7 +11,7 @@ describe('CI workflow', () => {
     expect(workflow).toContain('push:');
     expect(workflow).toContain('node-version: 22');
     expect(workflow).toContain('run: npm ci');
-    expect(workflow).toContain('name: Build, test, release gate, and artifact self-check');
+    expect(workflow).toContain('name: Build, test, release gate, and audit self-checks');
     expect(workflow).toContain('run: npm run verify');
     expect(workflow).toContain(`run: npm run face-audit:ci-artifacts -- ${faceAuditArtifactDirectory}`);
     expect(workflow).toContain(`run: npm run face-audit:verify-ci-artifacts -- ${faceAuditArtifactDirectory}`);

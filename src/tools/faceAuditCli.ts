@@ -6,6 +6,7 @@ import process from 'node:process';
 import {fileURLToPath} from 'node:url';
 import {
   applyFaceAuditReviewSheet,
+  FACE_AUDIT_AREAS,
   FACE_AUDIT_EVIDENCE_SOURCE_TYPES,
   buildFaceAuditAreaReviewTemplate,
   buildFaceAuditAreaMatchReviewArtifact,
@@ -27,10 +28,13 @@ import {
   buildFaceAuditReviewTodoSummary,
   buildFaceAuditReviewTemplate,
   buildFaceAuditSourceIdsByAreaTemplate,
+  faceAuditEvidenceSourceTemplateArtifactFileName,
+  faceAuditEvidenceRefTemplateArtifactFileName,
   faceAuditAreaReviewerInstructionsArtifactFileName,
   faceAuditAreaReviewArtifactFileName,
   faceAuditAreaReviewSheetArtifactFileName,
   faceAuditAreaReviewTodoSummaryArtifactFileName,
+  faceAuditSourceIdsByAreaArtifactFileName,
   mergeFaceAuditReviewArtifacts,
   parseFaceAuditArea,
   parseFaceAuditEvidenceRefMode,
@@ -42,6 +46,8 @@ import {
   validateFaceAuditReviewerHandoffArtifact,
   validateFaceAuditReadyArtifact,
   validateFaceAuditStaticLockGate,
+  type FaceAuditArea,
+  type FaceAuditEvidenceSource,
   type FaceAuditEvidenceSourceType,
   type FaceAuditReviewerHandoffReport,
   type FaceAuditReviewerInstructionAreaFile,
@@ -77,6 +83,9 @@ const helpText = [
   '  faceAuditCli ci-artifacts <output-dir> [review-artifact.json]...',
   '  faceAuditCli verify-ci-artifacts <output-dir>',
   '  faceAuditCli ci-artifacts-self-check [review-artifact.json]...',
+  '  faceAuditCli review-kit <output-dir> <source-type> <evidence-file>...',
+  '  faceAuditCli verify-review-kit <output-dir>',
+  '  faceAuditCli review-kit-self-check',
   '  faceAuditCli handoff [review-artifact.json]...',
   '  faceAuditCli verify-handoff <handoff-artifact.json>',
   '  faceAuditCli handoff-response <handoff-artifact.json> [area-review-artifact.json]...',
@@ -112,6 +121,9 @@ const helpText = [
   '  ci-artifacts  Write CI-friendly status, merged review, review sheets, reviewer handoff, reviewer instructions, and area review artifacts/instructions.',
   '  verify-ci-artifacts  Verify a CI artifact directory has complete, internally consistent face-audit files.',
   '  ci-artifacts-self-check  Generate CI artifacts in a temporary directory, verify them, and clean them up.',
+  '  review-kit  Hash official-component files and write a ready-to-fill review kit with sources, refs, sheets, and instructions.',
+  '  verify-review-kit  Verify a generated face-audit review kit before human review starts.',
+  '  review-kit-self-check  Generate a temporary review kit, verify it, and clean it up.',
   '  handoff    Print todo plus current per-area review artifacts for unfinished face-audit areas.',
   '  verify-handoff  Verify a reviewer handoff artifact against the current checklist.',
   '  handoff-response  Summarize area artifacts returned for a reviewer handoff.',
@@ -165,8 +177,14 @@ type FaceAuditCiArtifactFileSummary = {
 };
 
 const FACE_AUDIT_CI_MANIFEST_FILE_NAME = 'face-audit-ci-manifest.json';
+const FACE_AUDIT_REVIEW_KIT_MANIFEST_FILE_NAME = 'face-audit-review-kit-manifest.json';
 const FACE_AUDIT_REVIEW_FILE_NAME = 'face-audit-review.json';
 const FACE_AUDIT_REVIEW_SHEET_FILE_NAME = 'face-audit-review-sheet.tsv';
+const FACE_AUDIT_CI_PLACEHOLDER_SOURCE_ID = 'placeholder-source-id';
+const FACE_AUDIT_REVIEW_KIT_SOURCE_HASH = /^sha256:[0-9a-f]{64}$/;
+const FACE_AUDIT_REVIEW_KIT_SELF_CHECK_EVIDENCE_FILE = 'official-component-self-check-evidence.txt';
+const FACE_AUDIT_REVIEW_KIT_SELF_CHECK_EVIDENCE_TEXT =
+  'Brass: Birmingham official-component review kit self-check fixture\n';
 const FACE_AUDIT_REVIEW_SHEET_HEADER =
   'area\titemId\titemKey\tlabel\texpectedFields\treviewStatus\tnextStep\treviewer\treviewedAt\tevidenceRef\tnotes';
 
@@ -266,6 +284,8 @@ function buildFaceAuditCiArtifactsManifest(options: {
       areaTodoSummaryArtifactCount: options.handoff.areas.length,
       areaReviewSheetArtifactCount: options.handoff.areas.length,
       areaReviewerInstructionsArtifactCount: options.handoff.areas.length,
+      sourceIdsByAreaTemplateArtifactCount: 1,
+      areaEvidenceRefTemplateArtifactCount: options.handoff.areas.length * 2,
       unfinishedAreas: options.plan.areas.map((area) => ({
         area: area.area,
         remainingItemCount: area.remainingItemCount,
@@ -292,6 +312,7 @@ async function writeFaceAuditCiArtifacts(
   const handoff = buildFaceAuditReviewerHandoff(artifacts);
   const reviewSheet = buildFaceAuditReviewSheet(artifacts);
   await io.makeDirectory(outputDirectory);
+  const sourceIdsByAreaFileName = faceAuditSourceIdsByAreaArtifactFileName();
   const files: FaceAuditCiArtifactFileSummary[] = [
     {
       ...(await writeFaceAuditCliArtifact(outputDirectory, 'face-audit-review-status.json', status, io)),
@@ -329,6 +350,13 @@ async function writeFaceAuditCiArtifacts(
       )),
       ok: reviewSheet.ok,
     },
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      sourceIdsByAreaFileName,
+      buildFaceAuditCiSourceIdsByAreaTemplate(),
+      io,
+      'face_audit_source_ids_by_area_template',
+    ),
   ];
 
   const areaFiles: FaceAuditReviewerInstructionAreaFile[] = [];
@@ -349,6 +377,18 @@ async function writeFaceAuditCiArtifacts(
       outputDirectory,
       areaTodoSummaryFileName,
       buildFaceAuditCiAreaTodoSummaryFromHandoff(handoff, area.area),
+      io,
+    ));
+    files.push(await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditEvidenceRefTemplateArtifactFileName(area.area, 'area'),
+      buildFaceAuditEvidenceRefTemplate(FACE_AUDIT_CI_PLACEHOLDER_SOURCE_ID, area.area, 'area'),
+      io,
+    ));
+    files.push(await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditEvidenceRefTemplateArtifactFileName(area.area, 'items'),
+      buildFaceAuditEvidenceRefTemplate(FACE_AUDIT_CI_PLACEHOLDER_SOURCE_ID, area.area, 'items'),
       io,
     ));
     const areaReviewSheet = buildFaceAuditAreaReviewSheet([area.reviewArtifact], area.area);
@@ -543,6 +583,13 @@ function buildFaceAuditCiAreaTodoSummaryFromHandoff(
   };
 }
 
+function buildFaceAuditCiSourceIdsByAreaTemplate() {
+  return Object.fromEntries(FACE_AUDIT_AREAS.map((area) => [
+    area,
+    FACE_AUDIT_CI_PLACEHOLDER_SOURCE_ID,
+  ]));
+}
+
 function buildFaceAuditCiAreaReviewerInstructionsFromHandoff(
   handoff: FaceAuditReviewerHandoffReport,
   area: string,
@@ -620,6 +667,34 @@ async function readCiArtifactJson(
     const detail = error instanceof Error ? error.message : String(error);
     issues.push(issue(fileName, `Could not parse CI artifact file ${fileName} as JSON: ${detail}`));
     return {path: filePath, artifactType: expectedArtifactType, ok: false, contentHash};
+  }
+}
+
+async function readCiPlainJsonArtifact(
+  outputDirectory: string,
+  fileName: string,
+  artifactType: string,
+  io: FaceAuditCliIO,
+  issues: FaceAuditCiArtifactVerificationIssue[],
+): Promise<{path: string; artifactType: string; ok: boolean; contentHash?: string; artifact?: unknown}> {
+  const filePath = path.join(outputDirectory, fileName);
+  const text = await readCiArtifactText(outputDirectory, fileName, io, issues);
+  if (text === undefined) {
+    return {path: filePath, artifactType, ok: false};
+  }
+  const contentHash = sha256TextContentHash(text);
+  try {
+    return {
+      path: filePath,
+      artifactType,
+      ok: true,
+      contentHash,
+      artifact: JSON.parse(text) as unknown,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    issues.push(issue(fileName, `Could not parse CI artifact file ${fileName} as JSON: ${detail}`));
+    return {path: filePath, artifactType, ok: false, contentHash};
   }
 }
 
@@ -768,6 +843,31 @@ async function verifyFaceAuditCiArtifacts(
   };
   contentFiles.push(reviewSheetFileSummary);
   files.push(reviewSheetFileSummary);
+
+  const sourceIdsByAreaFileName = faceAuditSourceIdsByAreaArtifactFileName();
+  const sourceIdsByAreaFile = await readCiPlainJsonArtifact(
+    outputDirectory,
+    sourceIdsByAreaFileName,
+    'face_audit_source_ids_by_area_template',
+    io,
+    issues,
+  );
+  const expectedSourceIdsByArea = buildFaceAuditCiSourceIdsByAreaTemplate();
+  const sourceIdsByAreaOk = sourceIdsByAreaFile.artifact !== undefined &&
+    canonicalJson(sourceIdsByAreaFile.artifact) === canonicalJson(expectedSourceIdsByArea);
+  if (sourceIdsByAreaFile.artifact !== undefined && !sourceIdsByAreaOk) {
+    issues.push(issue(
+      sourceIdsByAreaFileName,
+      `CI source ids by area template file ${sourceIdsByAreaFileName} must map every face-audit area to ${FACE_AUDIT_CI_PLACEHOLDER_SOURCE_ID}`,
+    ));
+  }
+  const sourceIdsByAreaFileSummary = {
+    ...ciArtifactFileSummary(sourceIdsByAreaFile),
+    ok: sourceIdsByAreaOk,
+  };
+  contentFiles.push(sourceIdsByAreaFileSummary);
+  files.push(sourceIdsByAreaFileSummary);
+
   if (
     handoff &&
     statusFile.artifact !== undefined &&
@@ -855,6 +955,34 @@ async function verifyFaceAuditCiArtifacts(
           areaTodoSummaryFileName,
           `CI area todo summary artifact file ${areaTodoSummaryFileName} does not match the reviewer handoff embedded todo area`,
         ));
+      }
+
+      for (const mode of ['area', 'items'] as const) {
+        const evidenceRefFileName = faceAuditEvidenceRefTemplateArtifactFileName(area.area, mode);
+        const evidenceRefFile = await readCiArtifactJson(
+          outputDirectory,
+          evidenceRefFileName,
+          'face_audit_evidence_ref_template',
+          io,
+          issues,
+        );
+        const expectedEvidenceRefTemplate =
+          buildFaceAuditEvidenceRefTemplate(FACE_AUDIT_CI_PLACEHOLDER_SOURCE_ID, area.area, mode);
+        const evidenceRefOk = evidenceRefFile.ok &&
+          evidenceRefFile.artifact !== undefined &&
+          canonicalJson(evidenceRefFile.artifact) === canonicalJson(expectedEvidenceRefTemplate);
+        if (evidenceRefFile.artifact !== undefined && !evidenceRefOk) {
+          issues.push(issue(
+            evidenceRefFileName,
+            `CI evidence ref template file ${evidenceRefFileName} does not match the unfinished area and placeholder source id`,
+          ));
+        }
+        const evidenceRefFileSummary = {
+          ...ciArtifactFileSummary(evidenceRefFile),
+          ok: evidenceRefOk,
+        };
+        contentFiles.push(evidenceRefFileSummary);
+        files.push(evidenceRefFileSummary);
       }
 
       const areaReviewSheetFileName = faceAuditAreaReviewSheetArtifactFileName(area.area);
@@ -1085,6 +1213,968 @@ function sourceIdFromPath(filePath: string, usedIds: Set<string>): string {
   }
   usedIds.add(candidate);
   return candidate;
+}
+
+type FaceAuditEvidenceSourceTemplateArtifact = {
+  artifactType: 'face_audit_evidence_source_template';
+  version: 1;
+  sourceType: FaceAuditEvidenceSourceType;
+  sourceCount: number;
+  evidenceSources: FaceAuditEvidenceSource[];
+};
+
+async function buildFaceAuditEvidenceSourceTemplateForPaths(
+  sourceType: FaceAuditEvidenceSourceType,
+  sourcePaths: readonly string[],
+  io: FaceAuditCliIO,
+): Promise<FaceAuditEvidenceSourceTemplateArtifact> {
+  const usedIds = new Set<string>();
+  const evidenceSources: FaceAuditEvidenceSource[] = [];
+  for (const sourcePath of sourcePaths) {
+    try {
+      evidenceSources.push({
+        id: sourceIdFromPath(sourcePath, usedIds),
+        label: path.basename(sourcePath),
+        sourceType,
+        citation: `Official Brass: Birmingham component evidence: ${sourcePath}`,
+        locator: sourcePath,
+        contentHash: sha256ContentHash(await readEvidenceSourceBytes(sourcePath, io)),
+        notes: '',
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Could not read evidence source file: ${detail}`);
+    }
+  }
+
+  return {
+    artifactType: 'face_audit_evidence_source_template',
+    version: 1,
+    sourceType,
+    sourceCount: evidenceSources.length,
+    evidenceSources,
+  };
+}
+
+function faceAuditReviewTemplateWithEvidenceSources(
+  evidenceSources: readonly FaceAuditEvidenceSource[],
+) {
+  const template = buildFaceAuditReviewTemplate();
+  return {
+    ...template,
+    evidenceSources: evidenceSources.map((source) => ({...source})),
+  };
+}
+
+function faceAuditAreaReviewTemplateWithEvidenceSources(
+  area: FaceAuditArea,
+  evidenceSources: readonly FaceAuditEvidenceSource[],
+) {
+  const template = buildFaceAuditAreaReviewTemplate(area);
+  return {
+    ...template,
+    evidenceSources: evidenceSources.map((source) => ({...source})),
+  };
+}
+
+function buildFaceAuditReviewKitManifest(options: {
+  outputDirectory: string;
+  sourceType: FaceAuditEvidenceSourceType | undefined;
+  sourceCount: number;
+  defaultSourceId: string | undefined;
+  checklistFingerprint: string | undefined;
+  checklistItemCount: number;
+  areaCount: number;
+  files: FaceAuditCiArtifactFileSummary[];
+  issues?: FaceAuditCiArtifactVerificationIssue[];
+}) {
+  const issues = options.issues ?? [];
+  return {
+    artifactType: 'face_audit_review_kit_manifest',
+    version: 1,
+    ok: options.files.every((file) => file.ok) && issues.length === 0,
+    outputDirectory: options.outputDirectory,
+    ...(options.sourceType === undefined ? {} : {sourceType: options.sourceType}),
+    sourceCount: options.sourceCount,
+    ...(options.defaultSourceId === undefined ? {} : {defaultSourceId: options.defaultSourceId}),
+    ...(options.checklistFingerprint === undefined ? {} : {checklistFingerprint: options.checklistFingerprint}),
+    checklistItemCount: options.checklistItemCount,
+    areaCount: options.areaCount,
+    fileCount: options.files.length,
+    files: options.files,
+    issueCount: issues.length,
+    issues,
+  };
+}
+
+async function writeFaceAuditReviewKit(
+  outputDirectory: string,
+  sourceType: FaceAuditEvidenceSourceType,
+  sourcePaths: readonly string[],
+  io: FaceAuditCliIO,
+) {
+  if (!io.makeDirectory || !io.writeTextFile) {
+    throw new Error('Writable file output is not available');
+  }
+
+  const sourceArtifact = await buildFaceAuditEvidenceSourceTemplateForPaths(sourceType, sourcePaths, io);
+  const defaultSourceId = sourceArtifact.evidenceSources[0]!.id;
+  const sourceIdsByAreaTemplate = buildFaceAuditSourceIdsByAreaTemplate(sourceArtifact, defaultSourceId);
+  if (!sourceIdsByAreaTemplate.ok || sourceIdsByAreaTemplate.sourceIdsByArea === undefined) {
+    const firstIssue = sourceIdsByAreaTemplate.issues[0];
+    throw new Error(firstIssue?.message ?? 'Could not build source ids by area template');
+  }
+
+  await io.makeDirectory(outputDirectory);
+  const fullReview = faceAuditReviewTemplateWithEvidenceSources(sourceArtifact.evidenceSources);
+  const kitArtifacts = [fullReview];
+  const status = summarizeFaceAuditReviewStatus(kitArtifacts);
+  const todo = buildFaceAuditReviewTodo(kitArtifacts);
+  const plan = buildFaceAuditReviewPlan(kitArtifacts);
+  const handoff = buildFaceAuditReviewerHandoff(kitArtifacts);
+  const reviewSheet = buildFaceAuditReviewSheet([fullReview]);
+  const areaFiles = FACE_AUDIT_AREAS.map((area) => ({
+    area,
+    fileName: faceAuditAreaReviewArtifactFileName(area),
+    todoSummaryFileName: faceAuditAreaReviewTodoSummaryArtifactFileName(area),
+    reviewSheetFileName: faceAuditAreaReviewSheetArtifactFileName(area),
+    reviewerInstructionsFileName: faceAuditAreaReviewerInstructionsArtifactFileName(area),
+  }));
+  const files: FaceAuditCiArtifactFileSummary[] = [
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditEvidenceSourceTemplateArtifactFileName(),
+      sourceArtifact,
+      io,
+    ),
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditSourceIdsByAreaArtifactFileName(),
+      sourceIdsByAreaTemplate.sourceIdsByArea,
+      io,
+      'face_audit_source_ids_by_area_template',
+    ),
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      'face-audit-review-status.json',
+      status,
+      io,
+    ),
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      FACE_AUDIT_REVIEW_FILE_NAME,
+      fullReview,
+      io,
+      'face_audit_review',
+    ),
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      'face-audit-review-todo.json',
+      todo,
+      io,
+    ),
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      'face-audit-review-plan.json',
+      plan,
+      io,
+    ),
+    await writeFaceAuditCliArtifact(
+      outputDirectory,
+      'face-audit-reviewer-handoff.json',
+      handoff,
+      io,
+    ),
+    {
+      ...(await writeFaceAuditCliTextArtifact(
+        outputDirectory,
+        FACE_AUDIT_REVIEW_SHEET_FILE_NAME,
+        reviewSheet.tsv,
+        'face_audit_review_sheet_tsv',
+        io,
+      )),
+      ok: reviewSheet.ok,
+    },
+  ];
+
+  for (const area of FACE_AUDIT_AREAS) {
+    const areaReview = faceAuditAreaReviewTemplateWithEvidenceSources(area, sourceArtifact.evidenceSources);
+    const areaReviewSheet = buildFaceAuditAreaReviewSheet([areaReview], area);
+    files.push(await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditAreaReviewArtifactFileName(area),
+      areaReview,
+      io,
+    ));
+    files.push(await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditAreaReviewTodoSummaryArtifactFileName(area),
+      buildFaceAuditCiAreaTodoSummaryFromHandoff(handoff, area),
+      io,
+    ));
+    files.push({
+      ...(await writeFaceAuditCliTextArtifact(
+        outputDirectory,
+        faceAuditAreaReviewSheetArtifactFileName(area),
+        areaReviewSheet.tsv,
+        'face_audit_area_review_sheet_tsv',
+        io,
+      )),
+      ok: areaReviewSheet.ok,
+    });
+    files.push(await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditEvidenceRefTemplateArtifactFileName(area, 'area'),
+      buildFaceAuditEvidenceRefTemplate(defaultSourceId, area, 'area'),
+      io,
+    ));
+    files.push(await writeFaceAuditCliArtifact(
+      outputDirectory,
+      faceAuditEvidenceRefTemplateArtifactFileName(area, 'items'),
+      buildFaceAuditEvidenceRefTemplate(defaultSourceId, area, 'items'),
+      io,
+    ));
+    files.push(await writeFaceAuditCliTextArtifact(
+      outputDirectory,
+      faceAuditAreaReviewerInstructionsArtifactFileName(area),
+      buildFaceAuditCiAreaReviewerInstructionsFromHandoff(handoff, area),
+      'face_audit_area_reviewer_instructions',
+      io,
+    ));
+  }
+
+  files.push(await writeFaceAuditCliTextArtifact(
+    outputDirectory,
+    'face-audit-reviewer-instructions.md',
+    buildFaceAuditReviewerInstructions({status, todo, plan, handoff, areaFiles}),
+    'face_audit_reviewer_instructions',
+    io,
+  ));
+
+  const manifest = buildFaceAuditReviewKitManifest({
+    outputDirectory,
+    sourceType,
+    sourceCount: sourceArtifact.sourceCount,
+    defaultSourceId,
+    checklistFingerprint: fullReview.checklistFingerprint,
+    checklistItemCount: fullReview.checklistItemCount,
+    areaCount: FACE_AUDIT_AREAS.length,
+    files,
+  });
+  await writeFaceAuditCliArtifact(
+    outputDirectory,
+    FACE_AUDIT_REVIEW_KIT_MANIFEST_FILE_NAME,
+    manifest,
+    io,
+    'face_audit_review_kit_manifest',
+  );
+  return manifest;
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function faceAuditReviewKitEvidenceSources(
+  artifact: unknown,
+  fileName: string,
+  issues: FaceAuditCiArtifactVerificationIssue[],
+): FaceAuditEvidenceSource[] | undefined {
+  if (!isRecord(artifact)) {
+    issues.push(issue(fileName, `Review kit evidence source file ${fileName} must be a JSON object`));
+    return undefined;
+  }
+  const sourceType = parseEvidenceSourceType(artifact.sourceType);
+  const sourceCount = nonNegativeInteger(artifact.sourceCount);
+  const sources = Array.isArray(artifact.evidenceSources) ? artifact.evidenceSources : undefined;
+  const localIssueCount = issues.length;
+  if (sourceType === undefined) {
+    issues.push(issue(fileName, `Review kit evidence source file ${fileName} must declare a known sourceType`));
+  }
+  if (sourceCount === undefined) {
+    issues.push(issue(fileName, `Review kit evidence source file ${fileName} must declare a non-negative sourceCount`));
+  }
+  if (sources === undefined) {
+    issues.push(issue(fileName, `Review kit evidence source file ${fileName} must include an evidenceSources array`));
+  } else if (sourceCount !== undefined && sources.length !== sourceCount) {
+    issues.push(issue(fileName, `Review kit evidence source file ${fileName} sourceCount must match evidenceSources length`));
+  }
+
+  const sourceIds = new Set<string>();
+  const normalizedSources: FaceAuditEvidenceSource[] = [];
+  for (const [index, source] of (sources ?? []).entries()) {
+    if (!isRecord(source)) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}]`, 'Review kit evidence source must be a JSON object'));
+      continue;
+    }
+    const id = nonEmptyString(source.id);
+    const label = nonEmptyString(source.label);
+    const itemSourceType = parseEvidenceSourceType(source.sourceType);
+    const citation = nonEmptyString(source.citation);
+    const locator = nonEmptyString(source.locator);
+    const contentHash = nonEmptyString(source.contentHash);
+    const notes = typeof source.notes === 'string' ? source.notes.trim() : undefined;
+    if (id === undefined || !validEvidenceRefSourceId(id)) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].id`, 'Review kit evidence source id must match the evidenceRef source id format'));
+    } else if (sourceIds.has(id)) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].id`, `Review kit evidence source id appears more than once: ${id}`));
+    }
+    if (label === undefined) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].label`, 'Review kit evidence source label must be non-empty'));
+    }
+    if (sourceType !== undefined && itemSourceType !== sourceType) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].sourceType`, 'Review kit evidence source type must match the top-level sourceType'));
+    }
+    if (citation === undefined) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].citation`, 'Review kit evidence source citation must be non-empty'));
+    }
+    if (locator === undefined) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].locator`, 'Review kit evidence source locator must be non-empty'));
+    }
+    if (contentHash === undefined || !FACE_AUDIT_REVIEW_KIT_SOURCE_HASH.test(contentHash)) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].contentHash`, 'Review kit evidence source contentHash must be sha256:<64 hex>'));
+    }
+    if (notes === undefined) {
+      issues.push(issue(`${fileName}:evidenceSources[${index}].notes`, 'Review kit evidence source notes must be a string'));
+    }
+    if (
+      id !== undefined &&
+      validEvidenceRefSourceId(id) &&
+      label !== undefined &&
+      itemSourceType !== undefined &&
+      citation !== undefined &&
+      locator !== undefined &&
+      contentHash !== undefined &&
+      FACE_AUDIT_REVIEW_KIT_SOURCE_HASH.test(contentHash) &&
+      notes !== undefined
+    ) {
+      sourceIds.add(id);
+      normalizedSources.push({
+        id,
+        label,
+        sourceType: itemSourceType,
+        citation,
+        locator,
+        contentHash,
+        notes,
+      });
+    }
+  }
+
+  return issues.length === localIssueCount ? normalizedSources : undefined;
+}
+
+function faceAuditReviewKitSourceIdsByArea(
+  artifact: unknown,
+  sourceIds: ReadonlySet<string>,
+  fileName: string,
+  issues: FaceAuditCiArtifactVerificationIssue[],
+): Record<FaceAuditArea, string> | undefined {
+  if (!isRecord(artifact)) {
+    issues.push(issue(fileName, `Review kit source ids by area file ${fileName} must be a JSON object`));
+    return undefined;
+  }
+  const localIssueCount = issues.length;
+  const sourceIdsByArea = {} as Record<FaceAuditArea, string>;
+  for (const area of FACE_AUDIT_AREAS) {
+    const sourceId = nonEmptyString(artifact[area]);
+    if (sourceId === undefined || !validEvidenceRefSourceId(sourceId)) {
+      issues.push(issue(`${fileName}.${area}`, `Review kit source id for ${area} must match the evidenceRef source id format`));
+      continue;
+    }
+    if (!sourceIds.has(sourceId)) {
+      issues.push(issue(`${fileName}.${area}`, `Review kit source id for ${area} is not declared in evidence-sources.json: ${sourceId}`));
+      continue;
+    }
+    sourceIdsByArea[area] = sourceId;
+  }
+  for (const area of Object.keys(artifact)) {
+    if (!FACE_AUDIT_AREAS.includes(area as FaceAuditArea)) {
+      issues.push(issue(`${fileName}.${area}`, `Review kit source ids by area includes unknown area: ${area}`));
+    }
+  }
+  return issues.length === localIssueCount ? sourceIdsByArea : undefined;
+}
+
+function validateFaceAuditReviewKitManifestArtifact(
+  artifact: unknown,
+  outputDirectory: string,
+  fileName: string,
+  issues: FaceAuditCiArtifactVerificationIssue[],
+): boolean {
+  if (!isRecord(artifact)) {
+    issues.push(issue(fileName, `Review kit manifest file ${fileName} must be a JSON object`));
+    return false;
+  }
+
+  const localIssueCount = issues.length;
+  if (artifact.version !== 1) {
+    issues.push(issue(`${fileName}.version`, 'Review kit manifest version must be 1'));
+  }
+  if (typeof artifact.ok !== 'boolean') {
+    issues.push(issue(`${fileName}.ok`, 'Review kit manifest ok must be a boolean'));
+  }
+  if (artifact.outputDirectory !== outputDirectory) {
+    issues.push(issue(
+      `${fileName}.outputDirectory`,
+      `Review kit manifest outputDirectory must match the verified directory: ${outputDirectory}`,
+    ));
+  }
+  if ('sourceType' in artifact && parseEvidenceSourceType(artifact.sourceType) === undefined) {
+    issues.push(issue(`${fileName}.sourceType`, 'Review kit manifest sourceType must be a known source type'));
+  }
+  if (nonNegativeInteger(artifact.sourceCount) === undefined) {
+    issues.push(issue(`${fileName}.sourceCount`, 'Review kit manifest sourceCount must be a non-negative integer'));
+  }
+  const defaultSourceId = artifact.defaultSourceId;
+  if (
+    defaultSourceId !== undefined &&
+    (typeof defaultSourceId !== 'string' || !validEvidenceRefSourceId(defaultSourceId))
+  ) {
+    issues.push(issue(
+      `${fileName}.defaultSourceId`,
+      'Review kit manifest defaultSourceId must match the evidenceRef source id format',
+    ));
+  }
+  const checklistFingerprint = artifact.checklistFingerprint;
+  if (
+    checklistFingerprint !== undefined &&
+    (typeof checklistFingerprint !== 'string' || !/^fnv1a32:[0-9a-f]{8}$/.test(checklistFingerprint))
+  ) {
+    issues.push(issue(
+      `${fileName}.checklistFingerprint`,
+      'Review kit manifest checklistFingerprint must be a normalized fnv1a32 fingerprint',
+    ));
+  }
+  if (nonNegativeInteger(artifact.checklistItemCount) === undefined) {
+    issues.push(issue(
+      `${fileName}.checklistItemCount`,
+      'Review kit manifest checklistItemCount must be a non-negative integer',
+    ));
+  }
+  const areaCount = nonNegativeInteger(artifact.areaCount);
+  if (areaCount === undefined) {
+    issues.push(issue(`${fileName}.areaCount`, 'Review kit manifest areaCount must be a non-negative integer'));
+  } else if (areaCount !== FACE_AUDIT_AREAS.length) {
+    issues.push(issue(
+      `${fileName}.areaCount`,
+      `Review kit manifest areaCount must match the current face-audit area count: ${FACE_AUDIT_AREAS.length}`,
+    ));
+  }
+  const fileCount = nonNegativeInteger(artifact.fileCount);
+  if (fileCount === undefined) {
+    issues.push(issue(`${fileName}.fileCount`, 'Review kit manifest fileCount must be a non-negative integer'));
+  }
+  const files = Array.isArray(artifact.files) ? artifact.files : undefined;
+  if (files === undefined) {
+    issues.push(issue(`${fileName}.files`, 'Review kit manifest files must be an array'));
+  } else {
+    if (fileCount !== undefined && files.length !== fileCount) {
+      issues.push(issue(`${fileName}.fileCount`, 'Review kit manifest fileCount must match files length'));
+    }
+    for (const [index, file] of files.entries()) {
+      if (!isRecord(file)) {
+        issues.push(issue(`${fileName}.files[${index}]`, 'Review kit manifest file summary must be a JSON object'));
+        continue;
+      }
+      if (nonEmptyString(file.path) === undefined) {
+        issues.push(issue(`${fileName}.files[${index}].path`, 'Review kit manifest file path must be non-empty'));
+      }
+      if (nonEmptyString(file.artifactType) === undefined) {
+        issues.push(issue(
+          `${fileName}.files[${index}].artifactType`,
+          'Review kit manifest file artifactType must be non-empty',
+        ));
+      }
+      if (typeof file.ok !== 'boolean') {
+        issues.push(issue(`${fileName}.files[${index}].ok`, 'Review kit manifest file ok must be a boolean'));
+      }
+      const contentHash = file.contentHash;
+      if (
+        contentHash !== undefined &&
+        (typeof contentHash !== 'string' || !FACE_AUDIT_REVIEW_KIT_SOURCE_HASH.test(contentHash))
+      ) {
+        issues.push(issue(
+          `${fileName}.files[${index}].contentHash`,
+          'Review kit manifest file contentHash must be sha256:<64 hex>',
+        ));
+      }
+    }
+  }
+  const issueCount = nonNegativeInteger(artifact.issueCount);
+  if (issueCount === undefined) {
+    issues.push(issue(`${fileName}.issueCount`, 'Review kit manifest issueCount must be a non-negative integer'));
+  }
+  const manifestIssues = Array.isArray(artifact.issues) ? artifact.issues : undefined;
+  if (manifestIssues === undefined) {
+    issues.push(issue(`${fileName}.issues`, 'Review kit manifest issues must be an array'));
+  } else if (issueCount !== undefined && manifestIssues.length !== issueCount) {
+    issues.push(issue(`${fileName}.issueCount`, 'Review kit manifest issueCount must match issues length'));
+  }
+
+  return issues.length === localIssueCount;
+}
+
+async function verifyFaceAuditReviewKit(
+  outputDirectory: string,
+  io: FaceAuditCliIO,
+) {
+  const issues: FaceAuditCiArtifactVerificationIssue[] = [];
+  const files: FaceAuditCiArtifactFileSummary[] = [];
+  const manifestFile = await readCiArtifactJson(
+    outputDirectory,
+    FACE_AUDIT_REVIEW_KIT_MANIFEST_FILE_NAME,
+    'face_audit_review_kit_manifest',
+    io,
+    issues,
+  );
+  const manifestStructureOk = manifestFile.artifact !== undefined &&
+    validateFaceAuditReviewKitManifestArtifact(
+      manifestFile.artifact,
+      outputDirectory,
+      FACE_AUDIT_REVIEW_KIT_MANIFEST_FILE_NAME,
+      issues,
+    );
+  const evidenceSourcesFileName = faceAuditEvidenceSourceTemplateArtifactFileName();
+  const evidenceSourcesFile = await readCiArtifactJson(
+    outputDirectory,
+    evidenceSourcesFileName,
+    'face_audit_evidence_source_template',
+    io,
+    issues,
+  );
+  const evidenceSources = faceAuditReviewKitEvidenceSources(
+    evidenceSourcesFile.artifact,
+    evidenceSourcesFileName,
+    issues,
+  );
+  const evidenceSourcesSummary = {
+    ...ciArtifactFileSummary(evidenceSourcesFile),
+    ok: evidenceSourcesFile.ok && evidenceSources !== undefined,
+  };
+  files.push(evidenceSourcesSummary);
+
+  const sourceIdSet = new Set((evidenceSources ?? []).map((source) => source.id));
+  const sourceIdsByAreaFileName = faceAuditSourceIdsByAreaArtifactFileName();
+  const sourceIdsByAreaFile = await readCiPlainJsonArtifact(
+    outputDirectory,
+    sourceIdsByAreaFileName,
+    'face_audit_source_ids_by_area_template',
+    io,
+    issues,
+  );
+  const sourceIdsByArea = faceAuditReviewKitSourceIdsByArea(
+    sourceIdsByAreaFile.artifact,
+    sourceIdSet,
+    sourceIdsByAreaFileName,
+    issues,
+  );
+  const sourceIdsByAreaSummary = {
+    ...ciArtifactFileSummary(sourceIdsByAreaFile),
+    ok: sourceIdsByAreaFile.ok && sourceIdsByArea !== undefined,
+  };
+  files.push(sourceIdsByAreaSummary);
+
+  const expectedReview = evidenceSources === undefined
+    ? undefined
+    : faceAuditReviewTemplateWithEvidenceSources(evidenceSources);
+  const expectedArtifacts = expectedReview === undefined ? undefined : [expectedReview];
+  const expectedStatus = expectedArtifacts === undefined ? undefined : summarizeFaceAuditReviewStatus(expectedArtifacts);
+  const expectedTodo = expectedArtifacts === undefined ? undefined : buildFaceAuditReviewTodo(expectedArtifacts);
+  const expectedPlan = expectedArtifacts === undefined ? undefined : buildFaceAuditReviewPlan(expectedArtifacts);
+  const expectedHandoff = expectedArtifacts === undefined ? undefined : buildFaceAuditReviewerHandoff(expectedArtifacts);
+
+  const statusFile = await readCiArtifactJson(
+    outputDirectory,
+    'face-audit-review-status.json',
+    'face_audit_review_status',
+    io,
+    issues,
+  );
+  const statusMatchesKit = statusFile.artifact !== undefined &&
+    expectedStatus !== undefined &&
+    canonicalJson(statusFile.artifact) === canonicalJson(expectedStatus);
+  if (statusFile.artifact !== undefined && expectedStatus !== undefined && !statusMatchesKit) {
+    issues.push(issue(
+      'face-audit-review-status.json',
+      'Review kit status artifact face-audit-review-status.json must match the blank review template',
+    ));
+  }
+  files.push({
+    ...ciArtifactFileSummary(statusFile),
+    ok: statusFile.ok && statusMatchesKit,
+  });
+
+  const reviewFile = await readCiReviewArtifact(outputDirectory, FACE_AUDIT_REVIEW_FILE_NAME, io, issues);
+  const reviewMatchesKit = reviewFile.artifact !== undefined &&
+    expectedReview !== undefined &&
+    canonicalJson(reviewFile.artifact) === canonicalJson(expectedReview);
+  if (reviewFile.artifact !== undefined && expectedReview !== undefined && !reviewMatchesKit) {
+    issues.push(issue(
+      FACE_AUDIT_REVIEW_FILE_NAME,
+      `Review kit full review artifact ${FACE_AUDIT_REVIEW_FILE_NAME} must be the blank template with evidence-sources.json copied in`,
+    ));
+  }
+  const reviewFileSummary = {
+    ...ciArtifactFileSummary(reviewFile),
+    ok: reviewFile.ok && reviewMatchesKit,
+  };
+  files.push(reviewFileSummary);
+
+  const todoFile = await readCiArtifactJson(
+    outputDirectory,
+    'face-audit-review-todo.json',
+    'face_audit_review_todo',
+    io,
+    issues,
+  );
+  const todoMatchesKit = todoFile.artifact !== undefined &&
+    expectedTodo !== undefined &&
+    canonicalJson(todoFile.artifact) === canonicalJson(expectedTodo);
+  if (todoFile.artifact !== undefined && expectedTodo !== undefined && !todoMatchesKit) {
+    issues.push(issue(
+      'face-audit-review-todo.json',
+      'Review kit todo artifact face-audit-review-todo.json must match the blank review template',
+    ));
+  }
+  files.push({
+    ...ciArtifactFileSummary(todoFile),
+    ok: todoFile.ok && todoMatchesKit,
+  });
+
+  const planFile = await readCiArtifactJson(
+    outputDirectory,
+    'face-audit-review-plan.json',
+    'face_audit_review_plan',
+    io,
+    issues,
+  );
+  const planMatchesKit = planFile.artifact !== undefined &&
+    expectedPlan !== undefined &&
+    canonicalJson(planFile.artifact) === canonicalJson(expectedPlan);
+  if (planFile.artifact !== undefined && expectedPlan !== undefined && !planMatchesKit) {
+    issues.push(issue(
+      'face-audit-review-plan.json',
+      'Review kit review-plan artifact face-audit-review-plan.json must match the blank review template',
+    ));
+  }
+  files.push({
+    ...ciArtifactFileSummary(planFile),
+    ok: planFile.ok && planMatchesKit,
+  });
+
+  const handoffFile = await readCiArtifactJson(
+    outputDirectory,
+    'face-audit-reviewer-handoff.json',
+    'face_audit_reviewer_handoff',
+    io,
+    issues,
+  );
+  const handoffMatchesKit = handoffFile.artifact !== undefined &&
+    expectedHandoff !== undefined &&
+    canonicalJson(handoffFile.artifact) === canonicalJson(expectedHandoff);
+  if (handoffFile.artifact !== undefined && expectedHandoff !== undefined && !handoffMatchesKit) {
+    issues.push(issue(
+      'face-audit-reviewer-handoff.json',
+      'Review kit reviewer handoff artifact face-audit-reviewer-handoff.json must match the blank review template',
+    ));
+  }
+  files.push({
+    ...ciArtifactFileSummary(handoffFile),
+    ok: handoffFile.ok && handoffMatchesKit,
+  });
+
+  const reviewSheetText = await readCiArtifactText(outputDirectory, FACE_AUDIT_REVIEW_SHEET_FILE_NAME, io, issues);
+  const expectedReviewSheet = expectedReview === undefined ? undefined : buildFaceAuditReviewSheet([expectedReview]);
+  const reviewSheetMatches = reviewSheetText !== undefined &&
+    expectedReviewSheet !== undefined &&
+    reviewSheetText === expectedReviewSheet.tsv;
+  if (reviewSheetText !== undefined && expectedReviewSheet !== undefined && !reviewSheetMatches) {
+    issues.push(issue(
+      FACE_AUDIT_REVIEW_SHEET_FILE_NAME,
+      `Review kit TSV file ${FACE_AUDIT_REVIEW_SHEET_FILE_NAME} must match ${FACE_AUDIT_REVIEW_FILE_NAME}`,
+    ));
+  }
+  const reviewSheetSummary = {
+    path: path.join(outputDirectory, FACE_AUDIT_REVIEW_SHEET_FILE_NAME),
+    artifactType: 'face_audit_review_sheet_tsv',
+    ok: reviewSheetText !== undefined &&
+      validateFaceAuditCiReviewSheetText(reviewSheetText, expectedReviewSheet?.rowCount) &&
+      reviewSheetMatches,
+    ...(reviewSheetText === undefined ? {} : {contentHash: sha256TextContentHash(reviewSheetText)}),
+  };
+  files.push(reviewSheetSummary);
+
+  for (const area of FACE_AUDIT_AREAS) {
+    const areaFileName = faceAuditAreaReviewArtifactFileName(area);
+    const areaFile = await readCiArtifactJson(outputDirectory, areaFileName, 'face_audit_area_review', io, issues);
+    const areaValidation = validateFaceAuditAreaReviewArtifact(areaFile.artifact, area);
+    if (areaFile.artifact !== undefined && !areaValidation.ok) {
+      issues.push(...areaValidation.issues.map((validationIssue) =>
+        issue(`${areaFileName}:${validationIssue.field}`, validationIssue.message),
+      ));
+    }
+    const expectedAreaReview = evidenceSources === undefined
+      ? undefined
+      : faceAuditAreaReviewTemplateWithEvidenceSources(area, evidenceSources);
+    const areaReviewMatchesKit = areaFile.artifact !== undefined &&
+      expectedAreaReview !== undefined &&
+      canonicalJson(areaFile.artifact) === canonicalJson(expectedAreaReview);
+    if (areaFile.artifact !== undefined && expectedAreaReview !== undefined && !areaReviewMatchesKit) {
+      issues.push(issue(
+        areaFileName,
+        `Review kit area artifact ${areaFileName} must be the blank ${area} template with evidence-sources.json copied in`,
+      ));
+    }
+    const areaFileSummary = {
+      ...ciArtifactFileSummary(areaFile),
+      ok: areaFile.ok && areaValidation.ok && areaReviewMatchesKit,
+    };
+    files.push(areaFileSummary);
+
+    const areaTodoSummaryFileName = faceAuditAreaReviewTodoSummaryArtifactFileName(area);
+    const areaTodoSummaryFile = await readCiArtifactJson(
+      outputDirectory,
+      areaTodoSummaryFileName,
+      'face_audit_area_review_todo_summary',
+      io,
+      issues,
+    );
+    const expectedAreaTodoSummary = expectedHandoff === undefined
+      ? undefined
+      : buildFaceAuditCiAreaTodoSummaryFromHandoff(expectedHandoff, area);
+    const areaTodoSummaryMatchesKit = areaTodoSummaryFile.artifact !== undefined &&
+      expectedAreaTodoSummary !== undefined &&
+      canonicalJson(areaTodoSummaryFile.artifact) === canonicalJson(expectedAreaTodoSummary);
+    if (
+      areaTodoSummaryFile.artifact !== undefined &&
+      expectedAreaTodoSummary !== undefined &&
+      !areaTodoSummaryMatchesKit
+    ) {
+      issues.push(issue(
+        areaTodoSummaryFileName,
+        `Review kit area todo summary ${areaTodoSummaryFileName} must match the blank ${area} template`,
+      ));
+    }
+    files.push({
+      ...ciArtifactFileSummary(areaTodoSummaryFile),
+      ok: areaTodoSummaryFile.ok && areaTodoSummaryMatchesKit,
+    });
+
+    const areaReviewSheetFileName = faceAuditAreaReviewSheetArtifactFileName(area);
+    const areaReviewSheetText = await readCiArtifactText(outputDirectory, areaReviewSheetFileName, io, issues);
+    const expectedAreaReviewSheet = expectedAreaReview === undefined
+      ? undefined
+      : buildFaceAuditAreaReviewSheet([expectedAreaReview], area);
+    const areaReviewSheetMatches = areaReviewSheetText !== undefined &&
+      expectedAreaReviewSheet !== undefined &&
+      areaReviewSheetText === expectedAreaReviewSheet.tsv;
+    if (areaReviewSheetText !== undefined && expectedAreaReviewSheet !== undefined && !areaReviewSheetMatches) {
+      issues.push(issue(
+        areaReviewSheetFileName,
+        `Review kit area TSV file ${areaReviewSheetFileName} must match ${areaFileName}`,
+      ));
+    }
+    files.push({
+      path: path.join(outputDirectory, areaReviewSheetFileName),
+      artifactType: 'face_audit_area_review_sheet_tsv',
+      ok: areaReviewSheetText !== undefined &&
+        validateFaceAuditCiReviewSheetText(areaReviewSheetText, expectedAreaReviewSheet?.rowCount) &&
+        areaReviewSheetMatches,
+      ...(areaReviewSheetText === undefined ? {} : {contentHash: sha256TextContentHash(areaReviewSheetText)}),
+    });
+
+    for (const mode of ['area', 'items'] as const) {
+      const evidenceRefFileName = faceAuditEvidenceRefTemplateArtifactFileName(area, mode);
+      const evidenceRefFile = await readCiArtifactJson(
+        outputDirectory,
+        evidenceRefFileName,
+        'face_audit_evidence_ref_template',
+        io,
+        issues,
+      );
+      const sourceId = sourceIdsByArea?.[area];
+      const expectedEvidenceRefTemplate = sourceId === undefined
+        ? undefined
+        : buildFaceAuditEvidenceRefTemplate(sourceId, area, mode);
+      const evidenceRefMatches = evidenceRefFile.artifact !== undefined &&
+        expectedEvidenceRefTemplate !== undefined &&
+        canonicalJson(evidenceRefFile.artifact) === canonicalJson(expectedEvidenceRefTemplate);
+      if (evidenceRefFile.artifact !== undefined && expectedEvidenceRefTemplate !== undefined && !evidenceRefMatches) {
+        issues.push(issue(
+          evidenceRefFileName,
+          `Review kit evidence ref template ${evidenceRefFileName} must match source-ids-by-area.json for ${area}`,
+        ));
+      }
+      files.push({
+        ...ciArtifactFileSummary(evidenceRefFile),
+        ok: evidenceRefFile.ok && evidenceRefMatches,
+      });
+    }
+
+    const areaReviewerInstructionsFileName = faceAuditAreaReviewerInstructionsArtifactFileName(area);
+    const areaReviewerInstructionsText = await readCiArtifactText(
+      outputDirectory,
+      areaReviewerInstructionsFileName,
+      io,
+      issues,
+    );
+    const expectedAreaReviewerInstructions = expectedHandoff === undefined
+      ? undefined
+      : `${buildFaceAuditCiAreaReviewerInstructionsFromHandoff(expectedHandoff, area)}\n`;
+    const areaReviewerInstructionsMatchesKit = areaReviewerInstructionsText !== undefined &&
+      expectedAreaReviewerInstructions !== undefined &&
+      areaReviewerInstructionsText === expectedAreaReviewerInstructions;
+    if (
+      areaReviewerInstructionsText !== undefined &&
+      expectedAreaReviewerInstructions !== undefined &&
+      !areaReviewerInstructionsMatchesKit
+    ) {
+      issues.push(issue(
+        areaReviewerInstructionsFileName,
+        `Review kit area reviewer instructions ${areaReviewerInstructionsFileName} must match the blank ${area} template`,
+      ));
+    }
+    files.push({
+      path: path.join(outputDirectory, areaReviewerInstructionsFileName),
+      artifactType: 'face_audit_area_reviewer_instructions',
+      ok: areaReviewerInstructionsMatchesKit,
+      ...(areaReviewerInstructionsText === undefined
+        ? {}
+        : {contentHash: sha256TextContentHash(areaReviewerInstructionsText)}),
+    });
+  }
+
+  const reviewerInstructionsFileName = 'face-audit-reviewer-instructions.md';
+  const reviewerInstructionsText = await readCiArtifactText(
+    outputDirectory,
+    reviewerInstructionsFileName,
+    io,
+    issues,
+  );
+  const expectedReviewerInstructions = expectedArtifacts === undefined
+    ? undefined
+    : `${buildFaceAuditReviewerInstructionsForArtifacts(expectedArtifacts)}\n`;
+  const reviewerInstructionsMatchesKit = reviewerInstructionsText !== undefined &&
+    expectedReviewerInstructions !== undefined &&
+    reviewerInstructionsText === expectedReviewerInstructions;
+  if (
+    reviewerInstructionsText !== undefined &&
+    expectedReviewerInstructions !== undefined &&
+    !reviewerInstructionsMatchesKit
+  ) {
+    issues.push(issue(
+      reviewerInstructionsFileName,
+      'Review kit reviewer instructions face-audit-reviewer-instructions.md must match the blank review template',
+    ));
+  }
+  files.push({
+    path: path.join(outputDirectory, reviewerInstructionsFileName),
+    artifactType: 'face_audit_reviewer_instructions',
+    ok: reviewerInstructionsMatchesKit,
+    ...(reviewerInstructionsText === undefined ? {} : {contentHash: sha256TextContentHash(reviewerInstructionsText)}),
+  });
+
+  const expectedManifest = buildFaceAuditReviewKitManifest({
+    outputDirectory,
+    sourceType: evidenceSources?.[0]?.sourceType,
+    sourceCount: evidenceSources?.length ?? 0,
+    defaultSourceId: evidenceSources?.[0]?.id,
+    checklistFingerprint: expectedReview?.checklistFingerprint,
+    checklistItemCount: expectedReview?.checklistItemCount ?? 0,
+    areaCount: FACE_AUDIT_AREAS.length,
+    files,
+    issues: [],
+  });
+  const manifestMatchesKit = manifestFile.artifact !== undefined &&
+    canonicalJson(manifestFile.artifact) === canonicalJson(expectedManifest);
+  if (manifestFile.artifact !== undefined && !manifestMatchesKit) {
+    issues.push(issue(
+      FACE_AUDIT_REVIEW_KIT_MANIFEST_FILE_NAME,
+      `Review kit manifest file ${FACE_AUDIT_REVIEW_KIT_MANIFEST_FILE_NAME} does not match the files in the directory`,
+    ));
+  }
+  files.push({
+    ...ciArtifactFileSummary(manifestFile),
+    ok: manifestFile.ok && manifestStructureOk && manifestMatchesKit,
+  });
+
+  return {
+    artifactType: 'face_audit_review_kit_verification',
+    version: 1,
+    ok: issues.length === 0,
+    outputDirectory,
+    sourceCount: evidenceSources?.length ?? 0,
+    checklistFingerprint: expectedReview?.checklistFingerprint,
+    checklistItemCount: expectedReview?.checklistItemCount ?? 0,
+    areaCount: FACE_AUDIT_AREAS.length,
+    fileCount: files.length,
+    files,
+    issueCount: issues.length,
+    issues,
+  };
+}
+
+async function selfCheckFaceAuditReviewKit(io: FaceAuditCliIO) {
+  if (!io.makeDirectory || !io.makeTempDirectory || !io.removeDirectory || !io.writeTextFile) {
+    throw new Error('Temporary writable file output is not available');
+  }
+
+  let temporaryDirectory = '';
+  let outputDirectory = '';
+  let cleanupIssue: FaceAuditCiArtifactVerificationIssue | undefined;
+  let manifest: Awaited<ReturnType<typeof writeFaceAuditReviewKit>> | undefined;
+  let verification: Awaited<ReturnType<typeof verifyFaceAuditReviewKit>> | undefined;
+  try {
+    temporaryDirectory = await io.makeTempDirectory('face-audit-review-kit-');
+    outputDirectory = path.join(temporaryDirectory, 'review-kit');
+    const evidenceFilePath = path.join(temporaryDirectory, FACE_AUDIT_REVIEW_KIT_SELF_CHECK_EVIDENCE_FILE);
+    await io.writeTextFile(evidenceFilePath, FACE_AUDIT_REVIEW_KIT_SELF_CHECK_EVIDENCE_TEXT);
+    manifest = await writeFaceAuditReviewKit(
+      outputDirectory,
+      'official_high_res_component_image',
+      [evidenceFilePath],
+      io,
+    );
+    verification = await verifyFaceAuditReviewKit(outputDirectory, io);
+  } finally {
+    if (temporaryDirectory) {
+      try {
+        await io.removeDirectory(temporaryDirectory);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        cleanupIssue = issue('cleanup', `Could not clean temporary review kit directory: ${detail}`);
+      }
+    }
+  }
+
+  const issues = [
+    ...(verification?.issues ?? []),
+    ...(cleanupIssue === undefined ? [] : [cleanupIssue]),
+  ];
+  return {
+    artifactType: 'face_audit_review_kit_self_check',
+    version: 1,
+    ok: Boolean(manifest?.ok && verification?.ok && cleanupIssue === undefined),
+    temporaryDirectory,
+    outputDirectory,
+    cleanedUp: cleanupIssue === undefined,
+    sourceType: manifest?.sourceType ?? 'official_high_res_component_image',
+    sourceCount: manifest?.sourceCount ?? 0,
+    defaultSourceId: manifest?.defaultSourceId,
+    checklistFingerprint: verification?.checklistFingerprint,
+    checklistItemCount: verification?.checklistItemCount ?? 0,
+    areaCount: verification?.areaCount ?? 0,
+    fileCount: verification?.fileCount ?? 0,
+    issueCount: issues.length,
+    issues,
+  };
 }
 
 function parseTodoCommandArgs(
@@ -1630,32 +2720,70 @@ export async function runFaceAuditCli(
     if (extraArgs.length === 0) {
       return writeError(io, 'The source-template command expects at least one evidence file path.');
     }
-    const usedIds = new Set<string>();
-    const evidenceSources = [];
-    for (const sourcePath of extraArgs) {
-      try {
-        evidenceSources.push({
-          id: sourceIdFromPath(sourcePath, usedIds),
-          label: path.basename(sourcePath),
-          sourceType,
-          citation: `Official Brass: Birmingham component evidence: ${sourcePath}`,
-          locator: sourcePath,
-          contentHash: sha256ContentHash(await readEvidenceSourceBytes(sourcePath, io)),
-          notes: '',
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        return writeError(io, `Could not read evidence source file: ${detail}`);
-      }
+    try {
+      writeJson(io, await buildFaceAuditEvidenceSourceTemplateForPaths(sourceType, extraArgs, io));
+      return 0;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return writeError(io, detail);
     }
-    writeJson(io, {
-      artifactType: 'face_audit_evidence_source_template',
-      version: 1,
-      sourceType,
-      sourceCount: evidenceSources.length,
-      evidenceSources,
-    });
-    return 0;
+  }
+
+  if (command === 'review-kit') {
+    const outputDirectory = filePath;
+    const sourceType = parseEvidenceSourceType(extraArgs[0]);
+    const sourcePaths = extraArgs.slice(1);
+    if (outputDirectory === undefined || extraArgs[0] === undefined || sourcePaths.length === 0) {
+      return writeError(
+        io,
+        'The review-kit command expects output directory, source type, and at least one evidence file path.',
+      );
+    }
+    if (sourceType === undefined) {
+      return writeError(
+        io,
+        'The review-kit command expects source type official_physical_component or official_high_res_component_image.',
+      );
+    }
+    if (!io.makeDirectory || !io.writeTextFile) {
+      return writeError(io, 'The review-kit command requires writable file output.');
+    }
+    try {
+      writeJson(io, await writeFaceAuditReviewKit(outputDirectory, sourceType, sourcePaths, io));
+      return 0;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return writeError(io, detail.startsWith('Could not read evidence source file')
+        ? detail
+        : `Could not write face-audit review kit: ${detail}`);
+    }
+  }
+
+  if (command === 'verify-review-kit') {
+    const outputDirectory = filePath;
+    if (outputDirectory === undefined || extraArgs.length > 0) {
+      return writeError(io, 'The verify-review-kit command expects exactly one output directory.');
+    }
+    const report = await verifyFaceAuditReviewKit(outputDirectory, io);
+    writeJson(io, report);
+    return report.ok ? 0 : 1;
+  }
+
+  if (command === 'review-kit-self-check') {
+    if (filePath !== undefined || extraArgs.length > 0) {
+      return writeError(io, 'The review-kit-self-check command does not accept file arguments.');
+    }
+    if (!io.makeDirectory || !io.makeTempDirectory || !io.removeDirectory || !io.writeTextFile) {
+      return writeError(io, 'The review-kit-self-check command requires temporary writable file output.');
+    }
+    try {
+      const report = await selfCheckFaceAuditReviewKit(io);
+      writeJson(io, report);
+      return report.ok ? 0 : 1;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      return writeError(io, `Could not self-check face-audit review kit: ${detail}`);
+    }
   }
 
   if (command === 'source-ids-by-area-template') {

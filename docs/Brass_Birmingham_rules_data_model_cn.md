@@ -1152,10 +1152,10 @@ area 级 `official-component:<source>#<area>` 引用或逐项
 `official-component:<source>#<area>:<item-id>` 引用；也可从完整或分区
 review artifact 中把所有非 `unreviewed` 条目导回本地 reviewed 进度，减少手工
 编辑每个条目的 JSON；status 结果中的每个 area 也会显示 area 级和逐项证据
-覆盖摘要，并可直接请求 compact todo handoff、单区 todo summary 或逐项 review plan 来查看尚未完成的审计 area；
+覆盖摘要，并可直接请求或下载 compact todo handoff、查看或下载全局或单区 todo summary JSON、或生成/下载逐项 review plan 来查看尚未完成的审计 area；
 也可把 handoff JSON 与审阅人返回的分区 artifact 一起提交，直接汇总返回件
 是否属于该 handoff 以及哪些 area 已 ready 或仍缺失。
-浏览器面板中的 status、todo、单区 todo-summary、review plan、TSV、instructions 和 handoff 操作在
+浏览器面板中的 status、todo、全局/单区 todo-summary、review plan、TSV、instructions 和 handoff 操作在
 merge-artifact 输入为空时使用这些 public baseline GET；粘贴 review JSON 后则切换为
 带提交工件进度的 POST。
 `GET /api/face-audit-review-template/status` 会在不提交审阅工件时输出当前
@@ -1223,7 +1223,16 @@ PDF 或归档文件生成 `face_audit_evidence_source_hashes`，再把输出的
 `npm run face-audit:source-template -- official_high_res_component_image
 ./path/to/official-component-photos.zip ./path/to/board.png` 直接生成包含稳定
 source id、label、sourceType、citation、locator、contentHash 和空 notes 的完整
-`evidenceSources` 模板；选定 source id 后，可用
+`evidenceSources` 模板；如果审阅人已经拿到本地官方证据文件，也可用
+`npm run face-audit:review-kit -- ./face-audit-review-kit official_high_res_component_image ./path/to/official-component-photos.zip ./path/to/board.png`
+一次写出包含 `evidence-sources.json`、`source-ids-by-area.json`、
+`face-audit-review-kit-manifest.json`、完整与单区空白
+review artifact、status/todo/plan/handoff JSON、TSV 审阅表、审阅说明、
+逐区 todo summary 和 area/item evidence-ref 模板的本地审阅包；该命令只注册
+证据来源并保留全部条目为 `unreviewed`，不会把任何条目标记为已核对；人工填写前可用
+`npm run face-audit:verify-review-kit -- ./face-audit-review-kit` 检查该目录内证据来源、source-id 映射、
+manifest、空白 JSON、派生进度文件、TSV、审阅说明和 evidence-ref 模板是否互相一致；`npm run face-audit:review-kit-self-check`
+会生成并校验一个临时样例审阅包，供本地和 CI 门禁覆盖这条生成链路；选定 source id 后，可用
 `npm run face-audit:evidence-ref-template -- photo-set regularCards` 生成 area 级
 `evidenceRef`，或用
 `npm run face-audit:evidence-ref-template -- photo-set regularCards items` 为该
@@ -1250,11 +1259,11 @@ area review artifact，也可在末尾追加 `items` 为每个条目生成逐项
 证据引用。服务端也提供 `POST /api/face-audit-evidence-ref-template`、
 `POST /api/face-audit-source-ids-by-area-template`、
 `POST /api/face-audit-review-template/:area/match` 和
-`POST /api/face-audit-review-template/match`，浏览器 Face Audit 面板可用同一套
-reviewer/source metadata 生成 evidence refs、可保存并可重新载入的
+`POST /api/face-audit-review-template/match`，浏览器 Face Audit 面板可下载完整或单区空白
+review artifact，并可用同一套 reviewer/source metadata 生成或下载 evidence refs、可下载、保存并可重新载入的
 `source-ids-by-area.json`、单区匹配 artifact 或完整匹配
 artifact；浏览器面板也可直接选择官方组件文件，用 Web Crypto 计算 `sha256`
-并生成 source artifact，或粘贴 CLI 生成的 source artifact 后把某条来源同步到
+并生成可下载的 `evidence-sources.json` source artifact，或粘贴 CLI 生成的 source artifact 后把某条来源同步到
 表单字段；生成完整匹配 artifact 时，浏览器面板也可为每个 area 单独选择
 source id 并提交同一 `sourceIdsByArea` 映射；也可把当前审阅进度下载为 TSV
 review sheet，导入编辑后的 TSV 重新生成完整 review JSON，下载 reviewer
@@ -1343,15 +1352,19 @@ handoff JSON 下载；
 `face-audit-area-<area>-review.json` 和
 `face-audit-area-<area>-review-sheet.tsv`、
 `face-audit-area-<area>-todo-summary.json`，以及可单独分发给该 area 审阅人的
+`face-audit-area-<area>-area-evidence-refs.json`、
+`face-audit-area-<area>-items-evidence-refs.json` 和
 `face-audit-area-<area>-reviewer-instructions.md`；也可在目录参数后追加一个或多个
 review artifact，让 CI 归档合并后的审计状态、完整 review artifact、未完成清单、逐项派工计划、
 TSV 派工表、总 handoff、人类可读审阅步骤、可直接分发填写的分区模板和每个
-未完成 area 的逐区 TSV、计数版摘要与分区审阅说明。`npm run verify`
-会先用临时目录运行 `face-audit:ci-artifacts-self-check`，确认同一套
-CI artifact 生成和目录自检可以无残留通过。GitHub Actions 在 `npm run verify`
+未完成 area 的逐区 TSV、计数版摘要、占位证据引用模板与分区审阅说明，同时写出
+可替换的 `source-ids-by-area.json`。`npm run verify`
+会先用临时目录运行 `face-audit:ci-artifacts-self-check` 和
+`face-audit:review-kit-self-check`，确认同一套 CI artifact 与审阅包生成、
+目录自检可以无残留通过。GitHub Actions 在 `npm run verify`
 通过后会运行正式导出命令，并以
 `face-audit-ci-artifacts` artifact 上传该目录，供审阅人直接从对应 CI run 下载
-当前审计状态、完整 review artifact、未完成清单、逐项派工计划、TSV 派工表、落盘 manifest、未完成 area 的独立分区模板、逐区 TSV、逐区 summary 和逐区审阅说明。该命令的
+当前审计状态、完整 review artifact、未完成清单、逐项派工计划、TSV 派工表、落盘 manifest、未完成 area 的独立分区模板、逐区 TSV、逐区 summary、source-id 映射模板、逐区 evidence-ref 模板和逐区审阅说明。该命令的
 stdout manifest 也会输出 review 指纹、已审/未审条目数、pending/ready area
 数量、每个未完成 area 的剩余条目数，以及每个归档文件的 sha256 contentHash；
 stdout manifest 会与落盘 manifest 保持一致，便于只看 CI 日志时判断审计工作量并核对下载内容。Actions
@@ -1359,8 +1372,8 @@ stdout manifest 会与落盘 manifest 保持一致，便于只看 CI 日志时�
 内容不一致的审计包被归档。下载 artifact 目录后也可先运行
 `npm run face-audit:verify-ci-artifacts --
 ./face-audit-artifacts`，确认 manifest、核心 JSON、TSV review sheet、审阅说明、handoff 包和每个未完成
-area 的分区 review artifact、逐区 summary 与逐区审阅说明都存在且互相一致；自检还会把 status、todo、
-review-plan、逐区 todo-summary artifact 和逐区审阅说明与 reviewer handoff 反推结果交叉比对，避免被编辑过的
+area 的分区 review artifact、逐区 summary、source-id 映射模板、逐区 evidence-ref 模板与逐区审阅说明都存在且互相一致；自检还会把 status、todo、
+review-plan、逐区 todo-summary artifact、source-id 映射模板、逐区 evidence-ref 模板和逐区审阅说明与 reviewer handoff 反推结果交叉比对，避免被编辑过的
 摘要、说明和实际要分发填写的 area 文件漂移，并用 `face-audit-review.json` 重建
 TSV review sheet，再把 TSV 回灌到同一份 review JSON，避免表格派工文件与
 JSON 工件不同步。

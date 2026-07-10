@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build, test, release gate, and artifact self-check
+      - name: Build, test, release gate, and audit self-checks
         run: npm run verify
 
       - name: Export face-audit CI artifacts
