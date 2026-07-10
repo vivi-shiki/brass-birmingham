@@ -38,6 +38,16 @@ describe('client pending decision options', () => {
     })).toBe('gloucester-1, gloucester-0');
   });
 
+  it('ignores non-array merchant develop source lists when labeling dirty decisions', () => {
+    expect(merchantDevelopSourceLabel({
+      type: 'merchant_develop',
+      playerId: 'p1',
+      count: 1,
+      merchantSpaceId: 'gloucester-0',
+      merchantSpaceIds: 'gloucester-1',
+    } as unknown as Parameters<typeof merchantDevelopSourceLabel>[0])).toBe('gloucester-0');
+  });
+
   it('allows resolving a merchant develop decision with a valid develop selection', () => {
     const state = testGame();
     state.pendingDecision = {type: 'merchant_develop', playerId: 'p1', count: 1, merchantSpaceId: 'gloucester-0'};

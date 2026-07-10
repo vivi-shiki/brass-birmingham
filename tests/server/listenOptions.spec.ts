@@ -18,6 +18,14 @@ describe('listenOptionsFromEnv', () => {
     });
   });
 
+  it('formats IPv6 hosts as valid HTTP URLs', () => {
+    expect(listenOptionsFromEnv({HOST: '::1', PORT: '3001'})).toEqual({
+      host: '::1',
+      port: 3001,
+      url: 'http://[::1]:3001',
+    });
+  });
+
   it('trims configured values and falls back for a blank host', () => {
     expect(listenOptionsFromEnv({HOST: '   ', PORT: ' 4000 '})).toEqual({
       host: '127.0.0.1',

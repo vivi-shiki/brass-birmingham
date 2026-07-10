@@ -2,7 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {createGame} from '../src/common/gameSetup';
 import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../src/common/staticData';
 import {getIncomeLevel} from '../src/common/income';
-import type {GameState, IndustryType, PlayerCount} from '../src/common/types';
+import type {GameState, IndustryType, MerchantSpec, PlayerCount} from '../src/common/types';
 
 function allCardsInGame(state: GameState): string[] {
   return [
@@ -12,6 +12,19 @@ function allCardsInGame(state: GameState): string[] {
       ...player.discardCardIds,
     ]),
   ];
+}
+
+function dealtCardSnapshot(state: GameState) {
+  return {
+    drawDeck: [...state.cardZones.drawDeck],
+    players: Object.fromEntries(Object.entries(state.players)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([playerId, player]) => [playerId, {
+        handCardIds: [...player.handCardIds],
+        discardCardIds: [...player.discardCardIds],
+        faceDownDiscardCount: player.faceDownDiscardCount,
+      }])),
+  };
 }
 
 function expectedBoardSlotIds(): string[] {
@@ -35,6 +48,17 @@ function expectedMerchantTileSpecIds(playerCount: PlayerCount): string[] {
     .filter((spec) => spec.minPlayers <= playerCount)
     .map((spec) => spec.id)
     .sort();
+}
+
+function merchantTilePlacement(state: GameState): Record<string, string | undefined> {
+  return Object.fromEntries(Object.entries(state.board.merchantSpaces)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([spaceId, space]) => [spaceId, space.merchantTileInstanceId]));
+}
+
+function merchantLocationForSpace(spaceId: string): MerchantSpec | undefined {
+  return Object.values(staticConfig.locations).find((location): location is MerchantSpec =>
+    location.kind === 'merchant' && location.spaces.some((spec) => spec.id === spaceId));
 }
 
 describe('game setup', () => {
@@ -105,6 +129,62 @@ describe('game setup', () => {
         expect(player.faceDownDiscardCount).toBe(1);
       }
     }
+  });
+
+  it('deals private cards and the remaining draw deck deterministically from the setup seed', () => {
+    const state = createGame({id: 'deal-seed-1', playerNames: ['Ada', 'Ben', 'Cara'], seed: 42});
+    const repeated = createGame({id: 'deal-seed-2', playerNames: ['Ada', 'Ben', 'Cara'], seed: 42});
+    const differentSeed = createGame({id: 'deal-seed-3', playerNames: ['Ada', 'Ben', 'Cara'], seed: 43});
+
+    expect(dealtCardSnapshot(state).players).toEqual({
+      p1: {
+        handCardIds: [
+          'p3-industry-manufacturer-3',
+          'p3-industry-iron_works-1',
+          'p3-location-stafford-2',
+          'p3-location-worcester-2',
+          'p3-location-cannock-2',
+          'p3-location-coventry-1',
+          'p3-industry-cotton_mill-1',
+          'p3-location-kidderminster-2',
+        ],
+        discardCardIds: ['p3-location-burtonOnTrent-2'],
+        faceDownDiscardCount: 1,
+      },
+      p2: {
+        handCardIds: [
+          'p3-industry-coal_mine-1',
+          'p3-location-coventry-3',
+          'p3-industry-brewery-1',
+          'p3-location-stafford-1',
+          'p3-location-dudley-2',
+          'p3-location-birmingham-1',
+          'p3-location-wolverhampton-1',
+          'p3-location-leek-1',
+        ],
+        discardCardIds: ['p3-location-coalbrookdale-2'],
+        faceDownDiscardCount: 1,
+      },
+      p3: {
+        handCardIds: [
+          'p3-industry-pottery-2',
+          'p3-location-leek-2',
+          'p3-industry-coal_mine-2',
+          'p3-location-redditch-1',
+          'p3-industry-pottery-1',
+          'p3-industry-cotton_mill-3',
+          'p3-location-stone-1',
+          'p3-industry-brewery-5',
+        ],
+        discardCardIds: ['p3-location-tamworth-1'],
+        faceDownDiscardCount: 1,
+      },
+    });
+    expect(state.cardZones.drawDeck).toHaveLength(getCardIdsForPlayerCount(3).length - 3 * (staticConfig.rules.handSize + 1));
+    expect(state.cardZones.drawDeck.at(0)).toBe('p3-location-coalbrookdale-1');
+    expect(state.cardZones.drawDeck.at(-1)).toBe('p3-industry-iron_works-3');
+    expect(dealtCardSnapshot(repeated)).toEqual(dealtCardSnapshot(state));
+    expect(dealtCardSnapshot(differentSeed)).not.toEqual(dealtCardSnapshot(state));
   });
 
   it('initializes each player board from shared static config', () => {
@@ -182,6 +262,52 @@ describe('game setup', () => {
         const spec = staticConfig.merchantTileSpecs[specId];
         expect(spec.minPlayers).toBeLessThanOrEqual(state.playerCount);
         expect(space.beerPresent).toBe(!spec.blank);
+      }
+    }
+  });
+
+  it('places merchant tiles deterministically from the setup seed', () => {
+    const state = createGame({id: 'merchant-seed-1', playerNames: ['Ada', 'Ben', 'Cara', 'Dev'], seed: 42});
+    const repeated = createGame({id: 'merchant-seed-2', playerNames: ['Ada', 'Ben', 'Cara', 'Dev'], seed: 42});
+    const differentSeed = createGame({id: 'merchant-seed-3', playerNames: ['Ada', 'Ben', 'Cara', 'Dev'], seed: 43});
+
+    expect(merchantTilePlacement(state)).toEqual({
+      'gloucester-0': 'oxford-cotton-2',
+      'gloucester-1': 'nottingham-cotton-7',
+      'nottingham-0': 'warrington-pottery-5',
+      'nottingham-1': 'blank-2p-0',
+      'oxford-0': 'nottingham-manufacturer-8',
+      'oxford-1': 'gloucester-cotton-3',
+      'shrewsbury-0': 'gloucester-manufacturer-4',
+      'warrington-0': 'oxford-manufacturer-1',
+      'warrington-1': 'blank-3p-6',
+    });
+    expect(merchantTilePlacement(repeated)).toEqual(merchantTilePlacement(state));
+    expect(merchantTilePlacement(differentSeed)).not.toEqual(merchantTilePlacement(state));
+  });
+
+  it('assigns every active merchant tile once with beer matching the tile face', () => {
+    for (const playerCount of [2, 3, 4] as const) {
+      const playerNames = Array.from({length: playerCount}, (_, index) => `Player ${index + 1}`);
+      const state = createGame({id: `merchant-audit-${playerCount}`, playerNames, seed: 99});
+      const assignedTileIds = Object.values(state.board.merchantSpaces)
+        .map((space) => space.merchantTileInstanceId)
+        .filter((id): id is string => Boolean(id));
+
+      expect(assignedTileIds).toHaveLength(Object.keys(state.board.merchantSpaces).length);
+      expect(new Set(assignedTileIds).size).toBe(assignedTileIds.length);
+      expect(assignedTileIds.map(merchantTileSpecId).sort()).toEqual(expectedMerchantTileSpecIds(playerCount));
+
+      for (const [spaceId, space] of Object.entries(state.board.merchantSpaces)) {
+        const merchantLocation = merchantLocationForSpace(spaceId);
+        const merchantSpaceSpec = merchantLocation?.spaces.find((spec) => spec.id === spaceId);
+        const tileSpecId = merchantTileSpecId(space.merchantTileInstanceId ?? '');
+        const tileSpec = staticConfig.merchantTileSpecs[tileSpecId];
+
+        expect(merchantLocation?.minPlayers).toBeLessThanOrEqual(playerCount);
+        expect(merchantSpaceSpec?.minPlayers).toBeLessThanOrEqual(playerCount);
+        expect(tileSpec.minPlayers).toBeLessThanOrEqual(playerCount);
+        expect(space.beerPresent).toBe(!tileSpec.blank);
       }
     }
   });

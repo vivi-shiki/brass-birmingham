@@ -104,6 +104,19 @@ function auditKeysWithStatus(status: StaticDataAuditStatus): string[] {
     .sort();
 }
 
+function faceAuditChecklistCounts(): Record<string, number> {
+  return {
+    industryTiles: staticConfig.components.industryTilesPerPlayer,
+    linkLines: Object.keys(staticConfig.linkLines).length,
+    locationsAndSlots: Object.values(staticConfig.locations)
+      .filter((location) => location.kind === 'city')
+      .length,
+    merchantTiles: staticConfig.components.merchantTileCount,
+    regularCards: staticConfig.components.locationAndIndustryCardCount,
+    wildCards: staticConfig.components.wildCards.total,
+  };
+}
+
 function backtickListAfter(section: string, marker: string): string[] {
   const start = section.indexOf(marker);
   if (start < 0) {
@@ -165,13 +178,14 @@ describe('rules data-model documentation', () => {
 
   it('keeps the face-audit checklist aligned with every pending staticConfig audit area', () => {
     const checklistSection = extractSection(docs, '### 13.3 发布前逐面核对清单');
+    const checklistCounts = faceAuditChecklistCounts();
     const checklistMarkers: Record<string, string> = {
-      industryTiles: '全部 `45` 张每色产业牌',
-      linkLines: '全部连接线',
-      locationsAndSlots: '地图上 `20` 个城市',
-      merchantTiles: '全部 `9` 张商人牌',
-      regularCards: '全部 `64` 张 Location/Industry 普通牌',
-      wildCards: '全部 `8` 张 Wild 牌',
+      industryTiles: `全部 \`${checklistCounts.industryTiles}\` 张每色产业牌`,
+      linkLines: `全部 \`${checklistCounts.linkLines}\` 条连接线`,
+      locationsAndSlots: `地图上 \`${checklistCounts.locationsAndSlots}\` 个城市`,
+      merchantTiles: `全部 \`${checklistCounts.merchantTiles}\` 张商人牌`,
+      regularCards: `全部 \`${checklistCounts.regularCards}\` 张 Location/Industry 普通牌`,
+      wildCards: `全部 \`${checklistCounts.wildCards}\` 张 Wild 牌`,
     };
     const pendingKeys = auditKeysWithStatus('manifest_locked_face_audit_pending');
 
@@ -179,6 +193,9 @@ describe('rules data-model documentation', () => {
     for (const key of pendingKeys) {
       expect(checklistSection).toContain(checklistMarkers[key]);
     }
+    expect(checklistSection).toContain('evidenceSources');
+    expect(checklistSection).toContain('official-component:<source>#<area>');
+    expect(checklistSection).toContain('official-component:<source>#<area>:<item-id>');
   });
 
   it('keeps every documented test spec reference pointing at a real Vitest file', () => {

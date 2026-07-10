@@ -6,6 +6,8 @@ export type ResourceOption = {
   label: string;
 };
 
+type MarketName = 'coal' | 'iron';
+
 export function encodeSource(source: ResourceSource): string {
   return JSON.stringify(source);
 }
@@ -18,11 +20,11 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function isMarketName(value: unknown): value is 'coal' | 'iron' {
+function isMarketName(value: unknown): value is MarketName {
   return value === 'coal' || value === 'iron';
 }
 
-function isConfiguredMarketPrice(marketName: 'coal' | 'iron', price: number): boolean {
+function isConfiguredMarketPrice(marketName: MarketName, price: number): boolean {
   const spec = staticConfig.markets[marketName];
   return spec.priceSlotsCheapestToMostExpensive.includes(price) || spec.fallbackPriceWhenEmpty === price;
 }
@@ -105,9 +107,21 @@ export function optionalSources(values: string[], requiredCount: number): Resour
   return sources.every((source): source is ResourceSource => Boolean(source)) ? sources : undefined;
 }
 
-export function marketPrice(game: GameState, marketName: 'coal' | 'iron', purchaseOffset = 0): number {
+export function marketOccupiedCount(game: GameState, marketName: MarketName): number {
   const spec = staticConfig.markets[marketName];
-  const occupiedCount = Math.max(0, game.markets[marketName].occupiedCount - purchaseOffset);
+  const market = (game as unknown as {
+    markets?: Partial<Record<MarketName, {occupiedCount?: unknown} | null>>;
+  }).markets?.[marketName];
+  const occupiedCount = market?.occupiedCount;
+  if (typeof occupiedCount !== 'number' || !Number.isInteger(occupiedCount) || occupiedCount < 0) {
+    return spec.initialOccupiedCount;
+  }
+  return Math.min(occupiedCount, spec.priceSlotsCheapestToMostExpensive.length);
+}
+
+export function marketPrice(game: GameState, marketName: MarketName, purchaseOffset = 0): number {
+  const spec = staticConfig.markets[marketName];
+  const occupiedCount = Math.max(0, marketOccupiedCount(game, marketName) - purchaseOffset);
   if (occupiedCount <= 0) {
     return spec.fallbackPriceWhenEmpty;
   }
@@ -138,6 +152,19 @@ function sourceKey(source: ResourceSource): string {
 
 export function optionalSource(value: string): ResourceSource | undefined {
   return selectedSource(value);
+}
+
+export function resourceSourcesForBuildSlot(
+  game: GameState,
+  slotId: string,
+  sources: ResourceSource[],
+): ResourceSource[] {
+  const occupiedBy = game.board.slots[slotId]?.occupiedBy;
+  if (!occupiedBy) {
+    return sources;
+  }
+
+  return sources.filter((source) => source.kind !== 'industry_tile' || source.industryInstanceId !== occupiedBy);
 }
 
 export function normalizeResourceSelection(value: string, options: ResourceOption[]): string {
@@ -185,7 +212,7 @@ function optionHasRemainingCapacity(game: GameState, option: ResourceOption, sel
   return Boolean(industry && usedElsewhere < industry.remainingResource);
 }
 
-export function marketPurchaseOffsetBefore(values: string[], index: number, marketName: 'coal' | 'iron'): number {
+export function marketPurchaseOffsetBefore(values: string[], index: number, marketName: MarketName): number {
   return values
     .slice(0, index)
     .filter((value) => {

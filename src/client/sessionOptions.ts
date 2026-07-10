@@ -11,8 +11,35 @@ export type ActivePlayerViewOptions = {
   autoFollowActivePlayer?: boolean;
 };
 
+export type SavedSessionJoinReply = {
+  ok: boolean;
+  game?: GameState;
+  session?: {
+    playerId?: string;
+  };
+};
+
+export type SavedSessionJoinViewerUpdate =
+  | {apply: true; playerId: string; autoFollowActivePlayer: boolean}
+  | {apply: false};
+
 function isRedactedCardId(cardId: string): boolean {
   return cardId.startsWith('hidden-card-');
+}
+
+function stringIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function playerHandCardIds(game: GameState, playerId: string): string[] {
+  const player = game.players[playerId] as ({handCardIds?: unknown} | undefined);
+  return stringIds(player?.handCardIds);
+}
+
+function handIsVisible(game: GameState, playerId: string): boolean {
+  return playerHandCardIds(game, playerId).every((cardId) => !isRedactedCardId(cardId));
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -20,8 +47,41 @@ function nonEmptyString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
+function isSupportedPlayerId(playerId: string): boolean {
+  return playerId === 'p1' || playerId === 'p2' || playerId === 'p3' || playerId === 'p4';
+}
+
+function comparePlayerIds(a: string, b: string): number {
+  return a.localeCompare(b, undefined, {numeric: true});
+}
+
+export function normalizedSessionsForView(knownSessions: ClientPlayerSession[]): ClientPlayerSession[] {
+  const sessionsByPlayer: Record<string, ClientPlayerSession> = {};
+  for (const session of knownSessions) {
+    const source = typeof session === 'object' && session !== null
+      ? session as Partial<ClientPlayerSession>
+      : {};
+    const playerId = nonEmptyString(source.playerId);
+    const token = nonEmptyString(source.token);
+    if (playerId && token && isSupportedPlayerId(playerId)) {
+      sessionsByPlayer[playerId] = {playerId, token};
+    }
+  }
+
+  const seenTokens = new Set<string>();
+  const uniqueSessions: ClientPlayerSession[] = [];
+  for (const session of Object.values(sessionsByPlayer).sort((a, b) => comparePlayerIds(a.playerId, b.playerId))) {
+    if (seenTokens.has(session.token)) {
+      continue;
+    }
+    uniqueSessions.push(session);
+    seenTokens.add(session.token);
+  }
+  return uniqueSessions;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function positiveInteger(value: unknown): value is number {
@@ -40,27 +100,33 @@ function merchantSpaceHasDevelopBonus(merchantSpaceId: string): boolean {
   ));
 }
 
+function gameHasPlayer(game: unknown, playerId: string): boolean {
+  if (!isSupportedPlayerId(playerId)) {
+    return false;
+  }
+  const players = isRecord(game) ? game.players : undefined;
+  const player = isRecord(players) ? players[playerId] : undefined;
+  return isRecord(player);
+}
+
+function gameHasPlayerForView(game: GameState, playerId: string): boolean {
+  return isSupportedPlayerId(playerId) && isRecord(game.players[playerId]);
+}
+
+function firstSupportedPlayerIdForView(game: GameState): string {
+  return Object.keys(game.players).find((playerId) => gameHasPlayerForView(game, playerId)) ?? '';
+}
+
 export function sessionForPlayer(
   knownSessions: ClientPlayerSession[],
   playerId: string,
 ): ClientPlayerSession | undefined {
   const targetPlayerId = nonEmptyString(playerId);
-  if (!targetPlayerId) {
+  if (!targetPlayerId || !isSupportedPlayerId(targetPlayerId)) {
     return undefined;
   }
 
-  for (const session of knownSessions) {
-    const source = typeof session === 'object' && session !== null
-      ? session as Partial<ClientPlayerSession>
-      : {};
-    const savedPlayerId = nonEmptyString(source.playerId);
-    const token = nonEmptyString(source.token);
-    if (savedPlayerId === targetPlayerId && token) {
-      return {playerId: savedPlayerId, token};
-    }
-  }
-
-  return undefined;
+  return normalizedSessionsForView(knownSessions).find((session) => session.playerId === targetPlayerId);
 }
 
 export function pendingDecisionPlayerIdForView(game: GameState): string | undefined {
@@ -70,7 +136,7 @@ export function pendingDecisionPlayerIdForView(game: GameState): string | undefi
   }
 
   const pendingPlayerId = nonEmptyString(decision.playerId);
-  if (!pendingPlayerId || !game.players[pendingPlayerId]) {
+  if (!pendingPlayerId || !gameHasPlayerForView(game, pendingPlayerId)) {
     return undefined;
   }
 
@@ -104,16 +170,40 @@ export function activePlayerIdForView(game: GameState): string {
   }
 
   const currentPlayerId = nonEmptyString(getCurrentPlayerId(game));
-  if (currentPlayerId && game.players[currentPlayerId]) {
+  if (currentPlayerId && gameHasPlayerForView(game, currentPlayerId)) {
     return currentPlayerId;
   }
 
-  return Object.keys(game.players)[0] ?? '';
+  return firstSupportedPlayerIdForView(game);
+}
+
+export function savedSessionJoinViewerUpdate(
+  reply: SavedSessionJoinReply,
+  session: ClientPlayerSession,
+): SavedSessionJoinViewerUpdate {
+  const requestedPlayerId = nonEmptyString(session.playerId);
+  const acknowledgedPlayerId = nonEmptyString(reply.session?.playerId);
+  if (
+    !reply.ok ||
+    !reply.game ||
+    !requestedPlayerId ||
+    !isSupportedPlayerId(requestedPlayerId) ||
+    requestedPlayerId !== acknowledgedPlayerId ||
+    !gameHasPlayer(reply.game, requestedPlayerId)
+  ) {
+    return {apply: false};
+  }
+
+  return {
+    apply: true,
+    playerId: requestedPlayerId,
+    autoFollowActivePlayer: activePlayerIdForView(reply.game) === requestedPlayerId,
+  };
 }
 
 export function handPlayerIdForView(game: GameState, viewerPlayerId?: string): string {
   const normalizedViewerPlayerId = nonEmptyString(viewerPlayerId);
-  if (normalizedViewerPlayerId && game.players[normalizedViewerPlayerId]) {
+  if (normalizedViewerPlayerId && gameHasPlayerForView(game, normalizedViewerPlayerId)) {
     return normalizedViewerPlayerId;
   }
 
@@ -135,7 +225,7 @@ export function sessionNeededForActivePlayerView(
 
   const activePlayerId = activePlayerIdForView(game);
   const activePlayer = game.players[activePlayerId];
-  if (!activePlayer || activePlayer.handCardIds.every((cardId) => !isRedactedCardId(cardId))) {
+  if (!activePlayer || handIsVisible(game, activePlayerId)) {
     return undefined;
   }
 
@@ -160,5 +250,5 @@ export function canSubmitForActivePlayerView(
     return pendingDecisionPlayerIdForView(game) !== undefined;
   }
 
-  return activePlayer.handCardIds.every((cardId) => !isRedactedCardId(cardId));
+  return handIsVisible(game, activePlayerId);
 }

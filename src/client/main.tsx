@@ -2,19 +2,17 @@ import React, {FormEvent, useEffect, useMemo, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {io, Socket} from 'socket.io-client';
 import {
-  canSellToMerchant,
-  canSellToMerchantSpace,
   legalBeerSourcesForNetwork,
   legalBeerSourcesForSaleSelect,
   legalCoalSourcesForNetworkSelect,
   legalResourceSourcesForSelect,
   type SaleBeerSourceSelection,
 } from '../common/gameEngine';
-import {getIncomeLevel} from '../common/income';
+import {FACE_AUDIT_AREAS, type FaceAuditArea} from '../common/faceAudit';
 import {getActiveIndustries, getActiveLinks} from '../common/selectors';
 import {staticConfig} from '../common/staticData';
-import type {GameCommand, GameState, IndustryInstance, IndustryType, SellStep} from '../common/types';
-import {canScout, scoutCardOptionsForSelect} from './actionOptions';
+import type {GameCommand, GameState, IndustryType, SellStep} from '../common/types';
+import {canScout, normalizeScoutCardSelection, scoutCardOptionsForSelect} from './actionOptions';
 import {
   buildIndustryOptionsForLocationAndCard,
   buildLocationOptionsForCard,
@@ -30,9 +28,11 @@ import {
 import {developOptionsForSelect, normalizeDevelopSelections} from './developOptions';
 import {doubleRailBeerSourceForSubmit, networkLinkOptionsForSelect} from './networkOptions';
 import {
+  marketOccupiedCount,
   normalizeResourceSelection,
   optionalSource,
   optionalSources,
+  resourceSourcesForBuildSlot,
   resourceOptionsFromSources,
   type ResourceOption,
 } from './resourceSources';
@@ -45,17 +45,156 @@ import {
   scoutActionReason,
   sellActionReason,
 } from './actionValidation';
-import {gameSummariesFromPayload, listedGames, type GameSummary, type ListedGame} from './roomListOptions';
+import {gameSummariesFromPayload, listedGames, savedSessionLabel, type GameSummary, type ListedGame} from './roomListOptions';
 import {hashForGameState, parseGameJoinHash, playerSessionHash, playerSessionUrl} from './sessionLinks';
+import {joinGamePayload} from './joinGameOptions';
+import {acknowledgedCommandPlayerId, commandGamePayload} from './commandGameOptions';
+import {
+  faceAuditAreaSummaryLabel,
+  faceAuditChecklistIdentityLabel,
+  faceAuditChecklistFromPayload,
+  faceAuditFieldSummary,
+  faceAuditItemsForArea,
+  type FaceAuditChecklistView,
+} from './faceAuditViewOptions';
+import {
+  faceAuditAreaCompletionCountsLabel,
+  faceAuditAreaReviewTemplateFromPayload,
+  faceAuditAreaReviewTemplatePath,
+  buildFaceAuditEvidenceSourceTemplateArtifact,
+  faceAuditEvidenceSourceLabel,
+  faceAuditEvidenceSourceFromPayload,
+  faceAuditEvidenceSourcesFromPayload,
+  faceAuditEvidenceSourceTemplateLabel,
+  faceAuditEvidenceRefTemplateFromPayload,
+  faceAuditEvidenceRefTemplateLabel,
+  faceAuditEvidenceRefTemplatePath,
+  fillFaceAuditAreaReviewArtifact,
+  faceAuditAreaReviewTodoSummaryFromPayload,
+  faceAuditAreaReviewTodoSummaryLabel,
+  faceAuditAreaReviewTodoSummaryPath,
+  faceAuditLockArtifactFromPayload,
+  faceAuditLockArtifactLabel,
+  faceAuditLockArtifactValidationFromPayload,
+  faceAuditLockArtifactValidationLabel,
+  faceAuditLockArtifactVerifyPath,
+  faceAuditMergedReviewArtifactFromPayload,
+  faceAuditReleaseGatePath,
+  faceAuditReviewAreaName,
+  faceAuditReviewArtifactRequestOptions,
+  faceAuditEvidenceCoverageLabel,
+  faceAuditReviewMatchPath,
+  faceAuditAreaReviewerInstructionsDownloadLabel,
+  faceAuditAreaReviewerInstructionsFileName,
+  faceAuditAreaReviewerInstructionsPath,
+  faceAuditReviewMergeLabel,
+  faceAuditReviewMergePath,
+  faceAuditReviewIssueLabel,
+  faceAuditReviewerInstructionsDownloadLabel,
+  faceAuditReviewerInstructionsFileName,
+  faceAuditReviewerInstructionsPath,
+  faceAuditReviewerHandoffAreaDownloadLabel,
+  faceAuditReviewerHandoffAreaFileName,
+  faceAuditReviewerHandoffDownloadLabel,
+  faceAuditReviewerHandoffFileName,
+  faceAuditReviewerHandoffFromPayload,
+  faceAuditReviewerHandoffLabel,
+  faceAuditReviewerHandoffPath,
+  faceAuditReviewerHandoffResponseFromPayload,
+  faceAuditReviewerHandoffResponseLabel,
+  faceAuditReviewerHandoffResponsePath,
+  faceAuditReviewerHandoffValidationFromPayload,
+  faceAuditReviewerHandoffValidationLabel,
+  faceAuditReviewerHandoffVerifyPath,
+  faceAuditReviewStatusFromPayload,
+  faceAuditReviewStatusLabel,
+  faceAuditReviewStatusPath,
+  faceAuditReviewPlanAreaLabel,
+  faceAuditReviewPlanFromPayload,
+  faceAuditReviewPlanLabel,
+  faceAuditReviewPlanPath,
+  faceAuditAreaReviewSheetDownloadLabel,
+  faceAuditAreaReviewSheetFileName,
+  faceAuditAreaReviewSheetPath,
+  faceAuditReviewFromSheetFileName,
+  faceAuditReviewSheetDownloadLabel,
+  faceAuditReviewSheetFileName,
+  faceAuditReviewSheetImportDownloadLabel,
+  faceAuditReviewSheetImportPath,
+  faceAuditReviewSheetPath,
+  faceAuditReviewSubmissionLabel,
+  faceAuditReviewSubmissionPath,
+  faceAuditStaticLockGateFromPayload,
+  faceAuditStaticLockGateLabel,
+  faceAuditSourceIdsByAreaFromPayload,
+  faceAuditSourceIdsByAreaPayload,
+  faceAuditSourceIdsByAreaTemplatePath,
+  faceAuditReviewTemplateFromPayload,
+  faceAuditReviewTodoAreaLabel,
+  faceAuditReviewTodoFromPayload,
+  faceAuditReviewTodoLabel,
+  faceAuditReviewTodoPath,
+  faceAuditReviewValidationLabel,
+  faceAuditReviewValidationFromPayload,
+  type FaceAuditLockArtifactValidationView,
+  type FaceAuditAreaReviewTodoSummaryView,
+  type FaceAuditAreaReviewFillOptions,
+  type FaceAuditEvidenceSourceTemplateFileView,
+  type FaceAuditEvidenceRefTemplateView,
+  type FaceAuditReviewerHandoffResponseView,
+  type FaceAuditReviewerHandoffValidationView,
+  type FaceAuditReviewerHandoffView,
+  type FaceAuditReviewPlanView,
+  type FaceAuditReviewStatusView,
+  type FaceAuditStaticLockGateView,
+  type FaceAuditReviewSubmissionType,
+  type FaceAuditSourceIdsByAreaView,
+  type FaceAuditReviewTodoView,
+  type FaceAuditReviewValidationView,
+} from './faceAuditReviewOptions';
+import {
+  faceAuditAreaProgress,
+  faceAuditItemKey,
+  faceAuditProgressCount,
+  faceAuditProgressLabel,
+  parseFaceAuditProgressArtifact,
+  parseFaceAuditReviewArtifactProgress,
+  readFaceAuditReviewedKeys,
+  serializeFaceAuditProgressArtifact,
+  updateFaceAuditReviewedKeys,
+  writeFaceAuditReviewedKeys,
+} from './faceAuditProgressStore';
+import {viewerUpdateFromReply} from './replyViewOptions';
 import {
   activePlayerIdForView,
   canSubmitForActivePlayerView,
   handPlayerIdForView,
+  normalizedSessionsForView,
   pendingDecisionPlayerIdForView,
+  savedSessionJoinViewerUpdate,
   sessionForPlayer,
   sessionNeededForActivePlayerView,
 } from './sessionOptions';
 import {rememberSessions, sessionsForGame, type PlayerSession} from './playerSessionStore';
+import {
+  playerHandCardIdsForView,
+  playerLabelForView,
+  playerTableRowForView,
+} from './playerView';
+import {createGamePayload, playerNamesForCount} from './createGameOptions';
+import {
+  addSellStepDraft,
+  createSellStepDraft,
+  merchantSpacesForSellIndustry,
+  merchantSpacesWithTiles,
+  normalizeSellStepDrafts,
+  sellableIndustriesForPlayer,
+  sellableIndustriesForSellStep,
+  type SellStepDraft,
+} from './sellOptions';
+import {gameStatePushOptions} from './gameStatePushOptions';
+import {manualJoinViewerUpdate} from './manualJoinViewOptions';
+import {serverUrlFromOptions} from './serverUrlOptions';
 import './styles.css';
 
 type SocketReply = {
@@ -66,22 +205,29 @@ type SocketReply = {
   errors?: string[];
 };
 
-type SellStepDraft = {
-  industryId: string;
-  merchantSpaceId: string;
-  beerOne: string;
-  beerTwo: string;
+type ReplyHandlingOptions = {
+  preserveViewerWithoutSession?: boolean;
 };
 
-const serverUrl = import.meta.env.DEV ? 'http://127.0.0.1:3001' : window.location.origin;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hexFromArrayBuffer(buffer: ArrayBuffer): string {
+  return [...new Uint8Array(buffer)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+const serverUrl = serverUrlFromOptions({
+  isDev: import.meta.env.DEV,
+  location: window.location,
+  configuredServerUrl: import.meta.env.VITE_BRASS_SERVER_URL,
+});
 const ironSourceAnchorLocationId = 'birmingham';
 
 function isHiddenCardId(cardId: string): boolean {
   return cardId.startsWith('hidden-card-');
-}
-
-function createSellStepDraft(): SellStepDraft {
-  return {industryId: '', merchantSpaceId: '', beerOne: '', beerTwo: ''};
 }
 
 function ResourceSourceSelect({
@@ -125,9 +271,14 @@ function App() {
 
   useEffect(() => {
     socket.on('game:state', (nextGame: GameState) => {
+      const pushOptions = gameStatePushOptions(nextGame.id, window.location.hash, sessionsForGame);
+      if (!pushOptions.ok) {
+        setErrors([pushOptions.error]);
+        return;
+      }
       setGame(nextGame);
-      window.location.hash = hashForGameState(nextGame.id, window.location.hash);
-      setKnownSessions(sessionsForGame(nextGame.id));
+      window.location.hash = pushOptions.hash;
+      setKnownSessions(pushOptions.sessions);
     });
     const hashJoin = parseGameJoinHash(window.location.hash);
     if (hashJoin) {
@@ -139,16 +290,19 @@ function App() {
         : sessionsForGame(hashJoin.gameId);
       setKnownSessions(storedSessions);
       const firstSession = hashSession ?? storedSessions[0];
-      socket.emit('game:join', firstSession
-        ? {gameId: hashJoin.gameId, playerId: firstSession.playerId, sessionToken: firstSession.token}
-        : {gameId: hashJoin.gameId}, handleReply);
+      const joinResult = joinGamePayload(hashJoin.gameId, firstSession?.playerId, firstSession?.token);
+      if (joinResult.ok) {
+        socket.emit('game:join', joinResult.payload, handleReply);
+      } else {
+        setErrors([joinResult.error]);
+      }
     }
     return () => {
       socket.off('game:state');
     };
   }, [socket]);
 
-  function handleReply(reply: SocketReply) {
+  function handleReply(reply: SocketReply, options: ReplyHandlingOptions = {}) {
     if (!reply.ok) {
       setErrors(reply.errors ?? ['Unknown error']);
       return;
@@ -164,9 +318,13 @@ function App() {
       } else {
         window.location.hash = hashForGameState(reply.game.id, window.location.hash);
       }
-      const replyViewerPlayerId = reply.session?.playerId ?? reply.sessions?.[0]?.playerId;
-      if (replyViewerPlayerId) {
-        setViewerPlayerId(replyViewerPlayerId);
+      const viewerUpdate = viewerUpdateFromReply(reply, {
+        preserveViewerWithoutSession: options.preserveViewerWithoutSession,
+      });
+      if (viewerUpdate.kind === 'player') {
+        setViewerPlayerId(viewerUpdate.playerId);
+      } else if (viewerUpdate.kind === 'observer') {
+        setViewerPlayerId(undefined);
       }
       setKnownSessions(sessionsToStore.length > 0
         ? rememberSessions(reply.game.id, sessionsToStore)
@@ -183,8 +341,14 @@ function App() {
     if (!session) {
       return;
     }
-    setViewerPlayerId(session.playerId);
-    socket.emit('game:join', {gameId: game.id, playerId: session.playerId, sessionToken: session.token}, handleReply);
+    const result = joinGamePayload(game.id, session.playerId, session.token);
+    if (!result.ok) {
+      setErrors([result.error]);
+      return;
+    }
+    socket.emit('game:join', result.payload, (reply: SocketReply) => {
+      handleReply(reply, {preserveViewerWithoutSession: true});
+    });
   }, [autoFollowActivePlayer, game, knownSessions, socket]);
 
   function sendCommand(command: GameCommand) {
@@ -196,20 +360,38 @@ function App() {
       setErrors([`No saved session token for ${command.playerId}`]);
       return;
     }
-    setAutoFollowActivePlayer(true);
-    setViewerPlayerId(command.playerId);
-    socket.emit('game:command', {gameId: game.id, command, sessionToken: session.token}, handleReply);
+    const result = commandGamePayload(game.id, command, session.token);
+    if (!result.ok) {
+      setErrors([result.error]);
+      return;
+    }
+    socket.emit('game:command', result.payload, (reply: SocketReply) => {
+      const nextViewerPlayerId = acknowledgedCommandPlayerId(reply, command.playerId);
+      if (nextViewerPlayerId) {
+        setAutoFollowActivePlayer(true);
+        setViewerPlayerId(nextViewerPlayerId);
+      }
+      handleReply(reply, {preserveViewerWithoutSession: true});
+    });
   }
 
   function joinSession(session: PlayerSession) {
     if (!game) {
       return;
     }
-    const activePlayerId = activePlayerIdForView(game);
-    setAutoFollowActivePlayer(session.playerId === activePlayerId);
-    setViewerPlayerId(session.playerId);
-    window.location.hash = playerSessionHash(game.id, session);
-    socket.emit('game:join', {gameId: game.id, playerId: session.playerId, sessionToken: session.token}, handleReply);
+    const result = joinGamePayload(game.id, session.playerId, session.token);
+    if (!result.ok) {
+      setErrors([result.error]);
+      return;
+    }
+    socket.emit('game:join', result.payload, (reply: SocketReply) => {
+      handleReply(reply);
+      const viewerUpdate = savedSessionJoinViewerUpdate(reply, session);
+      if (viewerUpdate.apply) {
+        setAutoFollowActivePlayer(viewerUpdate.autoFollowActivePlayer);
+        setViewerPlayerId(viewerUpdate.playerId);
+      }
+    });
   }
 
   function selectManualViewer(playerId?: string) {
@@ -240,6 +422,7 @@ function App() {
     <main>
       <h1>Brass: Birmingham Online</h1>
       <ConnectionPanel socket={socket} onReply={handleReply} onManualJoin={selectManualViewer} />
+      <FaceAuditPanel />
       {errors.length > 0 && (
         <div>
           <h2>Errors</h2>
@@ -262,6 +445,2269 @@ function App() {
   );
 }
 
+function reviewArtifactsFromPayload(value: unknown): unknown[] | undefined {
+  if (Array.isArray(value)) {
+    return value;
+  }
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Array.isArray((value as {artifacts?: unknown}).artifacts)
+  ) {
+    return (value as {artifacts: unknown[]}).artifacts;
+  }
+  return undefined;
+}
+
+function downloadTextArtifact(fileName: string, text: string, contentType: string): void {
+  const blob = new Blob([text], {type: contentType});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  try {
+    link.click();
+  } finally {
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+}
+
+function FaceAuditPanel() {
+  const [checklist, setChecklist] = useState<FaceAuditChecklistView>({areas: [], items: []});
+  const [reviewedItemKeys, setReviewedItemKeys] = useState<string[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  const [progressArtifactText, setProgressArtifactText] = useState('');
+  const [progressArtifactMessage, setProgressArtifactMessage] = useState<string | undefined>();
+  const [reviewArtifactText, setReviewArtifactText] = useState('');
+  const [reviewArtifactMessage, setReviewArtifactMessage] = useState<string | undefined>();
+  const [reviewArtifactLoading, setReviewArtifactLoading] = useState(false);
+  const [reviewValidation, setReviewValidation] = useState<FaceAuditReviewValidationView | undefined>();
+  const [reviewStatusReport, setReviewStatusReport] = useState<FaceAuditReviewStatusView | undefined>();
+  const [reviewTodoReport, setReviewTodoReport] = useState<FaceAuditReviewTodoView | undefined>();
+  const [reviewAreaTodoSummaryReport, setReviewAreaTodoSummaryReport] =
+    useState<FaceAuditAreaReviewTodoSummaryView | undefined>();
+  const [reviewPlanReport, setReviewPlanReport] = useState<FaceAuditReviewPlanView | undefined>();
+  const [reviewHandoffReport, setReviewHandoffReport] = useState<FaceAuditReviewerHandoffView | undefined>();
+  const [evidenceRefTemplate, setEvidenceRefTemplate] = useState<FaceAuditEvidenceRefTemplateView | undefined>();
+  const [reviewHandoffValidation, setReviewHandoffValidation] =
+    useState<FaceAuditReviewerHandoffValidationView | undefined>();
+  const [reviewHandoffResponse, setReviewHandoffResponse] =
+    useState<FaceAuditReviewerHandoffResponseView | undefined>();
+  const [selectedReviewArea, setSelectedReviewArea] = useState('regularCards');
+  const [mergeArtifactText, setMergeArtifactText] = useState('');
+  const [reviewSheetImportText, setReviewSheetImportText] = useState('');
+  const [evidenceSourceArtifactText, setEvidenceSourceArtifactText] = useState('');
+  const [selectedEvidenceSourceArtifactId, setSelectedEvidenceSourceArtifactId] = useState('');
+  const [reviewMatchSourceIdsByArea, setReviewMatchSourceIdsByArea] =
+    useState<FaceAuditSourceIdsByAreaView>({});
+  const [evidenceSourceArtifactMessage, setEvidenceSourceArtifactMessage] = useState<string | undefined>();
+  const [evidenceSourceArtifactLoading, setEvidenceSourceArtifactLoading] = useState(false);
+  const [reviewFillReviewer, setReviewFillReviewer] = useState('');
+  const [reviewFillReviewedAt, setReviewFillReviewedAt] = useState(() => new Date().toISOString());
+  const [reviewFillEvidenceSourceId, setReviewFillEvidenceSourceId] = useState('official-set');
+  const [reviewFillEvidenceSourceLabel, setReviewFillEvidenceSourceLabel] = useState('Official component reference');
+  const [reviewFillEvidenceSourceType, setReviewFillEvidenceSourceType] =
+    useState<FaceAuditAreaReviewFillOptions['evidenceSourceType']>('official_physical_component');
+  const [reviewFillEvidenceSourceCitation, setReviewFillEvidenceSourceCitation] = useState('');
+  const [reviewFillEvidenceSourceLocator, setReviewFillEvidenceSourceLocator] = useState('');
+  const [reviewFillEvidenceSourceContentHash, setReviewFillEvidenceSourceContentHash] = useState('');
+  const [reviewFillStatus, setReviewFillStatus] =
+    useState<FaceAuditAreaReviewFillOptions['reviewStatus']>('matches_official_face');
+  const [reviewFillEvidenceRefScope, setReviewFillEvidenceRefScope] =
+    useState<NonNullable<FaceAuditAreaReviewFillOptions['evidenceRefScope']>>('area');
+  const [reviewFillItemNotes, setReviewFillItemNotes] = useState('');
+  const [lockArtifactText, setLockArtifactText] = useState('');
+  const [lockArtifactMessage, setLockArtifactMessage] = useState<string | undefined>();
+  const [lockArtifactLoading, setLockArtifactLoading] = useState(false);
+  const [lockArtifactValidation, setLockArtifactValidation] = useState<FaceAuditLockArtifactValidationView | undefined>();
+  const [releaseGate, setReleaseGate] = useState<FaceAuditStaticLockGateView | undefined>();
+  const evidenceSourceArtifactSources = useMemo(() => {
+    if (evidenceSourceArtifactText.trim().length === 0) {
+      return [];
+    }
+    try {
+      return faceAuditEvidenceSourcesFromPayload(JSON.parse(evidenceSourceArtifactText) as unknown) ?? [];
+    } catch {
+      return [];
+    }
+  }, [evidenceSourceArtifactText]);
+  const reviewMatchFallbackSourceId = evidenceSourceArtifactSources.find((source) =>
+    source.id === selectedEvidenceSourceArtifactId)?.id ??
+    evidenceSourceArtifactSources[0]?.id ??
+    reviewFillEvidenceSourceId;
+  const reviewMatchAreaSourceOptions = evidenceSourceArtifactSources.length > 0
+    ? evidenceSourceArtifactSources
+    : reviewFillEvidenceSourceId.trim().length === 0
+      ? []
+      : [{
+        id: reviewFillEvidenceSourceId.trim(),
+        label: reviewFillEvidenceSourceLabel,
+        sourceType: reviewFillEvidenceSourceType,
+        citation: reviewFillEvidenceSourceCitation,
+        locator: reviewFillEvidenceSourceLocator.trim() || undefined,
+        contentHash: reviewFillEvidenceSourceContentHash.trim() || undefined,
+        notes: '',
+      }];
+  const totalItems = checklist.items.length;
+  const progress = faceAuditProgressCount(checklist, reviewedItemKeys);
+  const reviewedItemKeySet = useMemo(() => new Set(reviewedItemKeys), [reviewedItemKeys]);
+  const visibleReviewIssues = reviewValidation?.issues.slice(0, 12) ?? [];
+  const visibleReviewTodoIssues = reviewTodoReport?.issues.slice(0, 12) ?? [];
+  const visibleReviewAreaTodoSummaryIssues = reviewAreaTodoSummaryReport?.issues.slice(0, 12) ?? [];
+  const visibleReviewPlanIssues = reviewPlanReport?.issues.slice(0, 12) ?? [];
+  const visibleReviewHandoffIssues = reviewHandoffReport?.issues.slice(0, 12) ?? [];
+  const visibleReviewHandoffValidationIssues = reviewHandoffValidation?.issues.slice(0, 12) ?? [];
+  const visibleReviewHandoffResponseIssues = reviewHandoffResponse?.issues.slice(0, 12) ?? [];
+  const visibleEvidenceRefs = evidenceRefTemplate?.evidenceRefs.slice(0, 12) ?? [];
+  const visibleLockArtifactIssues = lockArtifactValidation?.issues.slice(0, 12) ?? [];
+  const visibleReleaseGateIssues = releaseGate?.issues.slice(0, 12) ?? [];
+
+  async function loadFaceAuditChecklist() {
+    setLoading(true);
+    setError(undefined);
+    try {
+      const response = await fetch(`${serverUrl}/api/face-audit-checklist`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const nextChecklist = faceAuditChecklistFromPayload(await response.json());
+      setChecklist(nextChecklist);
+      const storedReviewedItemKeys = readFaceAuditReviewedKeys(nextChecklist);
+      setReviewedItemKeys(storedReviewedItemKeys);
+      setProgressArtifactText(serializeFaceAuditProgressArtifact(nextChecklist, storedReviewedItemKeys));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadFaceAuditChecklist();
+  }, []);
+
+  useEffect(() => {
+    if (
+      selectedEvidenceSourceArtifactId &&
+      evidenceSourceArtifactSources.some((source) => source.id === selectedEvidenceSourceArtifactId)
+    ) {
+      return;
+    }
+    const nextSourceId = evidenceSourceArtifactSources[0]?.id ?? '';
+    if (selectedEvidenceSourceArtifactId !== nextSourceId) {
+      setSelectedEvidenceSourceArtifactId(nextSourceId);
+    }
+  }, [evidenceSourceArtifactSources, selectedEvidenceSourceArtifactId]);
+
+  function updateReviewedItem(item: FaceAuditChecklistView['items'][number], reviewed: boolean) {
+    const nextReviewedItemKeys = updateFaceAuditReviewedKeys(checklist, reviewedItemKeys, item, reviewed);
+    setReviewedItemKeys(writeFaceAuditReviewedKeys(checklist, nextReviewedItemKeys));
+    setProgressArtifactMessage(undefined);
+  }
+
+  function clearReviewedItems() {
+    setReviewedItemKeys(writeFaceAuditReviewedKeys(checklist, []));
+    setProgressArtifactMessage(undefined);
+  }
+
+  function exportReviewedItems() {
+    setProgressArtifactText(serializeFaceAuditProgressArtifact(checklist, reviewedItemKeys));
+    setProgressArtifactMessage('Progress artifact exported from current reviewed items.');
+  }
+
+  function importReviewedItems() {
+    const result = parseFaceAuditProgressArtifact(checklist, progressArtifactText);
+    if (!result.ok) {
+      setProgressArtifactMessage(result.error);
+      return;
+    }
+    const nextReviewedItemKeys = writeFaceAuditReviewedKeys(checklist, result.reviewedItemKeys);
+    setReviewedItemKeys(nextReviewedItemKeys);
+    setProgressArtifactText(serializeFaceAuditProgressArtifact(checklist, nextReviewedItemKeys));
+    setProgressArtifactMessage(`Progress artifact imported; ignored ${result.ignoredItemKeyCount} unknown item keys.`);
+  }
+
+  function importReviewArtifactProgress() {
+    const result = parseFaceAuditReviewArtifactProgress(checklist, reviewArtifactText);
+    if (!result.ok) {
+      setReviewArtifactMessage(result.error);
+      return;
+    }
+    const nextReviewedItemKeys = writeFaceAuditReviewedKeys(checklist, result.reviewedItemKeys);
+    setReviewedItemKeys(nextReviewedItemKeys);
+    setProgressArtifactText(serializeFaceAuditProgressArtifact(checklist, nextReviewedItemKeys));
+    setProgressArtifactMessage(
+      `Review artifact progress imported; ignored ${result.ignoredItemKeyCount} unknown reviewed item keys.`,
+    );
+    setReviewArtifactMessage(
+      `Imported ${nextReviewedItemKeys.length} reviewed checklist item(s) from the loaded review artifact.`,
+    );
+  }
+
+  async function loadFaceAuditReviewTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}/api/face-audit-review-template`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      const template = faceAuditReviewTemplateFromPayload(payload);
+      if (!template) {
+        throw new Error('Invalid face-audit review template payload');
+      }
+      setReviewArtifactText(JSON.stringify(payload.faceAuditReview, null, 2));
+      setReviewArtifactMessage(
+        `Loaded review template ${template.checklistFingerprint} with ${template.checklistItemCount} items.`,
+      );
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function loadFaceAuditAreaReviewTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a valid face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditAreaReviewTemplatePath(area)}`);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const payload = await response.json();
+      const template = faceAuditAreaReviewTemplateFromPayload(payload);
+      if (!template) {
+        throw new Error('Invalid face-audit area review template payload');
+      }
+      setReviewArtifactText(JSON.stringify(payload.faceAuditAreaReview, null, 2));
+      setReviewArtifactMessage(
+        `Loaded ${template.area} review template ${template.checklistFingerprint} with ${template.areaItemCount} items.`,
+      );
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function mergeFaceAuditReviewArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      let artifactPayload: unknown;
+      try {
+        artifactPayload = JSON.parse(mergeArtifactText) as unknown;
+      } catch {
+        throw new Error('Merge artifact input must be valid JSON');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditReviewMergePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(artifactPayload),
+      });
+      const payload = await response.json();
+      const validation = faceAuditReviewValidationFromPayload(payload);
+      setReviewValidation(validation);
+      if (response.ok) {
+        const mergedReview = faceAuditMergedReviewArtifactFromPayload(payload);
+        if (!mergedReview) {
+          throw new Error('Invalid face-audit review merge payload');
+        }
+        setReviewArtifactText(JSON.stringify(mergedReview, null, 2));
+        setReviewArtifactMessage(
+          `Merged review artifact. ${faceAuditReviewValidationLabel(validation)}`,
+        );
+        return;
+      }
+      setReviewArtifactMessage(faceAuditReviewMergeLabel(validation));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function summarizeFaceAuditReviewArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewStatusPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review status'),
+      });
+      const status = faceAuditReviewStatusFromPayload(await response.json());
+      setReviewStatusReport(status);
+      setReviewArtifactMessage(faceAuditReviewStatusLabel(status));
+      if (!response.ok && status.issueCount === 0) {
+        setReviewArtifactMessage(`Review status request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function summarizeFaceAuditReviewTodoArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewTodoPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review todo'),
+      });
+      const todo = faceAuditReviewTodoFromPayload(await response.json());
+      setReviewTodoReport(todo);
+      setReviewArtifactMessage(faceAuditReviewTodoLabel(todo));
+      if (!response.ok && todo.issueCount === 0) {
+        setReviewArtifactMessage(`Review todo request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function summarizeFaceAuditAreaReviewTodoArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a valid face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditAreaReviewTodoSummaryPath(area)}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Area todo summary'),
+      });
+      const summary = faceAuditAreaReviewTodoSummaryFromPayload(await response.json());
+      setReviewAreaTodoSummaryReport(summary);
+      setReviewArtifactMessage(faceAuditAreaReviewTodoSummaryLabel(summary));
+      if (!response.ok && summary.issueCount === 0) {
+        setReviewArtifactMessage(`Area todo summary request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function buildFaceAuditReviewPlanArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewAreaTodoSummaryReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewPlanPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review plan'),
+      });
+      const plan = faceAuditReviewPlanFromPayload(await response.json());
+      setReviewPlanReport(plan);
+      setReviewArtifactMessage(faceAuditReviewPlanLabel(plan));
+      if (!response.ok && plan.issueCount === 0) {
+        setReviewArtifactMessage(`Review plan request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditReviewSheetArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewSheetPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Review sheet'),
+      });
+      if (!response.ok) {
+        throw new Error(`Review sheet request failed with HTTP ${response.status}`);
+      }
+      const text = await response.text();
+      downloadTextArtifact(
+        faceAuditReviewSheetFileName(),
+        text,
+        response.headers.get('content-type') ?? 'text/tab-separated-values',
+      );
+      setReviewArtifactMessage(faceAuditReviewSheetDownloadLabel(
+        response.headers.get('x-face-audit-row-count'),
+        response.headers.get('x-face-audit-review-fingerprint'),
+      ));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditAreaReviewSheetArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a valid face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditAreaReviewSheetPath(area)}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Area review sheet'),
+      });
+      if (!response.ok) {
+        throw new Error(`Area review sheet request failed with HTTP ${response.status}`);
+      }
+      const text = await response.text();
+      downloadTextArtifact(
+        faceAuditAreaReviewSheetFileName(area),
+        text,
+        response.headers.get('content-type') ?? 'text/tab-separated-values',
+      );
+      setReviewArtifactMessage(faceAuditAreaReviewSheetDownloadLabel(
+        area,
+        response.headers.get('x-face-audit-row-count'),
+        response.headers.get('x-face-audit-review-fingerprint'),
+      ));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function applyFaceAuditReviewSheetArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      let artifactPayload: unknown;
+      try {
+        artifactPayload = JSON.parse(mergeArtifactText) as unknown;
+      } catch {
+        throw new Error('Review sheet import artifact input must be valid JSON');
+      }
+      if (reviewSheetImportText.trim().length === 0) {
+        throw new Error('Review sheet import TSV is required');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditReviewSheetImportPath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          artifacts: artifactPayload,
+          reviewSheetTsv: reviewSheetImportText,
+        }),
+      });
+      const payload = await response.json() as unknown;
+      const report = isRecord(payload) && isRecord(payload.faceAuditReviewSheetImport)
+        ? payload.faceAuditReviewSheetImport
+        : undefined;
+      if (!response.ok) {
+        const issueCount = typeof report?.issueCount === 'number' ? report.issueCount : 0;
+        throw new Error(`Review sheet import failed with ${issueCount} issue(s)`);
+      }
+      const review = isRecord(payload) && isRecord(payload.faceAuditReview)
+        ? payload.faceAuditReview
+        : isRecord(report?.review)
+          ? report.review
+          : undefined;
+      if (!review) {
+        throw new Error('Invalid face-audit review sheet import payload');
+      }
+      const reviewText = `${JSON.stringify(review, null, 2)}\n`;
+      setReviewArtifactText(reviewText);
+      downloadTextArtifact(faceAuditReviewFromSheetFileName(), reviewText, 'application/json');
+      const appliedItemCount = typeof report?.appliedItemCount === 'number'
+        ? report.appliedItemCount
+        : undefined;
+      const reviewFingerprint = typeof report?.reviewFingerprint === 'string'
+        ? report.reviewFingerprint
+        : undefined;
+      setReviewArtifactMessage(faceAuditReviewSheetImportDownloadLabel(appliedItemCount, reviewFingerprint));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditReviewerInstructionsArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewerInstructionsPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Reviewer instructions'),
+      });
+      if (!response.ok) {
+        throw new Error(`Reviewer instructions request failed with HTTP ${response.status}`);
+      }
+      const text = await response.text();
+      downloadTextArtifact(
+        faceAuditReviewerInstructionsFileName(),
+        text,
+        response.headers.get('content-type') ?? 'text/markdown',
+      );
+      setReviewArtifactMessage(faceAuditReviewerInstructionsDownloadLabel(
+        response.headers.get('x-face-audit-review-fingerprint'),
+      ));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function downloadFaceAuditAreaReviewerInstructionsArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a valid face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditAreaReviewerInstructionsPath(area)}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Area reviewer instructions'),
+      });
+      if (!response.ok) {
+        throw new Error(`Area reviewer instructions request failed with HTTP ${response.status}`);
+      }
+      const text = await response.text();
+      downloadTextArtifact(
+        faceAuditAreaReviewerInstructionsFileName(area),
+        text,
+        response.headers.get('content-type') ?? 'text/markdown',
+      );
+      setReviewArtifactMessage(faceAuditAreaReviewerInstructionsDownloadLabel(
+        area,
+        response.headers.get('x-face-audit-review-fingerprint'),
+      ));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function buildFaceAuditReviewerHandoffArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const response = await fetch(`${serverUrl}${faceAuditReviewerHandoffPath()}`, {
+        ...faceAuditReviewArtifactRequestOptions(mergeArtifactText, 'Reviewer handoff'),
+      });
+      const payload = await response.json() as unknown;
+      const handoff = faceAuditReviewerHandoffFromPayload(payload);
+      setReviewHandoffReport(handoff);
+      if (response.ok) {
+        const handoffArtifact = isRecord(payload) && isRecord(payload.faceAuditReviewerHandoff)
+          ? payload.faceAuditReviewerHandoff
+          : undefined;
+        if (!handoffArtifact) {
+          throw new Error('Invalid face-audit reviewer handoff payload');
+        }
+        downloadTextArtifact(
+          faceAuditReviewerHandoffFileName(),
+          `${JSON.stringify(handoffArtifact, null, 2)}\n`,
+          'application/json',
+        );
+        setReviewArtifactMessage(
+          `${faceAuditReviewerHandoffDownloadLabel(handoff)}. ${faceAuditReviewerHandoffLabel(handoff)}`,
+        );
+        return;
+      }
+      setReviewArtifactMessage(faceAuditReviewerHandoffLabel(handoff));
+      if (!response.ok && handoff.issueCount === 0) {
+        setReviewArtifactMessage(`Reviewer handoff request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function verifyFaceAuditReviewerHandoffArtifact() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      let artifactPayload: unknown;
+      try {
+        artifactPayload = JSON.parse(mergeArtifactText) as unknown;
+      } catch {
+        throw new Error('Reviewer handoff artifact input must be valid JSON');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditReviewerHandoffVerifyPath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(artifactPayload),
+      });
+      const validation = faceAuditReviewerHandoffValidationFromPayload(await response.json());
+      setReviewHandoffValidation(validation);
+      if (validation.handoff) {
+        setReviewHandoffReport(validation.handoff);
+      }
+      setReviewArtifactMessage(faceAuditReviewerHandoffValidationLabel(validation));
+      if (!response.ok && validation.issueCount === 0) {
+        setReviewArtifactMessage(`Reviewer handoff verification failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function summarizeFaceAuditReviewerHandoffResponseArtifacts() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      let handoffPayload: unknown;
+      let returnedPayload: unknown;
+      try {
+        handoffPayload = JSON.parse(reviewArtifactText) as unknown;
+      } catch {
+        throw new Error('Reviewer handoff JSON must be valid');
+      }
+      try {
+        returnedPayload = JSON.parse(mergeArtifactText) as unknown;
+      } catch {
+        throw new Error('Returned area artifact input must be valid JSON');
+      }
+      const returnedArtifacts = reviewArtifactsFromPayload(returnedPayload);
+      if (!returnedArtifacts) {
+        throw new Error('Returned area artifact input must be a JSON array or an object with an artifacts array');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditReviewerHandoffResponsePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          handoff: handoffPayload,
+          artifacts: returnedArtifacts,
+        }),
+      });
+      const handoffResponse = faceAuditReviewerHandoffResponseFromPayload(await response.json());
+      setReviewHandoffResponse(handoffResponse);
+      setReviewArtifactMessage(faceAuditReviewerHandoffResponseLabel(handoffResponse));
+      if (!response.ok && handoffResponse.issueCount === 0) {
+        setReviewArtifactMessage(`Reviewer handoff response request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  function loadFaceAuditHandoffAreaArtifact(area: FaceAuditReviewerHandoffView['areas'][number]) {
+    setSelectedReviewArea(area.area);
+    setReviewArtifactText(JSON.stringify(area.reviewArtifactPayload, null, 2));
+    setReviewValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    setReviewArtifactMessage(`Loaded ${area.area} reviewer handoff area artifact.`);
+  }
+
+  function downloadFaceAuditHandoffAreaArtifact(area: FaceAuditReviewerHandoffView['areas'][number]) {
+    downloadTextArtifact(
+      faceAuditReviewerHandoffAreaFileName(area.area),
+      `${JSON.stringify(area.reviewArtifactPayload, null, 2)}\n`,
+      'application/json',
+    );
+    setReviewArtifactMessage(faceAuditReviewerHandoffAreaDownloadLabel(area));
+  }
+
+  function fillLoadedFaceAuditAreaReviewArtifact() {
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    let artifact: unknown;
+    try {
+      artifact = JSON.parse(reviewArtifactText) as unknown;
+    } catch {
+      setReviewArtifactMessage('Area review artifact must be valid JSON');
+      return;
+    }
+    const fillResult = fillFaceAuditAreaReviewArtifact(artifact, {
+      reviewer: reviewFillReviewer,
+      reviewedAt: reviewFillReviewedAt,
+      evidenceSourceId: reviewFillEvidenceSourceId,
+      evidenceSourceLabel: reviewFillEvidenceSourceLabel,
+      evidenceSourceType: reviewFillEvidenceSourceType,
+      evidenceSourceCitation: reviewFillEvidenceSourceCitation,
+      evidenceSourceLocator: reviewFillEvidenceSourceLocator,
+      evidenceSourceContentHash: reviewFillEvidenceSourceContentHash,
+      evidenceSourceNotes: '',
+      evidenceRefScope: reviewFillEvidenceRefScope,
+      reviewStatus: reviewFillStatus,
+      itemNotes: reviewFillItemNotes,
+    });
+    if (!fillResult.ok) {
+      setReviewArtifactMessage(fillResult.error);
+      return;
+    }
+    setReviewArtifactText(JSON.stringify(fillResult.artifact, null, 2));
+    setReviewArtifactMessage(`Filled ${fillResult.area} area review artifact with ${fillResult.itemCount} reviewed item(s).`);
+  }
+
+  function faceAuditSourceIdFromInputs(): string {
+    if (evidenceSourceArtifactText.trim().length > 0) {
+      let artifact: unknown;
+      try {
+        artifact = JSON.parse(evidenceSourceArtifactText) as unknown;
+      } catch {
+        return reviewFillEvidenceSourceId;
+      }
+      return faceAuditEvidenceSourceFromPayload(artifact, selectedEvidenceSourceArtifactId)?.id ??
+        reviewFillEvidenceSourceId;
+    }
+    return reviewFillEvidenceSourceId;
+  }
+
+  function faceAuditMatchSourceArtifactFromInputs() {
+    if (evidenceSourceArtifactText.trim().length > 0) {
+      let artifact: unknown;
+      try {
+        artifact = JSON.parse(evidenceSourceArtifactText) as unknown;
+      } catch {
+        throw new Error('Evidence source artifact JSON must be valid');
+      }
+      const evidenceSources = faceAuditEvidenceSourcesFromPayload(artifact);
+      if (evidenceSources === undefined || evidenceSources.length === 0) {
+        throw new Error('Evidence source artifact must include at least one valid evidence source');
+      }
+      return {evidenceSources};
+    }
+    const evidenceSource: Record<string, unknown> = {
+      id: reviewFillEvidenceSourceId,
+      label: reviewFillEvidenceSourceLabel,
+      sourceType: reviewFillEvidenceSourceType,
+      citation: reviewFillEvidenceSourceCitation,
+      notes: '',
+    };
+    if (reviewFillEvidenceSourceLocator.trim().length > 0) {
+      evidenceSource.locator = reviewFillEvidenceSourceLocator;
+    }
+    if (reviewFillEvidenceSourceContentHash.trim().length > 0) {
+      evidenceSource.contentHash = reviewFillEvidenceSourceContentHash;
+    }
+    return {evidenceSources: [evidenceSource]};
+  }
+
+  function reviewFillEvidenceRefMode() {
+    return reviewFillEvidenceRefScope === 'item' ? 'items' : 'area';
+  }
+
+  function setFaceAuditMatchSourceIdForArea(area: FaceAuditArea, sourceId: string) {
+    setReviewMatchSourceIdsByArea((previous) => ({
+      ...previous,
+      [area]: sourceId,
+    }));
+  }
+
+  function useFaceAuditMatchSourceIdForEveryArea() {
+    const sourceIdsByArea = {} as Record<FaceAuditArea, string>;
+    for (const area of FACE_AUDIT_AREAS) {
+      sourceIdsByArea[area] = reviewMatchFallbackSourceId;
+    }
+    setReviewMatchSourceIdsByArea(sourceIdsByArea);
+  }
+
+  async function requestFaceAuditSourceIdsByAreaTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const sourceArtifact = faceAuditMatchSourceArtifactFromInputs();
+      const defaultSourceId = faceAuditSourceIdFromInputs();
+      const sourceIdsByArea = faceAuditSourceIdsByAreaPayload(reviewMatchSourceIdsByArea, defaultSourceId);
+      if (sourceIdsByArea === undefined) {
+        throw new Error('Select a default evidence source id before generating source ids by area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditSourceIdsByAreaTemplatePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          sourceArtifact,
+          defaultSourceId,
+          sourceIdsByArea,
+        }),
+      });
+      const payload = await response.json();
+      const generated = faceAuditSourceIdsByAreaFromPayload(payload);
+      if (!response.ok || generated === undefined) {
+        const validation = isRecord(payload) && isRecord(payload.faceAuditSourceIdsByAreaTemplateValidation)
+          ? payload.faceAuditSourceIdsByAreaTemplateValidation
+          : undefined;
+        const issues = isRecord(validation) && Array.isArray(validation.issues)
+          ? validation.issues
+            .filter(isRecord)
+            .map((issue) => `${String(issue.field)}: ${String(issue.message)}`)
+          : [`HTTP ${response.status}`];
+        throw new Error(issues.join('; '));
+      }
+      setReviewMatchSourceIdsByArea(generated);
+      setReviewArtifactText(JSON.stringify(generated, null, 2));
+      setReviewArtifactMessage('Generated source ids by area template.');
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  function useFaceAuditSourceIdsByAreaFromReviewArtifactText() {
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const payload = JSON.parse(reviewArtifactText) as unknown;
+      const sourceIdsByArea = faceAuditSourceIdsByAreaFromPayload(payload);
+      if (sourceIdsByArea === undefined) {
+        throw new Error('Review artifact JSON must be a full source ids by area map');
+      }
+      setReviewMatchSourceIdsByArea(sourceIdsByArea);
+      setReviewArtifactMessage('Loaded source ids by area template.');
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function generateFaceAuditEvidenceSourceArtifact(files: FileList | null) {
+    setEvidenceSourceArtifactLoading(true);
+    setEvidenceSourceArtifactMessage(undefined);
+    try {
+      const selectedFiles = files ? [...files] : [];
+      if (selectedFiles.length === 0) {
+        throw new Error('Select at least one official component evidence file');
+      }
+      const sourceFiles: FaceAuditEvidenceSourceTemplateFileView[] = await Promise.all(
+        selectedFiles.map(async (file) => ({
+          locator: file.webkitRelativePath || file.name,
+          label: file.name,
+          contentHash: `sha256:${hexFromArrayBuffer(await crypto.subtle.digest('SHA-256', await file.arrayBuffer()))}`,
+        })),
+      );
+      const result = buildFaceAuditEvidenceSourceTemplateArtifact(reviewFillEvidenceSourceType, sourceFiles);
+      if (!result.ok) {
+        throw new Error(result.error);
+      }
+      setEvidenceSourceArtifactText(JSON.stringify(result.artifact, null, 2));
+      const firstSource = result.artifact.evidenceSources[0];
+      if (firstSource) {
+        setSelectedEvidenceSourceArtifactId(firstSource.id);
+        setReviewFillEvidenceSourceId(firstSource.id);
+        setReviewFillEvidenceSourceLabel(firstSource.label);
+        setReviewFillEvidenceSourceCitation(firstSource.citation);
+        setReviewFillEvidenceSourceLocator(firstSource.locator);
+        setReviewFillEvidenceSourceContentHash(firstSource.contentHash);
+      }
+      setEvidenceSourceArtifactMessage(`Generated ${faceAuditEvidenceSourceTemplateLabel(result.artifact)}.`);
+    } catch (caught) {
+      setEvidenceSourceArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setEvidenceSourceArtifactLoading(false);
+    }
+  }
+
+  function useFirstFaceAuditEvidenceSourceFromArtifact() {
+    setEvidenceSourceArtifactMessage(undefined);
+    try {
+      const artifact = JSON.parse(evidenceSourceArtifactText) as unknown;
+      const selectedSource = faceAuditEvidenceSourceFromPayload(artifact, selectedEvidenceSourceArtifactId);
+      if (!selectedSource) {
+        throw new Error('Evidence source artifact must include at least one valid evidence source');
+      }
+      setSelectedEvidenceSourceArtifactId(selectedSource.id);
+      setReviewFillEvidenceSourceId(selectedSource.id);
+      setReviewFillEvidenceSourceLabel(selectedSource.label);
+      setReviewFillEvidenceSourceType(selectedSource.sourceType);
+      setReviewFillEvidenceSourceCitation(selectedSource.citation);
+      setReviewFillEvidenceSourceLocator(selectedSource.locator ?? '');
+      setReviewFillEvidenceSourceContentHash(selectedSource.contentHash ?? '');
+      setEvidenceSourceArtifactMessage(`Loaded evidence source ${selectedSource.id} from artifact.`);
+    } catch (caught) {
+      setEvidenceSourceArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    }
+  }
+
+  async function requestFaceAuditEvidenceRefTemplate() {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setEvidenceRefTemplate(undefined);
+    try {
+      const area = faceAuditReviewAreaName(selectedReviewArea);
+      if (!area) {
+        throw new Error('Select a known face-audit area');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditEvidenceRefTemplatePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          sourceId: faceAuditSourceIdFromInputs(),
+          area,
+          mode: reviewFillEvidenceRefMode(),
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        const validation = isRecord(payload) && isRecord(payload.faceAuditEvidenceRefTemplateValidation)
+          ? payload.faceAuditEvidenceRefTemplateValidation
+          : undefined;
+        const issues = isRecord(validation) && Array.isArray(validation.issues)
+          ? validation.issues
+            .filter(isRecord)
+            .map((issue) => `${String(issue.field)}: ${String(issue.message)}`)
+          : [`HTTP ${response.status}`];
+        throw new Error(issues.join('; '));
+      }
+      const template = faceAuditEvidenceRefTemplateFromPayload(payload);
+      setEvidenceRefTemplate(template);
+      setReviewArtifactMessage(faceAuditEvidenceRefTemplateLabel(template));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function buildFaceAuditMatchReviewArtifact(scope: 'area' | 'full') {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      const area = scope === 'area' ? faceAuditReviewAreaName(selectedReviewArea) : undefined;
+      if (scope === 'area' && !area) {
+        throw new Error('Select a known face-audit area');
+      }
+      const sourceArtifact = faceAuditMatchSourceArtifactFromInputs();
+      const sourceId = faceAuditSourceIdFromInputs();
+      const sourceIdsByArea = scope === 'full'
+        ? faceAuditSourceIdsByAreaPayload(reviewMatchSourceIdsByArea, sourceId)
+        : undefined;
+      const response = await fetch(`${serverUrl}${faceAuditReviewMatchPath(area)}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify({
+          sourceArtifact,
+          sourceId,
+          ...(sourceIdsByArea === undefined ? {} : {sourceIdsByArea}),
+          reviewer: reviewFillReviewer,
+          reviewedAt: reviewFillReviewedAt,
+          mode: reviewFillEvidenceRefMode(),
+        }),
+      });
+      const payload = await response.json();
+      const validationPayload = isRecord(payload) && isRecord(payload.faceAuditAreaReviewValidation)
+        ? {faceAuditReviewValidation: payload.faceAuditAreaReviewValidation}
+        : payload;
+      const validation = faceAuditReviewValidationFromPayload(validationPayload);
+      setReviewValidation(validation);
+      if (!response.ok) {
+        setReviewArtifactMessage(faceAuditReviewValidationLabel(validation));
+        return;
+      }
+      if (scope === 'area') {
+        const areaReview = faceAuditAreaReviewTemplateFromPayload(payload);
+        if (!areaReview || !isRecord(payload) || !isRecord(payload.faceAuditAreaReview)) {
+          throw new Error('Invalid face-audit area match artifact payload');
+        }
+        setReviewArtifactText(JSON.stringify(payload.faceAuditAreaReview, null, 2));
+        setReviewArtifactMessage(`Generated ${areaReview.area} match artifact. ${faceAuditReviewValidationLabel(validation)}`);
+        return;
+      }
+      const fullReview = faceAuditReviewTemplateFromPayload(payload);
+      if (!fullReview || !isRecord(payload) || !isRecord(payload.faceAuditReview)) {
+        throw new Error('Invalid face-audit full match artifact payload');
+      }
+      setReviewArtifactText(JSON.stringify(payload.faceAuditReview, null, 2));
+      setReviewArtifactMessage(`Generated full match artifact. ${faceAuditReviewValidationLabel(validation)}`);
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function submitFaceAuditReviewArtifact(type: FaceAuditReviewSubmissionType) {
+    setReviewArtifactLoading(true);
+    setReviewArtifactMessage(undefined);
+    setReviewValidation(undefined);
+    setReviewStatusReport(undefined);
+    setReviewTodoReport(undefined);
+    setReviewPlanReport(undefined);
+    setReviewHandoffReport(undefined);
+    setEvidenceRefTemplate(undefined);
+    setReviewHandoffValidation(undefined);
+    setReviewHandoffResponse(undefined);
+    try {
+      let artifact: unknown;
+      try {
+        artifact = JSON.parse(reviewArtifactText) as unknown;
+      } catch {
+        throw new Error('Review artifact must be valid JSON');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditReviewSubmissionPath(type)}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(artifact),
+      });
+      const payload = await response.json();
+      if (type === 'lock-artifact' && response.ok) {
+        const lockArtifact = faceAuditLockArtifactFromPayload(payload);
+        if (!lockArtifact) {
+          throw new Error('Invalid face-audit lock artifact payload');
+        }
+        setLockArtifactText(JSON.stringify(payload.faceAuditLockArtifact, null, 2));
+        setLockArtifactValidation(undefined);
+        setReleaseGate(undefined);
+        setLockArtifactMessage(`Generated ${faceAuditLockArtifactLabel(lockArtifact)}`);
+        setReviewArtifactMessage(`Lock artifact generated. ${faceAuditLockArtifactLabel(lockArtifact)}`);
+        return;
+      }
+      const validation = faceAuditReviewValidationFromPayload(payload);
+      setReviewValidation(validation);
+      setReviewArtifactMessage(faceAuditReviewSubmissionLabel(type, validation));
+    } catch (caught) {
+      setReviewArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setReviewArtifactLoading(false);
+    }
+  }
+
+  async function verifyFaceAuditLockArtifact() {
+    setLockArtifactLoading(true);
+    setLockArtifactMessage(undefined);
+    setLockArtifactValidation(undefined);
+    setReleaseGate(undefined);
+    try {
+      let artifact: unknown;
+      try {
+        artifact = JSON.parse(lockArtifactText) as unknown;
+      } catch {
+        throw new Error('Lock artifact must be valid JSON');
+      }
+      const response = await fetch(`${serverUrl}${faceAuditLockArtifactVerifyPath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(artifact),
+      });
+      const validation = faceAuditLockArtifactValidationFromPayload(await response.json());
+      setLockArtifactValidation(validation);
+      setLockArtifactMessage(faceAuditLockArtifactValidationLabel(validation));
+    } catch (caught) {
+      setLockArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLockArtifactLoading(false);
+    }
+  }
+
+  async function checkFaceAuditReleaseGate() {
+    setLockArtifactLoading(true);
+    setLockArtifactMessage(undefined);
+    setLockArtifactValidation(undefined);
+    setReleaseGate(undefined);
+    try {
+      let requestBody: Record<string, unknown> = {};
+      if (lockArtifactText.trim().length > 0) {
+        let artifact: unknown;
+        try {
+          artifact = JSON.parse(lockArtifactText) as unknown;
+        } catch {
+          throw new Error('Lock artifact must be valid JSON');
+        }
+        requestBody = {lockArtifact: artifact};
+      }
+      const response = await fetch(`${serverUrl}${faceAuditReleaseGatePath()}`, {
+        method: 'POST',
+        headers: {'content-type': 'application/json'},
+        body: JSON.stringify(requestBody),
+      });
+      const gate = faceAuditStaticLockGateFromPayload(await response.json());
+      setReleaseGate(gate);
+      setLockArtifactValidation(gate.lockArtifactValidation);
+      setLockArtifactMessage(faceAuditStaticLockGateLabel(gate));
+      if (!response.ok && gate.issueCount === 0) {
+        setLockArtifactMessage(`Release gate request failed with HTTP ${response.status}`);
+      }
+    } catch (caught) {
+      setLockArtifactMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setLockArtifactLoading(false);
+    }
+  }
+
+  return (
+    <section>
+      <h2>Rules Data Face Audit</h2>
+      <button type="button" onClick={() => void loadFaceAuditChecklist()} disabled={loading}>
+        {loading ? 'Loading checklist' : 'Refresh checklist'}
+      </button>
+      <button type="button" onClick={clearReviewedItems} disabled={reviewedItemKeys.length === 0}>
+        Clear reviewed
+      </button>
+      {error && <div>{error}</div>}
+      {checklist.areas.length === 0 ? (
+        <div>No checklist loaded.</div>
+      ) : (
+        <>
+          <div>Total checklist items: {totalItems}</div>
+          <div>{faceAuditChecklistIdentityLabel(checklist)}</div>
+          {checklist.checklistItemCount !== undefined && (
+            <div>Checklist export item count: {checklist.checklistItemCount}</div>
+          )}
+          <div>Reviewed checklist items: {faceAuditProgressLabel(progress)}</div>
+          <div>
+            <button type="button" onClick={exportReviewedItems}>Export progress</button>
+            <button type="button" onClick={importReviewedItems}>Import progress</button>
+          </div>
+          <label>
+            Progress artifact JSON
+            <textarea
+              rows={8}
+              value={progressArtifactText}
+              onChange={(event) => setProgressArtifactText(event.target.value)}
+            />
+          </label>
+          {progressArtifactMessage && <div>{progressArtifactMessage}</div>}
+          <div>
+            <label>
+              Area review template
+              <select
+                value={selectedReviewArea}
+                onChange={(event) => {
+                  setSelectedReviewArea(event.target.value);
+                  setReviewAreaTodoSummaryReport(undefined);
+                }}
+              >
+                {checklist.areas.map((summary) => (
+                  <option key={summary.area} value={summary.area}>
+                    {summary.area}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => void loadFaceAuditReviewTemplate()}
+              disabled={reviewArtifactLoading}
+            >
+              {reviewArtifactLoading ? 'Working with review artifact' : 'Load review template'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void loadFaceAuditAreaReviewTemplate()}
+              disabled={reviewArtifactLoading || checklist.areas.length === 0}
+            >
+              Load area template
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitFaceAuditReviewArtifact('validate')}
+              disabled={reviewArtifactLoading || reviewArtifactText.trim().length === 0}
+            >
+              Validate review artifact
+            </button>
+            <button
+              type="button"
+              onClick={importReviewArtifactProgress}
+              disabled={reviewArtifactLoading || reviewArtifactText.trim().length === 0}
+            >
+              Import review progress
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitFaceAuditReviewArtifact('ready')}
+              disabled={reviewArtifactLoading || reviewArtifactText.trim().length === 0}
+            >
+              Ready check
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitFaceAuditReviewArtifact('lock-preview')}
+              disabled={reviewArtifactLoading || reviewArtifactText.trim().length === 0}
+            >
+              Lock preview
+            </button>
+            <button
+              type="button"
+              onClick={() => void submitFaceAuditReviewArtifact('lock-artifact')}
+              disabled={reviewArtifactLoading || reviewArtifactText.trim().length === 0}
+            >
+              Generate lock artifact
+            </button>
+          </div>
+          <label>
+            Review artifacts to merge JSON
+            <textarea
+              rows={8}
+              value={mergeArtifactText}
+              onChange={(event) => {
+                setMergeArtifactText(event.target.value);
+                setReviewStatusReport(undefined);
+                setReviewTodoReport(undefined);
+                setReviewAreaTodoSummaryReport(undefined);
+                setReviewPlanReport(undefined);
+                setReviewHandoffReport(undefined);
+                setEvidenceRefTemplate(undefined);
+                setReviewHandoffValidation(undefined);
+                setReviewHandoffResponse(undefined);
+              }}
+            />
+          </label>
+          <label>
+            Review sheet TSV to apply
+            <textarea
+              rows={8}
+              value={reviewSheetImportText}
+              onChange={(event) => {
+                setReviewSheetImportText(event.target.value);
+                setReviewStatusReport(undefined);
+                setReviewTodoReport(undefined);
+                setReviewAreaTodoSummaryReport(undefined);
+                setReviewPlanReport(undefined);
+                setReviewHandoffReport(undefined);
+                setReviewHandoffValidation(undefined);
+                setReviewHandoffResponse(undefined);
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            onClick={() => void mergeFaceAuditReviewArtifacts()}
+            disabled={reviewArtifactLoading || mergeArtifactText.trim().length === 0}
+          >
+            Merge review artifacts
+          </button>
+          <button
+            type="button"
+            onClick={() => void summarizeFaceAuditReviewArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Summarize review status
+          </button>
+          <button
+            type="button"
+            onClick={() => void summarizeFaceAuditReviewTodoArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Summarize review todo
+          </button>
+          <button
+            type="button"
+            onClick={() => void summarizeFaceAuditAreaReviewTodoArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Summarize area todo
+          </button>
+          <button
+            type="button"
+            onClick={() => void buildFaceAuditReviewPlanArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Build review plan
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadFaceAuditReviewSheetArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Download review sheet
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadFaceAuditAreaReviewSheetArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            Download area review sheet
+          </button>
+          <button
+            type="button"
+            onClick={() => void applyFaceAuditReviewSheetArtifacts()}
+            disabled={
+              reviewArtifactLoading ||
+              mergeArtifactText.trim().length === 0 ||
+              reviewSheetImportText.trim().length === 0
+            }
+          >
+            Apply review sheet
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadFaceAuditReviewerInstructionsArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Download reviewer instructions
+          </button>
+          <button
+            type="button"
+            onClick={() => void downloadFaceAuditAreaReviewerInstructionsArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            Download area reviewer instructions
+          </button>
+          <button
+            type="button"
+            onClick={() => void buildFaceAuditReviewerHandoffArtifacts()}
+            disabled={reviewArtifactLoading}
+          >
+            Build reviewer handoff
+          </button>
+          <button
+            type="button"
+            onClick={() => void verifyFaceAuditReviewerHandoffArtifact()}
+            disabled={reviewArtifactLoading || mergeArtifactText.trim().length === 0}
+          >
+            Verify reviewer handoff
+          </button>
+          <button
+            type="button"
+            onClick={() => void summarizeFaceAuditReviewerHandoffResponseArtifacts()}
+            disabled={
+              reviewArtifactLoading ||
+              reviewArtifactText.trim().length === 0 ||
+              mergeArtifactText.trim().length === 0
+            }
+          >
+            Summarize handoff response
+          </button>
+          <div>
+            <label>
+              Reviewer
+              <input
+                value={reviewFillReviewer}
+                onChange={(event) => setReviewFillReviewer(event.target.value)}
+              />
+            </label>
+            <label>
+              Reviewed at
+              <input
+                value={reviewFillReviewedAt}
+                onChange={(event) => setReviewFillReviewedAt(event.target.value)}
+              />
+            </label>
+            <label>
+              Review status
+              <select
+                value={reviewFillStatus}
+                onChange={(event) => setReviewFillStatus(event.target.value as FaceAuditAreaReviewFillOptions['reviewStatus'])}
+              >
+                <option value="matches_official_face">matches_official_face</option>
+                <option value="differs_from_official_face">differs_from_official_face</option>
+                <option value="needs_better_reference">needs_better_reference</option>
+              </select>
+            </label>
+            <label>
+              Evidence ref scope
+              <select
+                value={reviewFillEvidenceRefScope}
+                onChange={(event) =>
+                  setReviewFillEvidenceRefScope(event.target.value as NonNullable<FaceAuditAreaReviewFillOptions['evidenceRefScope']>)}
+              >
+                <option value="area">area</option>
+                <option value="item">item-specific</option>
+              </select>
+            </label>
+            <label>
+              Evidence source id
+              <input
+                value={reviewFillEvidenceSourceId}
+                onChange={(event) => setReviewFillEvidenceSourceId(event.target.value)}
+              />
+            </label>
+            <label>
+              Evidence source label
+              <input
+                value={reviewFillEvidenceSourceLabel}
+                onChange={(event) => setReviewFillEvidenceSourceLabel(event.target.value)}
+              />
+            </label>
+            <label>
+              Evidence source type
+              <select
+                value={reviewFillEvidenceSourceType}
+                onChange={(event) => setReviewFillEvidenceSourceType(event.target.value as FaceAuditAreaReviewFillOptions['evidenceSourceType'])}
+              >
+                <option value="official_physical_component">official_physical_component</option>
+                <option value="official_high_res_component_image">official_high_res_component_image</option>
+              </select>
+            </label>
+            <label>
+              Evidence source files
+              <input
+                type="file"
+                multiple
+                onChange={(event) => void generateFaceAuditEvidenceSourceArtifact(event.target.files)}
+                disabled={evidenceSourceArtifactLoading}
+              />
+            </label>
+            <label>
+              Evidence source citation
+              <input
+                value={reviewFillEvidenceSourceCitation}
+                onChange={(event) => setReviewFillEvidenceSourceCitation(event.target.value)}
+              />
+            </label>
+            <label>
+              Evidence source locator
+              <input
+                value={reviewFillEvidenceSourceLocator}
+                onChange={(event) => setReviewFillEvidenceSourceLocator(event.target.value)}
+              />
+            </label>
+            <label>
+              Evidence source content hash
+              <input
+                value={reviewFillEvidenceSourceContentHash}
+                onChange={(event) => setReviewFillEvidenceSourceContentHash(event.target.value)}
+              />
+            </label>
+            <label>
+              Evidence source artifact JSON
+              <textarea
+                rows={5}
+                value={evidenceSourceArtifactText}
+                onChange={(event) => {
+                  setEvidenceSourceArtifactText(event.target.value);
+                  setEvidenceSourceArtifactMessage(undefined);
+                }}
+              />
+            </label>
+            <label>
+              Evidence source from artifact
+              <select
+                value={selectedEvidenceSourceArtifactId}
+                onChange={(event) => setSelectedEvidenceSourceArtifactId(event.target.value)}
+                disabled={evidenceSourceArtifactSources.length === 0}
+              >
+                {evidenceSourceArtifactSources.length === 0 && <option value="">No valid evidence sources</option>}
+                {evidenceSourceArtifactSources.map((source) => (
+                  <option key={source.id} value={source.id}>{faceAuditEvidenceSourceLabel(source)}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={useFirstFaceAuditEvidenceSourceFromArtifact}
+              disabled={evidenceSourceArtifactText.trim().length === 0}
+            >
+              Use selected evidence source
+            </button>
+            <div>
+              <div>Full match area sources</div>
+              <button
+                type="button"
+                onClick={useFaceAuditMatchSourceIdForEveryArea}
+                disabled={reviewMatchAreaSourceOptions.length === 0}
+              >
+                Use selected source for all areas
+              </button>
+              <button
+                type="button"
+                onClick={() => void requestFaceAuditSourceIdsByAreaTemplate()}
+                disabled={reviewArtifactLoading || reviewMatchAreaSourceOptions.length === 0}
+              >
+                Generate source ids by area
+              </button>
+              <button
+                type="button"
+                onClick={useFaceAuditSourceIdsByAreaFromReviewArtifactText}
+                disabled={reviewArtifactText.trim().length === 0}
+              >
+                Use source ids by area JSON
+              </button>
+              {FACE_AUDIT_AREAS.map((area) => (
+                <label key={area}>
+                  {area}
+                  <select
+                    value={reviewMatchSourceIdsByArea[area] ?? reviewMatchFallbackSourceId}
+                    onChange={(event) => setFaceAuditMatchSourceIdForArea(area, event.target.value)}
+                    disabled={reviewMatchAreaSourceOptions.length === 0}
+                  >
+                    {reviewMatchAreaSourceOptions.length === 0 && <option value="">No valid evidence sources</option>}
+                    {reviewMatchAreaSourceOptions.map((source) => (
+                      <option key={source.id} value={source.id}>{faceAuditEvidenceSourceLabel(source)}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+            {evidenceSourceArtifactMessage && <div>{evidenceSourceArtifactMessage}</div>}
+            <label>
+              Item notes
+              <textarea
+                rows={3}
+                value={reviewFillItemNotes}
+                onChange={(event) => setReviewFillItemNotes(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              onClick={fillLoadedFaceAuditAreaReviewArtifact}
+              disabled={reviewArtifactText.trim().length === 0}
+            >
+              Fill loaded area artifact
+            </button>
+            <button
+              type="button"
+              onClick={() => void requestFaceAuditEvidenceRefTemplate()}
+              disabled={reviewArtifactLoading}
+            >
+              Generate evidence refs
+            </button>
+            <button
+              type="button"
+              onClick={() => void buildFaceAuditMatchReviewArtifact('area')}
+              disabled={reviewArtifactLoading}
+            >
+              Build selected area match artifact
+            </button>
+            <button
+              type="button"
+              onClick={() => void buildFaceAuditMatchReviewArtifact('full')}
+              disabled={reviewArtifactLoading}
+            >
+              Build full match artifact
+            </button>
+          </div>
+          <label>
+            Review artifact JSON
+            <textarea
+              rows={8}
+              value={reviewArtifactText}
+              onChange={(event) => {
+                setReviewArtifactText(event.target.value);
+                setReviewValidation(undefined);
+                setEvidenceRefTemplate(undefined);
+                setReviewHandoffResponse(undefined);
+                setReviewPlanReport(undefined);
+              }}
+            />
+          </label>
+          {reviewArtifactMessage && <div>{reviewArtifactMessage}</div>}
+          {evidenceRefTemplate && (
+            <div>
+              <div>{faceAuditEvidenceRefTemplateLabel(evidenceRefTemplate)}</div>
+              {visibleEvidenceRefs.length > 0 && (
+                <ul>
+                  {visibleEvidenceRefs.map((evidenceRef) => (
+                    <li key={evidenceRef}>{evidenceRef}</li>
+                  ))}
+                </ul>
+              )}
+              {evidenceRefTemplate.evidenceRefCount > visibleEvidenceRefs.length && (
+                <div>{evidenceRefTemplate.evidenceRefCount - visibleEvidenceRefs.length} more evidence ref(s) omitted.</div>
+              )}
+            </div>
+          )}
+          {reviewStatusReport && reviewStatusReport.areaProgress.length > 0 && (
+            <div>
+              <div>Review status areas</div>
+              <div>Artifact: {reviewStatusReport.artifactType ?? 'unknown'} v{reviewStatusReport.version ?? '?'}</div>
+              {reviewStatusReport.checklistFingerprint && (
+                <div>Checklist: {reviewStatusReport.checklistFingerprint}</div>
+              )}
+              {reviewStatusReport.reviewFingerprint && (
+                <div>Review: {reviewStatusReport.reviewFingerprint}</div>
+              )}
+              {reviewStatusReport.evidenceSourceCount !== undefined && (
+                <div>
+                  Evidence sources: {reviewStatusReport.usedEvidenceSourceCount} used /{' '}
+                  {reviewStatusReport.evidenceSourceCount} declared
+                </div>
+              )}
+              {reviewStatusReport.unusedEvidenceSourceIds.length > 0 && (
+                <div>Unused evidence sources: {reviewStatusReport.unusedEvidenceSourceIds.join(', ')}</div>
+              )}
+              <div>Areas: {faceAuditAreaCompletionCountsLabel(reviewStatusReport.areaCompletionCounts)}</div>
+              <ul>
+                {reviewStatusReport.areaProgress.map((area) => (
+                  <li key={area.area}>
+                    <div>
+                      {area.area}: {area.completionStatus}; {area.reviewedItemCount} / {area.itemCount} reviewed,
+                      {' '}{area.matchingItemCount} matched,
+                      {' '}{area.differenceItemCount} differences,
+                      {' '}{area.needsReferenceItemCount} need reference,
+                      {' '}{area.unreviewedItemCount} unreviewed,
+                      {' '}{faceAuditEvidenceCoverageLabel(area)}
+                      {area.evidenceSourceIds.length > 0 && ` from ${area.evidenceSourceIds.join(', ')}`}
+                      {area.reviewers.length > 0 && ` by ${area.reviewers.join(', ')}`}
+                    </div>
+                    {(
+                      area.differenceItemKeys.length > 0 ||
+                      area.needsReferenceItemKeys.length > 0 ||
+                      area.unreviewedItemKeys.length > 0 ||
+                      area.evidenceRefs.length > 0 ||
+                      area.reviewers.length > 0 ||
+                      area.firstReviewedAt.length > 0
+                    ) && (
+                      <details>
+                        <summary>Open audit details</summary>
+                        {area.reviewers.length > 0 && (
+                          <div>Reviewers: {area.reviewers.join(', ')}</div>
+                        )}
+                        {area.firstReviewedAt.length > 0 && (
+                          <div>Reviewed: {area.firstReviewedAt} - {area.lastReviewedAt}</div>
+                        )}
+                        {area.evidenceRefs.length > 0 && (
+                          <div>Evidence refs: {area.evidenceRefs.join(', ')}</div>
+                        )}
+                        {area.differenceItemKeys.length > 0 && (
+                          <div>Differences: {area.differenceItemKeys.join(', ')}</div>
+                        )}
+                        {area.needsReferenceItemKeys.length > 0 && (
+                          <div>Need reference: {area.needsReferenceItemKeys.join(', ')}</div>
+                        )}
+                        {area.unreviewedItemKeys.length > 0 && (
+                          <div>Unreviewed: {area.unreviewedItemKeys.join(', ')}</div>
+                        )}
+                      </details>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {reviewTodoReport && (
+            <div>
+              <div>Review todo handoff</div>
+              <div>Artifact: {reviewTodoReport.artifactType ?? 'unknown'} v{reviewTodoReport.version ?? '?'}</div>
+              {reviewTodoReport.checklistFingerprint && (
+                <div>Checklist: {reviewTodoReport.checklistFingerprint}</div>
+              )}
+              {reviewTodoReport.reviewFingerprint && (
+                <div>Review: {reviewTodoReport.reviewFingerprint}</div>
+              )}
+              <div>
+                Areas: {reviewTodoReport.pendingAreaCount} unfinished, {reviewTodoReport.readyAreaCount} ready
+              </div>
+              {reviewTodoReport.commands && (
+                <details>
+                  <summary>Open full review commands</summary>
+                  <div>Template: {reviewTodoReport.commands.blankTemplate}</div>
+                  <div>Template with sources: {reviewTodoReport.commands.blankTemplateWithSources}</div>
+                  <div>Source ids by area: {reviewTodoReport.commands.sourceIdsByAreaTemplate}</div>
+                  <div>Full match: {reviewTodoReport.commands.reviewMatchTemplate}</div>
+                  <div>Full match with item refs: {reviewTodoReport.commands.reviewMatchTemplateWithItemRefs}</div>
+                  <div>Full match by area: {reviewTodoReport.commands.reviewMatchTemplateByArea}</div>
+                  <div>
+                    Full match by area with item refs:{' '}
+                    {reviewTodoReport.commands.reviewMatchTemplateByAreaWithItemRefs}
+                  </div>
+                </details>
+              )}
+              {reviewTodoReport.areas.length === 0 ? (
+                <div>No unfinished face-audit areas.</div>
+              ) : (
+                <ul>
+                  {reviewTodoReport.areas.map((area) => (
+                    <li key={area.area}>
+                      <div>{faceAuditReviewTodoAreaLabel(area)}</div>
+                      <details>
+                        <summary>Open todo details</summary>
+                        <div>Status: {area.status}; completion: {area.completionStatus}</div>
+                        <div>
+                          Counts: {area.matchingItemCount} matched,
+                          {' '}{area.differenceItemCount} differences,
+                          {' '}{area.needsReferenceItemCount} need reference,
+                          {' '}{area.unreviewedItemCount} unreviewed
+                        </div>
+                        {area.evidenceSourceIds.length > 0 && (
+                          <div>Evidence sources: {area.evidenceSourceIds.join(', ')}</div>
+                        )}
+                        {area.nextItemKeys.length > 0 && (
+                          <div>
+                            Next item keys: {area.nextItemKeys.join(', ')}
+                            {area.remainingItemKeyCount > area.nextItemKeys.length &&
+                              `, ${area.remainingItemKeyCount - area.nextItemKeys.length} more`}
+                          </div>
+                        )}
+                        <div>Template: {area.commands.blankTemplate}</div>
+                        <div>Template with sources: {area.commands.blankTemplateWithSources}</div>
+                        <div>Area match: {area.commands.areaMatchTemplate}</div>
+                        <div>Area match with item refs: {area.commands.areaMatchTemplateWithItemRefs}</div>
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {reviewAreaTodoSummaryReport && (
+            <div>
+              <div>Area todo summary</div>
+              <div>{faceAuditAreaReviewTodoSummaryLabel(reviewAreaTodoSummaryReport)}</div>
+              <div>Artifact: {reviewAreaTodoSummaryReport.artifactType ?? 'unknown'} v{reviewAreaTodoSummaryReport.version ?? '?'}</div>
+              {reviewAreaTodoSummaryReport.checklistFingerprint && (
+                <div>Checklist: {reviewAreaTodoSummaryReport.checklistFingerprint}</div>
+              )}
+              {reviewAreaTodoSummaryReport.reviewFingerprint && (
+                <div>Review: {reviewAreaTodoSummaryReport.reviewFingerprint}</div>
+              )}
+              <div>
+                Area: {reviewAreaTodoSummaryReport.area ?? selectedReviewArea};
+                {' '}completion: {reviewAreaTodoSummaryReport.completionStatus ?? 'unknown'};
+                {' '}next: {reviewAreaTodoSummaryReport.nextStep ?? 'unknown'}
+              </div>
+              <div>
+                Counts: {reviewAreaTodoSummaryReport.matchingItemCount} matched,
+                {' '}{reviewAreaTodoSummaryReport.differenceItemCount} differences,
+                {' '}{reviewAreaTodoSummaryReport.needsReferenceItemCount} need reference,
+                {' '}{reviewAreaTodoSummaryReport.unreviewedItemCount} unreviewed,
+                {' '}{reviewAreaTodoSummaryReport.remainingItemCount} remaining
+              </div>
+              <div>
+                Evidence: {reviewAreaTodoSummaryReport.evidenceRefCount} ref(s),
+                {' '}{reviewAreaTodoSummaryReport.areaLevelEvidenceRefCount} area-level,
+                {' '}{reviewAreaTodoSummaryReport.itemSpecificEvidenceRefCount} item-specific
+              </div>
+              {reviewAreaTodoSummaryReport.evidenceSourceIds.length > 0 && (
+                <div>Evidence sources: {reviewAreaTodoSummaryReport.evidenceSourceIds.join(', ')}</div>
+              )}
+            </div>
+          )}
+          {reviewPlanReport && (
+            <div>
+              <div>Review assignment plan</div>
+              <div>Artifact: {reviewPlanReport.artifactType ?? 'unknown'} v{reviewPlanReport.version ?? '?'}</div>
+              {reviewPlanReport.checklistFingerprint && (
+                <div>Checklist: {reviewPlanReport.checklistFingerprint}</div>
+              )}
+              {reviewPlanReport.reviewFingerprint && (
+                <div>Review: {reviewPlanReport.reviewFingerprint}</div>
+              )}
+              <div>
+                Areas: {reviewPlanReport.pendingAreaCount} unfinished, {reviewPlanReport.readyAreaCount} ready;
+                {' '}{reviewPlanReport.pendingItemCount} item(s) to assign
+              </div>
+              {reviewPlanReport.commands && (
+                <details>
+                  <summary>Open full review commands</summary>
+                  <div>Template: {reviewPlanReport.commands.blankTemplate}</div>
+                  <div>Template with sources: {reviewPlanReport.commands.blankTemplateWithSources}</div>
+                  <div>Source ids by area: {reviewPlanReport.commands.sourceIdsByAreaTemplate}</div>
+                  <div>Full match: {reviewPlanReport.commands.reviewMatchTemplate}</div>
+                  <div>Full match with item refs: {reviewPlanReport.commands.reviewMatchTemplateWithItemRefs}</div>
+                  <div>Full match by area: {reviewPlanReport.commands.reviewMatchTemplateByArea}</div>
+                  <div>
+                    Full match by area with item refs:{' '}
+                    {reviewPlanReport.commands.reviewMatchTemplateByAreaWithItemRefs}
+                  </div>
+                </details>
+              )}
+              {reviewPlanReport.areas.length === 0 ? (
+                <div>No unfinished face-audit items.</div>
+              ) : (
+                <ul>
+                  {reviewPlanReport.areas.map((area) => (
+                    <li key={area.area}>
+                      <div>{faceAuditReviewPlanAreaLabel(area)}</div>
+                      <details>
+                        <summary>Open plan items</summary>
+                        <div>Status: {area.status}; completion: {area.completionStatus}</div>
+                        <div>
+                          Counts: {area.matchingItemCount} matched,
+                          {' '}{area.differenceItemCount} differences,
+                          {' '}{area.needsReferenceItemCount} need reference,
+                          {' '}{area.unreviewedItemCount} unreviewed
+                        </div>
+                        {area.evidenceSourceIds.length > 0 && (
+                          <div>Evidence sources: {area.evidenceSourceIds.join(', ')}</div>
+                        )}
+                        <ul>
+                          {area.items.map((item) => (
+                            <li key={item.key}>
+                              <div>{item.key}: {item.reviewStatus}; {item.nextStep}</div>
+                              <div>{item.label}</div>
+                              {item.expectedFields.length > 0 && (
+                                <div>Expected fields: {item.expectedFields.join(', ')}</div>
+                              )}
+                              {item.evidenceRef.length > 0 && (
+                                <div>Evidence ref: {item.evidenceRef}</div>
+                              )}
+                              {item.notes.length > 0 && (
+                                <div>Notes: {item.notes}</div>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                        <div>Template: {area.commands.blankTemplate}</div>
+                        <div>Template with sources: {area.commands.blankTemplateWithSources}</div>
+                        <div>Area match: {area.commands.areaMatchTemplate}</div>
+                        <div>Area match with item refs: {area.commands.areaMatchTemplateWithItemRefs}</div>
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {reviewHandoffReport && (
+            <div>
+              <div>Reviewer handoff package</div>
+              <div>Artifact: {reviewHandoffReport.artifactType ?? 'unknown'} v{reviewHandoffReport.version ?? '?'}</div>
+              {reviewHandoffReport.checklistFingerprint && (
+                <div>Checklist: {reviewHandoffReport.checklistFingerprint}</div>
+              )}
+              {reviewHandoffReport.reviewFingerprint && (
+                <div>Review: {reviewHandoffReport.reviewFingerprint}</div>
+              )}
+              <div>
+                Areas: {reviewHandoffReport.pendingAreaCount} unfinished, {reviewHandoffReport.readyAreaCount} ready
+              </div>
+              {reviewHandoffReport.evidenceSourceCount !== undefined && (
+                <div>Evidence sources: {reviewHandoffReport.evidenceSourceCount}</div>
+              )}
+              <div>Embedded todo areas: {reviewHandoffReport.todo.pendingAreaCount} unfinished</div>
+              {reviewHandoffReport.areas.length === 0 ? (
+                <div>No unfinished face-audit area artifacts.</div>
+              ) : (
+                <ul>
+                  {reviewHandoffReport.areas.map((area) => (
+                    <li key={area.area}>
+                      <div>{faceAuditReviewTodoAreaLabel(area.todo)}</div>
+                      <div>
+                        Area artifact: {area.reviewArtifact.areaItemCount} item(s),
+                        {' '}{area.reviewArtifact.evidenceSourceCount} evidence source(s)
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => loadFaceAuditHandoffAreaArtifact(area)}
+                      >
+                        Load area artifact
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => downloadFaceAuditHandoffAreaArtifact(area)}
+                      >
+                        Download area artifact
+                      </button>
+                      <details>
+                        <summary>Open handoff details</summary>
+                        <div>Status: {area.todo.status}; completion: {area.todo.completionStatus}</div>
+                        <div>
+                          Counts: {area.todo.matchingItemCount} matched,
+                          {' '}{area.todo.differenceItemCount} differences,
+                          {' '}{area.todo.needsReferenceItemCount} need reference,
+                          {' '}{area.todo.unreviewedItemCount} unreviewed
+                        </div>
+                        {area.todo.evidenceSourceIds.length > 0 && (
+                          <div>Evidence sources: {area.todo.evidenceSourceIds.join(', ')}</div>
+                        )}
+                        {area.todo.nextItemKeys.length > 0 && (
+                          <div>
+                            Next item keys: {area.todo.nextItemKeys.join(', ')}
+                            {area.todo.remainingItemKeyCount > area.todo.nextItemKeys.length &&
+                              `, ${area.todo.remainingItemKeyCount - area.todo.nextItemKeys.length} more`}
+                          </div>
+                        )}
+                        <div>Template: {area.todo.commands.blankTemplate}</div>
+                        <div>Template with sources: {area.todo.commands.blankTemplateWithSources}</div>
+                        <div>Area match: {area.todo.commands.areaMatchTemplate}</div>
+                        <div>Area match with item refs: {area.todo.commands.areaMatchTemplateWithItemRefs}</div>
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {reviewHandoffResponse && (
+            <div>
+              <div>Reviewer handoff response</div>
+              <div>
+                Artifact: {reviewHandoffResponse.artifactType ?? 'unknown'} v{reviewHandoffResponse.version ?? '?'}
+              </div>
+              {reviewHandoffResponse.checklistFingerprint && (
+                <div>Checklist: {reviewHandoffResponse.checklistFingerprint}</div>
+              )}
+              {reviewHandoffResponse.handoffReviewFingerprint && (
+                <div>Handoff review: {reviewHandoffResponse.handoffReviewFingerprint}</div>
+              )}
+              <div>
+                Returned: {reviewHandoffResponse.acceptedAreaCount} /{' '}
+                {reviewHandoffResponse.handoffPendingAreaCount} area(s);
+                {' '}{reviewHandoffResponse.readyAreaCount} ready,
+                {' '}{reviewHandoffResponse.unfinishedReturnedAreaCount} unfinished returned,
+                {' '}{reviewHandoffResponse.missingAreaCount} missing,
+                {' '}{reviewHandoffResponse.remainingAreaCount} remaining
+              </div>
+              {reviewHandoffResponse.areas.length === 0 ? (
+                <div>No returned handoff area artifacts accepted.</div>
+              ) : (
+                <ul>
+                  {reviewHandoffResponse.areas.map((area) => (
+                    <li key={area.area}>
+                      <div>
+                        {area.area}: {area.completionStatus}; {area.reviewedItemCount} / {area.itemCount} reviewed,
+                        {' '}{area.matchingItemCount} matched,
+                        {' '}{area.differenceItemCount} differences,
+                        {' '}{area.needsReferenceItemCount} need reference,
+                        {' '}{area.unreviewedItemCount} unreviewed,
+                        {' '}{area.remainingItemCount} remaining,
+                        {' '}{area.evidenceRefCount} evidence ref(s)
+                      </div>
+                      <details>
+                        <summary>Open response details</summary>
+                        <div>Status: {area.status}</div>
+                        <div>
+                          Evidence refs: {area.areaLevelEvidenceRefCount} area-level,
+                          {' '}{area.itemSpecificEvidenceRefCount} item-specific covering
+                          {' '}{area.itemSpecificEvidenceItemCount} item(s)
+                        </div>
+                        {area.evidenceSourceIds.length > 0 && (
+                          <div>Evidence sources: {area.evidenceSourceIds.join(', ')}</div>
+                        )}
+                        {area.reviewers.length > 0 && (
+                          <div>Reviewers: {area.reviewers.join(', ')}</div>
+                        )}
+                        {area.firstReviewedAt.length > 0 && (
+                          <div>Reviewed: {area.firstReviewedAt} - {area.lastReviewedAt}</div>
+                        )}
+                      </details>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {reviewTodoReport && visibleReviewTodoIssues.length > 0 && (
+            <ul>
+              {visibleReviewTodoIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewTodoReport && reviewTodoReport.issueCount > visibleReviewTodoIssues.length && (
+            <div>{reviewTodoReport.issueCount - visibleReviewTodoIssues.length} more review todo issue(s) omitted.</div>
+          )}
+          {reviewAreaTodoSummaryReport && visibleReviewAreaTodoSummaryIssues.length > 0 && (
+            <ul>
+              {visibleReviewAreaTodoSummaryIssues.map((issue, index) => (
+                <li key={`${issue.field}-${issue.itemKey ?? 'global'}-${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewAreaTodoSummaryReport && reviewAreaTodoSummaryReport.issueCount > visibleReviewAreaTodoSummaryIssues.length && (
+            <div>
+              {reviewAreaTodoSummaryReport.issueCount - visibleReviewAreaTodoSummaryIssues.length}
+              {' '}more area todo summary issue(s) omitted.
+            </div>
+          )}
+          {reviewPlanReport && visibleReviewPlanIssues.length > 0 && (
+            <ul>
+              {visibleReviewPlanIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewPlanReport && reviewPlanReport.issueCount > visibleReviewPlanIssues.length && (
+            <div>{reviewPlanReport.issueCount - visibleReviewPlanIssues.length} more review plan issue(s) omitted.</div>
+          )}
+          {reviewHandoffReport && visibleReviewHandoffIssues.length > 0 && (
+            <ul>
+              {visibleReviewHandoffIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewHandoffReport && reviewHandoffReport.issueCount > visibleReviewHandoffIssues.length && (
+            <div>{reviewHandoffReport.issueCount - visibleReviewHandoffIssues.length} more reviewer handoff issue(s) omitted.</div>
+          )}
+          {reviewHandoffValidation && visibleReviewHandoffValidationIssues.length > 0 && (
+            <ul>
+              {visibleReviewHandoffValidationIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewHandoffValidation && reviewHandoffValidation.issueCount > visibleReviewHandoffValidationIssues.length && (
+            <div>
+              {reviewHandoffValidation.issueCount - visibleReviewHandoffValidationIssues.length}
+              {' '}more reviewer handoff validation issue(s) omitted.
+            </div>
+          )}
+          {reviewHandoffResponse && visibleReviewHandoffResponseIssues.length > 0 && (
+            <ul>
+              {visibleReviewHandoffResponseIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewHandoffResponse && reviewHandoffResponse.issueCount > visibleReviewHandoffResponseIssues.length && (
+            <div>
+              {reviewHandoffResponse.issueCount - visibleReviewHandoffResponseIssues.length}
+              {' '}more reviewer handoff response issue(s) omitted.
+            </div>
+          )}
+          {reviewValidation && visibleReviewIssues.length > 0 && (
+            <ul>
+              {visibleReviewIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {reviewValidation && reviewValidation.issueCount > visibleReviewIssues.length && (
+            <div>{reviewValidation.issueCount - visibleReviewIssues.length} more review issue(s) omitted.</div>
+          )}
+          <div>
+            <button
+              type="button"
+              onClick={() => void verifyFaceAuditLockArtifact()}
+              disabled={lockArtifactLoading || lockArtifactText.trim().length === 0}
+            >
+              {lockArtifactLoading ? 'Verifying lock artifact' : 'Verify lock artifact'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void checkFaceAuditReleaseGate()}
+              disabled={lockArtifactLoading}
+            >
+              {lockArtifactLoading ? 'Checking release gate' : 'Check release gate'}
+            </button>
+          </div>
+          <label>
+            Lock artifact JSON
+            <textarea
+              rows={8}
+              value={lockArtifactText}
+              onChange={(event) => {
+                setLockArtifactText(event.target.value);
+                setLockArtifactValidation(undefined);
+                setReleaseGate(undefined);
+                setLockArtifactMessage(undefined);
+              }}
+            />
+          </label>
+          {lockArtifactMessage && <div>{lockArtifactMessage}</div>}
+          {releaseGate && (
+            <div>
+              Release gate: {releaseGate.pendingAreaCount} pending area(s), {releaseGate.lockedAreaCount} locked area(s)
+            </div>
+          )}
+          {releaseGate && visibleReleaseGateIssues.length > 0 && (
+            <ul>
+              {visibleReleaseGateIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {releaseGate && releaseGate.issueCount > visibleReleaseGateIssues.length && (
+            <div>{releaseGate.issueCount - visibleReleaseGateIssues.length} more release gate issue(s) omitted.</div>
+          )}
+          {lockArtifactValidation && visibleLockArtifactIssues.length > 0 && (
+            <ul>
+              {visibleLockArtifactIssues.map((issue, index) => (
+                <li key={`${issue.itemKey ?? 'artifact'}:${issue.field}:${index}`}>
+                  {faceAuditReviewIssueLabel(issue)}
+                </li>
+              ))}
+            </ul>
+          )}
+          {lockArtifactValidation && lockArtifactValidation.issueCount > visibleLockArtifactIssues.length && (
+            <div>{lockArtifactValidation.issueCount - visibleLockArtifactIssues.length} more lock artifact issue(s) omitted.</div>
+          )}
+          {checklist.areas.map((summary) => {
+            const items = faceAuditItemsForArea(checklist, summary.area);
+            const areaProgress = faceAuditAreaProgress(checklist, summary, reviewedItemKeys);
+            return (
+              <details key={summary.area}>
+                <summary>{faceAuditAreaSummaryLabel(summary)} - {faceAuditProgressLabel(areaProgress)}</summary>
+                <div>Rulebook pages: {summary.rulebookPages.join(', ')}</div>
+                <div>Sources: {summary.sourceRefs.join(', ')}</div>
+                <div>Tests: {summary.coveredByTests.join(', ')}</div>
+                <div>Fields: {faceAuditFieldSummary(summary.expectedFieldNames)}</div>
+                <ul>
+                  {items.map((item) => (
+                    <li key={`${item.area}:${item.id}`}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={reviewedItemKeySet.has(faceAuditItemKey(item))}
+                          onChange={(event) => updateReviewedItem(item, event.target.checked)}
+                        />
+                        Reviewed
+                      </label>
+                      <div>{item.id}: {item.label}</div>
+                      <div>{faceAuditFieldSummary(item.expectedFields)}</div>
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            );
+          })}
+        </>
+      )}
+    </section>
+  );
+}
+
 function ConnectionPanel({
   socket,
   onReply,
@@ -274,6 +2720,7 @@ function ConnectionPanel({
   const [playerCount, setPlayerCount] = useState(2);
   const [playerNames, setPlayerNames] = useState(['Alice', 'Bob']);
   const [introductoryCanalOnly, setIntroductoryCanalOnly] = useState(false);
+  const [createSeed, setCreateSeed] = useState('');
   const [joinGameId, setJoinGameId] = useState('');
   const [joinPlayerId, setJoinPlayerId] = useState('');
   const [joinSessionToken, setJoinSessionToken] = useState('');
@@ -323,40 +2770,69 @@ function ConnectionPanel({
 
   function updatePlayerCount(nextCount: number) {
     setPlayerCount(nextCount);
-    setPlayerNames((names) => Array.from({length: nextCount}, (_, index) => names[index] ?? `Player ${index + 1}`));
+    setPlayerNames((names) => playerNamesForCount(names, nextCount));
   }
 
   function create(event: FormEvent) {
     event.preventDefault();
-    socket.emit('game:create', {playerNames, introductoryCanalOnly}, onReply);
+    const result = createGamePayload(playerNames, introductoryCanalOnly, createSeed);
+    if (!result.ok) {
+      onReply({ok: false, errors: [result.error]});
+      return;
+    }
+    socket.emit('game:create', result.payload, onReply);
   }
 
   function join(event: FormEvent) {
     event.preventDefault();
-    const playerId = joinPlayerId.trim() || undefined;
-    const sessionToken = joinSessionToken.trim() || undefined;
-    onManualJoin(playerId);
-    socket.emit('game:join', {
-      gameId: joinGameId.trim(),
-      playerId,
-      sessionToken,
-    }, onReply);
+    const result = joinGamePayload(joinGameId, joinPlayerId, joinSessionToken);
+    if (!result.ok) {
+      onReply({ok: false, errors: [result.error]});
+      return;
+    }
+    socket.emit('game:join', result.payload, (reply: SocketReply) => {
+      onReply(reply);
+      const viewerUpdate = manualJoinViewerUpdate(reply, result.payload.playerId);
+      if (viewerUpdate.apply) {
+        onManualJoin(viewerUpdate.playerId);
+      }
+    });
   }
 
   function observeGame(gameId: string) {
+    const result = joinGamePayload(gameId);
+    if (!result.ok) {
+      onReply({ok: false, errors: [result.error]});
+      return;
+    }
     setJoinGameId(gameId);
     setJoinPlayerId('');
     setJoinSessionToken('');
-    onManualJoin(undefined);
-    socket.emit('game:join', {gameId}, onReply);
+    socket.emit('game:join', result.payload, (reply: SocketReply) => {
+      onReply(reply);
+      const viewerUpdate = manualJoinViewerUpdate(reply);
+      if (viewerUpdate.apply) {
+        onManualJoin(viewerUpdate.playerId);
+      }
+    });
   }
 
   function joinSavedGameSession(gameId: string, session: PlayerSession) {
+    const result = joinGamePayload(gameId, session.playerId, session.token);
+    if (!result.ok) {
+      onReply({ok: false, errors: [result.error]});
+      return;
+    }
     setJoinGameId(gameId);
     setJoinPlayerId(session.playerId);
     setJoinSessionToken(session.token);
-    onManualJoin(session.playerId);
-    socket.emit('game:join', {gameId, playerId: session.playerId, sessionToken: session.token}, onReply);
+    socket.emit('game:join', result.payload, (reply: SocketReply) => {
+      onReply(reply);
+      const viewerUpdate = manualJoinViewerUpdate(reply, session.playerId);
+      if (viewerUpdate.apply) {
+        onManualJoin(viewerUpdate.playerId);
+      }
+    });
   }
 
   return (
@@ -387,6 +2863,14 @@ function ConnectionPanel({
             onChange={(event) => setIntroductoryCanalOnly(event.target.checked)}
           />
           Introductory Canal-only game
+        </label>
+        <label>
+          Seed
+          <input
+            value={createSeed}
+            onChange={(event) => setCreateSeed(event.target.value)}
+            placeholder="optional integer"
+          />
         </label>
         <button type="submit">Create Game</button>
       </form>
@@ -443,7 +2927,7 @@ function RoomList({
           <button type="button" onClick={() => onObserve(game.id)}>Observe {game.id}</button>
           {game.savedSessions.map((session) => (
             <button key={session.playerId} type="button" onClick={() => onJoinSession(game.id, session)}>
-              Join {game.id} as {session.playerId}
+              {savedSessionLabel(game, session)}
             </button>
           ))}
         </div>
@@ -469,9 +2953,7 @@ function GameView({
 }) {
   const pendingDecisionPlayerId = pendingDecisionPlayerIdForView(game);
   const activePlayerId = activePlayerIdForView(game);
-  const activePlayer = game.players[activePlayerId];
   const handPlayerId = handPlayerIdForView(game, viewerPlayerId);
-  const handPlayer = game.players[handPlayerId];
   const canSubmitForActivePlayer = canSubmitForActivePlayerView(game, knownSessions);
   const gameEnded = game.status === 'ended';
 
@@ -484,8 +2966,8 @@ function GameView({
       <div>Round: {game.roundNumber}</div>
       {!gameEnded && (
         <>
-          <div>{pendingDecisionPlayerId ? 'Pending player' : 'Current player'}: {activePlayer.name} ({activePlayer.id})</div>
-          <div>Viewing player: {handPlayer.name} ({handPlayer.id})</div>
+          <div>{pendingDecisionPlayerId ? 'Pending player' : 'Current player'}: {playerLabelForView(game, activePlayerId)}</div>
+          <div>Viewing player: {playerLabelForView(game, handPlayerId)}</div>
           <div>Action {game.actionIndexInTurn + 1} / {game.actionsAllowedThisTurn}</div>
         </>
       )}
@@ -519,7 +3001,7 @@ function GameOverSummary({game}: {game: GameState}) {
       <h3>Game Over</h3>
       <div>
         Winner{winners.length === 1 ? '' : 's'}: {winners.length > 0
-          ? winners.map((playerId) => `${game.players[playerId]?.name ?? playerId} (${playerId})`).join(', ')
+          ? winners.map((playerId) => playerLabelForView(game, playerId)).join(', ')
           : 'unknown'}
       </div>
       <div className="table-scroll">
@@ -534,13 +3016,13 @@ function GameOverSummary({game}: {game: GameState}) {
           </thead>
           <tbody>
             {game.turnOrder.map((playerId) => {
-              const player = game.players[playerId];
+              const row = playerTableRowForView(game, playerId);
               return (
                 <tr key={playerId}>
-                  <td>{player.name} ({playerId})</td>
-                  <td>{player.victoryPoints}</td>
-                  <td>{player.incomeTrackPosition}</td>
-                  <td>{player.cash}</td>
+                  <td>{playerLabelForView(game, playerId)}</td>
+                  <td>{row.victoryPoints}</td>
+                  <td>{row.incomeTrackPosition}</td>
+                  <td>{row.cash}</td>
                 </tr>
               );
             })}
@@ -571,7 +3053,7 @@ function LastEraScore({game}: {game: GameState}) {
             <tbody>
               {game.turnOrder.map((playerId) => (
                 <tr key={playerId}>
-                  <td>{game.players[playerId].name} ({playerId})</td>
+                  <td>{playerLabelForView(game, playerId)}</td>
                   <td>{score.linkVictoryPointsByPlayer[playerId] ?? 0}</td>
                   <td>{score.industryVictoryPointsByPlayer[playerId] ?? 0}</td>
                   <td>{score.totalVictoryPointsByPlayer[playerId] ?? 0}</td>
@@ -596,7 +3078,7 @@ function SessionSummary({
   viewerPlayerId?: string;
   joinSession: (session: PlayerSession) => void;
 }) {
-  const sessionByPlayer = new Map(knownSessions.map((session) => [session.playerId, session]));
+  const sessionByPlayer = new Map(normalizedSessionsForView(knownSessions).map((session) => [session.playerId, session]));
   const baseUrl = window.location.href;
   return (
     <section>
@@ -644,16 +3126,16 @@ function PlayersTable({game}: {game: GameState}) {
           </thead>
           <tbody>
             {game.turnOrder.map((playerId) => {
-              const player = game.players[playerId];
+              const row = playerTableRowForView(game, playerId);
               return (
-                <tr key={player.id}>
-                  <td>{player.id}</td>
-                  <td>{player.name}</td>
-                  <td>{player.cash}</td>
-                  <td>{getIncomeLevel(player.incomeTrackPosition)}</td>
-                  <td>{player.victoryPoints}</td>
-                  <td>{player.handCardIds.length}</td>
-                  <td>{player.spentThisRound}</td>
+                <tr key={row.id}>
+                  <td>{row.id}</td>
+                  <td>{row.name}</td>
+                  <td>{row.cash}</td>
+                  <td>{row.incomeLevel}</td>
+                  <td>{row.victoryPoints}</td>
+                  <td>{row.handCount}</td>
+                  <td>{row.spentThisRound}</td>
                 </tr>
               );
             })}
@@ -667,11 +3149,13 @@ function PlayersTable({game}: {game: GameState}) {
 function BoardSummary({game}: {game: GameState}) {
   const industries = getActiveIndustries(game);
   const links = getActiveLinks(game);
+  const coalMarketCubes = marketOccupiedCount(game, 'coal');
+  const ironMarketCubes = marketOccupiedCount(game, 'iron');
   return (
     <section>
       <h3>Board</h3>
-      <div>Coal market cubes: {game.markets.coal.occupiedCount}</div>
-      <div>Iron market cubes: {game.markets.iron.occupiedCount}</div>
+      <div>Coal market cubes: {coalMarketCubes}</div>
+      <div>Iron market cubes: {ironMarketCubes}</div>
       <h4>Industries</h4>
       {industries.length === 0 ? <div>No industries built.</div> : industries.map((industry) => (
         <div key={industry.id}>
@@ -687,10 +3171,12 @@ function BoardSummary({game}: {game: GameState}) {
 }
 
 function HandPanel({game, playerId}: {game: GameState; playerId: string}) {
+  const handCardIds = playerHandCardIdsForView(game, playerId);
   return (
     <section>
-      <h3>{game.players[playerId].name} Hand</h3>
-      {game.players[playerId].handCardIds.map((cardId) => {
+      <h3>{playerLabelForView(game, playerId)} Hand</h3>
+      {handCardIds.length === 0 && <div>No visible hand cards.</div>}
+      {handCardIds.map((cardId) => {
         if (isHiddenCardId(cardId)) {
           return <div key={cardId}>{cardId}: hidden card</div>;
         }
@@ -836,8 +3322,8 @@ function ActionReason({reason}: {reason?: string}) {
 }
 
 function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: string; sendCommand: (command: GameCommand) => void}) {
-  const handCardIds = game.players[playerId].handCardIds;
-  const handCardKey = handCardIds.join('|');
+  const player = game.players[playerId];
+  const handCardIds = useMemo(() => playerHandCardIdsForView(game, playerId), [game, playerId]);
   const firstCard = handCardIds[0] ?? '';
   const [cardId, setCardId] = useState(firstCard);
   const [scoutCardOne, setScoutCardOne] = useState(handCardIds[0] ?? '');
@@ -863,7 +3349,10 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
   const scoutCards = [scoutCardOne, scoutCardTwo, scoutCardThree];
   const scoutAllowed = canScout(game, playerId);
   const scoutCardOptions = scoutCards.map((_, index) => scoutCardOptionsForSelect(game, playerId, scoutCards, index));
-  const scoutOptionKey = scoutCardOptions.map((options) => options.join('|')).join('||');
+  const normalizedScoutCards = normalizeScoutCardSelection(game, playerId, scoutCards);
+  const normalizedScoutOne = normalizedScoutCards[0] ?? '';
+  const normalizedScoutTwo = normalizedScoutCards[1] ?? '';
+  const normalizedScoutThree = normalizedScoutCards[2] ?? '';
 
   useEffect(() => {
     if (!handCardIds.includes(cardId)) {
@@ -872,30 +3361,28 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
   }, [cardId, firstCard, handCardIds]);
 
   useEffect(() => {
-    const selected = [scoutCardOne, scoutCardTwo, scoutCardThree];
-    const invalidSelection =
-      !scoutAllowed ||
-      selected.some((id) => !handCardIds.includes(id)) ||
-      new Set(selected).size !== selected.length;
-    if (invalidSelection) {
-      const scoutOptions = scoutAllowed ? handCardIds : [];
-      setScoutCardOne(scoutOptions[0] ?? '');
-      setScoutCardTwo(scoutOptions[1] ?? '');
-      setScoutCardThree(scoutOptions[2] ?? '');
+    if (
+      scoutCardOne !== normalizedScoutOne ||
+      scoutCardTwo !== normalizedScoutTwo ||
+      scoutCardThree !== normalizedScoutThree
+    ) {
+      setScoutCardOne(normalizedScoutOne);
+      setScoutCardTwo(normalizedScoutTwo);
+      setScoutCardThree(normalizedScoutThree);
     }
-  }, [handCardKey, handCardIds, scoutAllowed, scoutOptionKey, scoutCardOne, scoutCardTwo, scoutCardThree]);
+  }, [
+    normalizedScoutOne,
+    normalizedScoutTwo,
+    normalizedScoutThree,
+    scoutCardOne,
+    scoutCardTwo,
+    scoutCardThree,
+  ]);
 
-  const sellableIndustries = getActiveIndustries(game)
-    .filter((industry) =>
-      industry.ownerPlayerId === playerId &&
-      !industry.flipped &&
-      (industry.industryType === 'cotton_mill' || industry.industryType === 'manufacturer' || industry.industryType === 'pottery') &&
-      canSellToMerchant(game, industry),
-    );
-  const merchantSpaces = Object.values(game.board.merchantSpaces)
-    .filter((space) => Boolean(space.merchantTileInstanceId));
+  const sellableIndustries = sellableIndustriesForPlayer(game, playerId);
+  const merchantSpaces = merchantSpacesWithTiles(game);
   const sellableIndustryIds = sellableIndustries.map((industry) => industry.id).join('|');
-  const merchantSpaceIds = merchantSpaces.map((space) => space.id).join('|');
+  const merchantSpaceKey = merchantSpaces.map((space) => `${space.id}:${space.merchantTileInstanceId ?? ''}`).join('|');
   const buildLocationOptions = buildLocationOptionsForCard(game, playerId, cardId);
   const buildLocationOptionKey = buildLocationOptions.map((location) => location.id).join('|');
   const buildIndustryOptions = locationId
@@ -903,7 +3390,7 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
     : [];
   const buildIndustryOptionKey = buildIndustryOptions.join('|');
   const selectedBuildSpecId = industryType
-    ? game.players[playerId].industryTileStacks[industryType]?.availableSpecIdsInOrder[0]
+    ? player?.industryTileStacks?.[industryType]?.availableSpecIdsInOrder[0]
     : undefined;
   const selectedBuildSpec = selectedBuildSpecId ? staticConfig.industryTileSpecs[selectedBuildSpecId] : undefined;
   const buildCoalRequired = selectedBuildSpec?.cost.coal ?? 0;
@@ -946,21 +3433,31 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
   const developIronSourcesForSubmit = optionalSources(developIronValues, developIronRequired);
   const developReason = developActionReason(game, playerId, cardId, developIndustryTypes, developIronSourcesForSubmit);
   const developCanSubmit = !developReason;
-  const developOneOptions = developOptionsForSelect(game.players[playerId], [], 0);
+  const developOneOptions = player ? developOptionsForSelect(player, [], 0) : [];
   const developOneOptionKey = developOneOptions.join('|');
-  const developTwoOptions = developOne
-    ? developOptionsForSelect(game.players[playerId], [developOne], 1)
+  const developTwoOptions = developOne && player
+    ? developOptionsForSelect(player, [developOne], 1)
     : [];
   const developTwoOptionKey = developTwoOptions.join('|');
+  const slots = industryType ? buildSlotOptionsForIndustry(game, locationId, industryType, playerId) : [];
+  const selectedBuildSlotId = slots.some((slot) => slot.id === slotId) ? slotId : slots[0]?.id ?? '';
   const buildCoalOptions = buildCoalValues.map((_, index) => resourceOptionsFromSources(
     game,
-    legalResourceSourcesForSelect(game, 'coal', locationId, buildCoalSources, index),
+    resourceSourcesForBuildSlot(
+      game,
+      selectedBuildSlotId,
+      legalResourceSourcesForSelect(game, 'coal', locationId, buildCoalSources, index),
+    ),
     buildCoalValues,
     index,
   ));
   const buildIronOptions = buildIronValues.map((_, index) => resourceOptionsFromSources(
     game,
-    legalResourceSourcesForSelect(game, 'iron', locationId, buildIronSources, index),
+    resourceSourcesForBuildSlot(
+      game,
+      selectedBuildSlotId,
+      legalResourceSourcesForSelect(game, 'iron', locationId, buildIronSources, index),
+    ),
     buildIronValues,
     index,
   ));
@@ -983,8 +3480,6 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
     0,
   );
   const networkBeerOptionKey = networkBeerOptions.map((option) => option.value).join('|');
-  const slots = industryType ? buildSlotOptionsForIndustry(game, locationId, industryType, playerId) : [];
-  const selectedBuildSlotId = slots.some((slot) => slot.id === slotId) ? slotId : slots[0]?.id ?? '';
   const buildReason = buildActionReason(
     game,
     playerId,
@@ -1081,35 +3576,9 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
 
   useEffect(() => {
     setSellSteps((current) => {
-      const desiredLength = Math.min(Math.max(current.length, 1), Math.max(sellableIndustries.length, 1));
-      const next = current.slice(0, desiredLength);
-      while (next.length < desiredLength) {
-        next.push(createSellStepDraft());
-      }
-
-      const usedIndustryIds = new Set<string>();
-      let changed = next.length !== current.length;
-      const normalized = next.map((step) => {
-        let industryId = step.industryId;
-        if (!sellableIndustries.some((industry) => industry.id === industryId) || usedIndustryIds.has(industryId)) {
-          industryId = sellableIndustries.find((industry) => !usedIndustryIds.has(industry.id))?.id ?? '';
-        }
-        if (industryId) {
-          usedIndustryIds.add(industryId);
-        }
-        const validMerchantSpaces = merchantSpacesForIndustry(industryId);
-        const merchantSpaceId = validMerchantSpaces.some((space) => space.id === step.merchantSpaceId)
-          ? step.merchantSpaceId
-          : validMerchantSpaces[0]?.id ?? '';
-        const normalizedStep = {...step, industryId, merchantSpaceId};
-        changed = changed ||
-          normalizedStep.industryId !== step.industryId ||
-          normalizedStep.merchantSpaceId !== step.merchantSpaceId;
-        return normalizedStep;
-      });
-      return changed ? normalized : current;
+      return normalizeSellStepDrafts(game, playerId, current);
     });
-  }, [merchantSpaceIds, sellableIndustryIds]);
+  }, [game, playerId, merchantSpaceKey, sellableIndustryIds]);
 
   function submitBuild(event: FormEvent) {
     event.preventDefault();
@@ -1177,36 +3646,19 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
   }
 
   function addSellStep() {
-    setSellSteps((current) => {
-      const selectedIndustryIds = new Set(current.map((step) => step.industryId).filter(Boolean));
-      const industryId = sellableIndustries.find((industry) => !selectedIndustryIds.has(industry.id))?.id ?? '';
-      if (!industryId) {
-        return current;
-      }
-      return [...current, {
-        ...createSellStepDraft(),
-        industryId,
-        merchantSpaceId: merchantSpacesForIndustry(industryId)[0]?.id ?? '',
-      }];
-    });
+    setSellSteps((current) => addSellStepDraft(game, playerId, current));
   }
 
   function removeSellStep(index: number) {
     setSellSteps((current) => current.length <= 1 ? current : current.filter((_, stepIndex) => stepIndex !== index));
   }
 
-  function sellableIndustriesForStep(index: number): IndustryInstance[] {
-    const currentIndustryId = sellSteps[index]?.industryId;
-    const selectedElsewhere = new Set(sellSteps
-      .filter((_, stepIndex) => stepIndex !== index)
-      .map((step) => step.industryId)
-      .filter(Boolean));
-    return sellableIndustries.filter((industry) => industry.id === currentIndustryId || !selectedElsewhere.has(industry.id));
+  function sellableIndustriesForStep(index: number) {
+    return sellableIndustriesForSellStep(sellableIndustries, sellSteps, index);
   }
 
   function merchantSpacesForIndustry(industryId: string) {
-    const industry = game.board.industryInstances[industryId];
-    return industry ? merchantSpaces.filter((space) => canSellToMerchantSpace(game, industry, space.id)) : [];
+    return merchantSpacesForSellIndustry(game, industryId, merchantSpaces);
   }
 
   function submitSell(event: FormEvent) {
@@ -1246,7 +3698,8 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
       <label>
         Action card
         <select value={cardId} onChange={(event) => setCardId(event.target.value)}>
-          {game.players[playerId].handCardIds.map((id) => <option key={id} value={id}>{staticConfig.cardSpecs[id]?.name ?? id}</option>)}
+          {handCardIds.length === 0 && <option value="">No hand cards</option>}
+          {handCardIds.map((id) => <option key={id} value={id}>{staticConfig.cardSpecs[id]?.name ?? id}</option>)}
         </select>
       </label>
 

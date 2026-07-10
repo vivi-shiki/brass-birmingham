@@ -11,9 +11,47 @@ import {
   resourceConsumptionReasonMatchesSource,
   victoryPointReasonMatchesDelta,
 } from '../common/eventLogValidation';
+import {
+  applyFaceAuditReviewSheet,
+  buildFaceAuditAreaReviewTodoSummary,
+  buildFaceAuditAreaReviewTemplate,
+  buildFaceAuditAreaMatchReviewArtifact,
+  buildFaceAuditAreaReviewerInstructionsReport,
+  buildFaceAuditAreaReviewSheet,
+  buildFaceAuditChecklistExport,
+  buildFaceAuditEvidenceRefTemplate,
+  buildFaceAuditLockArtifact,
+  buildFaceAuditLockPreview,
+  buildFaceAuditMappedMatchReviewArtifact,
+  buildFaceAuditMatchReviewArtifact,
+  buildFaceAuditReviewerHandoff,
+  buildFaceAuditReviewerInstructions,
+  buildFaceAuditReviewPlan,
+  buildFaceAuditReviewSheet,
+  buildFaceAuditReviewTodo,
+  buildFaceAuditReviewTodoSummary,
+  buildFaceAuditReviewTemplate,
+  buildFaceAuditSourceIdsByAreaTemplate,
+  faceAuditAreaReviewerInstructionsArtifactFileName,
+  faceAuditAreaReviewArtifactFileName,
+  faceAuditAreaReviewSheetArtifactFileName,
+  mergeFaceAuditReviewArtifacts,
+  parseFaceAuditArea,
+  parseFaceAuditEvidenceRefMode,
+  summarizeFaceAuditReviewerHandoffResponse,
+  summarizeFaceAuditReviewStatus,
+  validateFaceAuditLockArtifact,
+  validateFaceAuditReviewerHandoffArtifact,
+  validateFaceAuditReviewArtifact,
+  validateFaceAuditReadyArtifact,
+  validateFaceAuditStaticLockGate,
+  validFaceAuditEvidenceSourceId,
+  type FaceAuditArea,
+  type FaceAuditEvidenceRefMode,
+} from '../common/faceAudit';
 import {determineWinners} from '../common/gameEngine';
 import {INDUSTRY_TYPES, LINK_TYPES, validateGameSeed} from '../common/gameSetup';
-import {advanceIncomeSpaces, getIncomeLevel} from '../common/income';
+import {advanceIncomeSpaces, getIncomeLevel, retreatIncomeLevels} from '../common/income';
 import {staticConfig} from '../common/staticData';
 import type {
   EraScoreBreakdown,
@@ -23,10 +61,11 @@ import type {
   IndustryInstance,
   IndustryType,
   LinkInstance,
+  LinkType,
   MerchantBonus,
   ResourceSource,
 } from '../common/types';
-import type {GameStore, PlayerSession} from './gameStore';
+import type {GameStore, GameSummary, PlayerSession} from './gameStore';
 
 export interface BrassServerOptions {
   store: GameStore;
@@ -40,7 +79,7 @@ export interface BrassServer {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isJsonParseError(error: unknown): boolean {
@@ -54,6 +93,10 @@ function optionalString(value: unknown): string | undefined {
 function nonEmptyString(value: unknown): string | undefined {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   return trimmed || undefined;
+}
+
+function publicGameId(value: unknown): string {
+  return nonEmptyString(value) ?? 'unknown-game';
 }
 
 function gameIdFromRouteParam(value: string): string {
@@ -266,7 +309,10 @@ function trimmedStringArray(value: unknown): string[] | undefined {
 }
 
 function filteredStringArray(value: unknown, accepts: (item: string) => boolean): string[] {
-  return (stringArray(value) ?? []).filter(accepts);
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === 'string' && accepts(item));
 }
 
 function isKnownCardType(cardId: string, type: 'wild_location' | 'wild_industry'): boolean {
@@ -350,19 +396,30 @@ function currentPlayerIdFromTurnState(turnOrderValue: unknown, currentTurnIndexV
   return playerId !== undefined && playerIds.includes(playerId) ? playerId : undefined;
 }
 
-function projectPlayerIds(value: unknown): string[] {
+function declaredPlayerCount(value: unknown): GameState['playerCount'] | undefined {
+  return value === 2 || value === 3 || value === 4 ? value : undefined;
+}
+
+function projectPlayerIdsForDeclaredCount(value: unknown, playerCount: GameState['playerCount'] | undefined): string[] {
   if (!isRecord(value)) {
     return [];
   }
-  return PUBLIC_PLAYER_IDS.filter((playerId) => isRecord(value[playerId]));
+  const publicPlayerIds = playerCount === undefined
+    ? PUBLIC_PLAYER_IDS
+    : PUBLIC_PLAYER_IDS.slice(0, playerCount);
+  return publicPlayerIds.filter((playerId) => isRecord(value[playerId]));
 }
 
 function projectPlayerCount(value: unknown, playerIds: string[]): GameState['playerCount'] {
+  const declaredCount = declaredPlayerCount(value);
+  if (declaredCount !== undefined) {
+    return declaredCount;
+  }
   const count = playerIds.length;
   if (count === 2 || count === 3 || count === 4) {
     return count;
   }
-  return value === 2 || value === 3 || value === 4 ? value : 2;
+  return 2;
 }
 
 function publicPlayerName(playerId: string, player: Record<string, unknown>): string {
@@ -441,6 +498,14 @@ function integerInRange(value: unknown, fallback: number, min: number, max: numb
     return fallback;
   }
   return Math.max(min, Math.min(max, value));
+}
+
+function marketOccupiedCount(value: unknown, marketName: 'coal' | 'iron'): number {
+  const config = staticConfig.markets[marketName];
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    return config.initialOccupiedCount;
+  }
+  return Math.min(value, config.priceSlotsCheapestToMostExpensive.length);
 }
 
 function nonNegativeInteger(value: unknown, fallback: number): number {
@@ -622,10 +687,14 @@ function projectPlayerState(
   };
 }
 
-function projectPlayers(value: unknown, playerCount: GameState['playerCount']): GameState['players'] {
+function projectPlayers(
+  value: unknown,
+  playerCount: GameState['playerCount'],
+  playerIds = projectPlayerIdsForDeclaredCount(value, playerCount),
+): GameState['players'] {
   const source = isRecord(value) ? value : {};
   const projected: GameState['players'] = {};
-  for (const playerId of projectPlayerIds(source)) {
+  for (const playerId of playerIds) {
     projected[playerId] = projectPlayerState(playerId, source[playerId], playerCount);
   }
   return projected;
@@ -751,12 +820,7 @@ function projectCardZones(value: unknown, playerCount: GameState['playerCount'])
 function projectMarketState(value: unknown, marketName: 'coal' | 'iron'): GameState['markets']['coal'] {
   const market = isRecord(value) ? value : {};
   return {
-    occupiedCount: integerInRange(
-      market.occupiedCount,
-      0,
-      0,
-      staticConfig.markets[marketName].priceSlotsCheapestToMostExpensive.length,
-    ),
+    occupiedCount: marketOccupiedCount(market.occupiedCount, marketName),
   };
 }
 
@@ -866,6 +930,15 @@ function merchantBonusForSpace(merchantSpaceId: string): MerchantBonus | undefin
   return merchant?.kind === 'merchant' ? merchant.bonus : undefined;
 }
 
+function merchantDevelopBonusCount(merchantSpaceId: string): number {
+  const bonus = merchantBonusForSpace(merchantSpaceId);
+  return bonus?.type === 'develop' ? bonus.count : 0;
+}
+
+function merchantDevelopBonusCapacity(merchantSpaceIds: readonly string[]): number {
+  return merchantSpaceIds.reduce((sum, merchantSpaceId) => sum + merchantDevelopBonusCount(merchantSpaceId), 0);
+}
+
 function merchantBonusesMatch(actual: MerchantBonus, expected: MerchantBonus): boolean {
   switch (expected.type) {
     case 'develop':
@@ -930,10 +1003,11 @@ function projectPendingDecision(
       const safeMerchantSpaceIds = merchantSpaceIds === undefined
         ? undefined
         : [...new Set([merchantSpaceId, ...merchantSpaceIds])];
+      const projectedMerchantSpaceIds = safeMerchantSpaceIds ?? [merchantSpaceId];
       return {
         type: 'merchant_develop',
         playerId,
-        count: Math.min(count, 2),
+        count: Math.min(count, merchantDevelopBonusCapacity(projectedMerchantSpaceIds)),
         merchantSpaceId,
         ...(safeMerchantSpaceIds === undefined ? {} : {merchantSpaceIds: safeMerchantSpaceIds}),
       };
@@ -1191,16 +1265,31 @@ function industryIsRemoved(board: GameState['board'], industryInstanceId: string
 
 function projectIndustryBuiltEvent(
   event: Record<string, unknown>,
+  board: GameState['board'],
   playerIds: string[],
 ): ProjectedIndustryBuiltEvent | undefined {
   const instance = projectPlayerOwnedIndustryInstance(event.instance, playerIds);
-  return instance === undefined || !isGeneratedInstanceId(instance.id, 'industry')
+  const boardInstance = instance === undefined ? undefined : board.industryInstances[instance.id];
+  return instance === undefined ||
+    !isGeneratedInstanceId(instance.id, 'industry') ||
+    (
+      boardInstance !== undefined &&
+      (
+        boardInstance.specId !== instance.specId ||
+        boardInstance.ownerPlayerId !== instance.ownerPlayerId ||
+        boardInstance.industryType !== instance.industryType ||
+        boardInstance.level !== instance.level ||
+        boardInstance.locationId !== instance.locationId ||
+        boardInstance.slotId !== instance.slotId
+      )
+    )
     ? undefined
     : {type: 'industry_built', instance};
 }
 
 function historicalIndustryBuildClaimsForView(
   events: readonly unknown[],
+  board: GameState['board'],
   playerIds: string[],
 ): Map<Record<string, unknown>, boolean> {
   const claims = new Map<Record<string, unknown>, boolean>();
@@ -1211,7 +1300,7 @@ function historicalIndustryBuildClaimsForView(
       continue;
     }
 
-    const builtEvent = projectIndustryBuiltEvent(event, playerIds);
+    const builtEvent = projectIndustryBuiltEvent(event, board, playerIds);
     if (builtEvent === undefined) {
       claims.set(event, false);
       continue;
@@ -1272,6 +1361,101 @@ function historicalIndustryRemovalClaimsForView(
   return claims;
 }
 
+function negativeIncomeLiquidationCashValue(board: GameState['board'], industryInstanceId: string): number | undefined {
+  const industry = board.industryInstances[industryInstanceId];
+  const cashCost = industry === undefined
+    ? undefined
+    : staticConfig.industryTileSpecs[industry.specId]?.cost.cash;
+  return cashCost === undefined ? undefined : Math.floor(cashCost / 2);
+}
+
+function historicalNegativeIncomeLiquidationCashClaimsForView(
+  events: readonly unknown[],
+  board: GameState['board'],
+  playerIds: string[],
+): Map<Record<string, unknown>, boolean> {
+  const claims = new Map<Record<string, unknown>, boolean>();
+  let pendingRemoval:
+    | {event: Record<string, unknown>; industryInstanceId: string}
+    | undefined;
+  let pendingInvalidNegativeIncomeRemoval = false;
+  const removedIndustryInstanceIds = new Set<string>();
+
+  const clearPendingRemoval = () => {
+    pendingRemoval = undefined;
+    pendingInvalidNegativeIncomeRemoval = false;
+  };
+
+  for (const event of events) {
+    if (!isRecord(event)) {
+      clearPendingRemoval();
+      continue;
+    }
+
+    if (event.type === 'industry_removed') {
+      clearPendingRemoval();
+      const industryInstanceId = nonEmptyString(event.industryInstanceId);
+      const reason = nonEmptyString(event.reason);
+      const industry = industryInstanceId === undefined ? undefined : board.industryInstances[industryInstanceId];
+      const isValidRemoval = industryInstanceId !== undefined &&
+        isOneOf(reason, INDUSTRY_REMOVAL_REASONS) &&
+        industry?.removedFromGame === true &&
+        !removedIndustryInstanceIds.has(industryInstanceId);
+      if (isValidRemoval) {
+        removedIndustryInstanceIds.add(industryInstanceId);
+      }
+      if (reason === 'negative_income' && isValidRemoval) {
+        pendingRemoval = {event, industryInstanceId};
+      } else if (reason === 'negative_income') {
+        pendingInvalidNegativeIncomeRemoval = true;
+      }
+      continue;
+    }
+
+    if (event.type !== 'cash_changed') {
+      clearPendingRemoval();
+      continue;
+    }
+
+    const cashEvent = projectCashChangedEvent(event, playerIds);
+    if (cashEvent === undefined) {
+      clearPendingRemoval();
+      continue;
+    }
+
+    if (pendingRemoval === undefined) {
+      if (pendingInvalidNegativeIncomeRemoval && cashEvent.reason === 'negative income liquidation') {
+        claims.set(event, false);
+      }
+      clearPendingRemoval();
+      continue;
+    }
+
+    if (cashEvent.reason !== 'negative income liquidation') {
+      clearPendingRemoval();
+      continue;
+    }
+
+    const industry = board.industryInstances[pendingRemoval.industryInstanceId];
+    const expectedCash = negativeIncomeLiquidationCashValue(board, pendingRemoval.industryInstanceId);
+    if (
+      industry === undefined ||
+      expectedCash === undefined ||
+      cashEvent.playerId !== industry.ownerPlayerId ||
+      cashEvent.delta !== expectedCash
+    ) {
+      claims.set(event, false);
+      clearPendingRemoval();
+      continue;
+    }
+
+    claims.set(event, true);
+    clearPendingRemoval();
+  }
+
+  return claims;
+}
+
 function projectIndustryFlippedEvent(
   event: Record<string, unknown>,
   board: GameState['board'],
@@ -1317,6 +1501,112 @@ function historicalIndustryFlipClaimsForView(
   return claims;
 }
 
+interface ProjectedIndustryFlipIncomeChange {
+  change: ProjectedIncomePositionChangedEvent;
+  industryType: IndustryType;
+  reasonKind: 'flipped' | 'sold';
+}
+
+function industryFlipIncomeReason(
+  reason: string,
+): Pick<ProjectedIndustryFlipIncomeChange, 'industryType' | 'reasonKind'> | undefined {
+  for (const industryType of INDUSTRY_TYPES) {
+    if (reason === `flipped ${industryType}`) {
+      return {industryType, reasonKind: 'flipped'};
+    }
+    if (reason === `sold ${industryType}`) {
+      return {industryType, reasonKind: 'sold'};
+    }
+  }
+  return undefined;
+}
+
+function projectIndustryFlipIncomeChange(
+  event: Record<string, unknown>,
+  playerIds: string[],
+): ProjectedIndustryFlipIncomeChange | undefined {
+  if (event.type !== 'income_position_changed') {
+    return undefined;
+  }
+  const change = projectIncomePositionChangedEvent(event, playerIds);
+  const reason = change === undefined ? undefined : industryFlipIncomeReason(change.reason);
+  return change === undefined || reason === undefined
+    ? undefined
+    : {change, ...reason};
+}
+
+function industryFlipIncomeChangeMatchesFlip(
+  incomeChange: ProjectedIndustryFlipIncomeChange,
+  flippedEvent: ProjectedIndustryFlippedEvent,
+  board: GameState['board'],
+): boolean {
+  const industry = board.industryInstances[flippedEvent.industryInstanceId];
+  const spec = industry === undefined ? undefined : staticConfig.industryTileSpecs[industry.specId];
+  const expectedTo = spec === undefined
+    ? undefined
+    : advanceIncomeSpaces(incomeChange.change.from, spec.flip.incomeSpaces);
+  return industry !== undefined &&
+    expectedTo !== undefined &&
+    incomeChange.change.playerId === flippedEvent.ownerPlayerId &&
+    industry.industryType === incomeChange.industryType &&
+    incomeChange.change.to === expectedTo;
+}
+
+function historicalIndustryFlipIncomeChangeClaimsForView(
+  events: readonly unknown[],
+  board: GameState['board'],
+  historicalIndustryFlipClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  playerIds: string[],
+): Map<Record<string, unknown>, boolean> {
+  const claims = new Map<Record<string, unknown>, boolean>();
+  let pendingIncomeChange:
+    | {event: Record<string, unknown>; incomeChange: ProjectedIndustryFlipIncomeChange}
+    | undefined;
+
+  const clearPendingIncomeChange = () => {
+    pendingIncomeChange = undefined;
+  };
+
+  for (const event of events) {
+    if (!isRecord(event)) {
+      clearPendingIncomeChange();
+      continue;
+    }
+
+    const incomeChange = projectIndustryFlipIncomeChange(event, playerIds);
+    if (incomeChange !== undefined) {
+      pendingIncomeChange = {event, incomeChange};
+      continue;
+    }
+
+    if (event.type !== 'industry_flipped') {
+      clearPendingIncomeChange();
+      continue;
+    }
+
+    if (pendingIncomeChange === undefined) {
+      continue;
+    }
+
+    const flippedEvent = projectIndustryFlippedEvent(event, board, playerIds);
+    if (flippedEvent === undefined || historicalIndustryFlipClaims.get(event) === false) {
+      clearPendingIncomeChange();
+      continue;
+    }
+
+    if (!industryFlipIncomeChangeMatchesFlip(pendingIncomeChange.incomeChange, flippedEvent, board)) {
+      claims.set(pendingIncomeChange.event, false);
+      clearPendingIncomeChange();
+      continue;
+    }
+
+    claims.set(pendingIncomeChange.event, true);
+    clearPendingIncomeChange();
+  }
+
+  return claims;
+}
+
 function projectIndustrySoldEvent(
   event: Record<string, unknown>,
   board: GameState['board'],
@@ -1339,29 +1629,64 @@ function projectIndustrySoldEvent(
 function historicalIndustrySaleClaimsForView(
   events: readonly unknown[],
   board: GameState['board'],
+  historicalIndustryFlipClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   playerIds: string[],
 ): Map<Record<string, unknown>, boolean> {
   const claims = new Map<Record<string, unknown>, boolean>();
   const soldIndustryInstanceIds = new Set<string>();
+  let pendingFlip: ProjectedIndustryFlippedEvent | undefined;
+
+  const clearPendingFlip = () => {
+    pendingFlip = undefined;
+  };
 
   for (const event of events) {
-    if (!isRecord(event) || event.type !== 'industry_sold') {
+    if (!isRecord(event)) {
+      clearPendingFlip();
+      continue;
+    }
+
+    if (event.type === 'industry_flipped') {
+      const flippedEvent = projectIndustryFlippedEvent(event, board, playerIds);
+      pendingFlip = flippedEvent !== undefined && historicalIndustryFlipClaims.get(event) !== false
+        ? flippedEvent
+        : undefined;
+      continue;
+    }
+
+    if (event.type !== 'industry_sold') {
+      clearPendingFlip();
       continue;
     }
 
     const soldEvent = projectIndustrySoldEvent(event, board, playerIds);
     if (soldEvent === undefined) {
       claims.set(event, false);
+      clearPendingFlip();
       continue;
     }
 
     if (soldIndustryInstanceIds.has(soldEvent.industryInstanceId)) {
       claims.set(event, false);
+      clearPendingFlip();
+      continue;
+    }
+
+    if (
+      pendingFlip !== undefined &&
+      (
+        pendingFlip.industryInstanceId !== soldEvent.industryInstanceId ||
+        pendingFlip.ownerPlayerId !== soldEvent.ownerPlayerId
+      )
+    ) {
+      claims.set(event, false);
+      clearPendingFlip();
       continue;
     }
 
     soldIndustryInstanceIds.add(soldEvent.industryInstanceId);
     claims.set(event, true);
+    clearPendingFlip();
   }
 
   return claims;
@@ -1436,9 +1761,11 @@ function historicalMarketSaleCashClaimsForView(
   let pendingMarketSale:
     | {sale: ProjectedResourceSoldToMarketEvent; ownerPlayerId: string}
     | undefined;
+  let pendingInvalidMarketSale = false;
 
   const clearPendingMarketSale = () => {
     pendingMarketSale = undefined;
+    pendingInvalidMarketSale = false;
   };
 
   for (const event of events) {
@@ -1460,6 +1787,8 @@ function historicalMarketSaleCashClaimsForView(
         playerIds.includes(ownerPlayerId)
       ) {
         pendingMarketSale = {sale: soldEvent, ownerPlayerId};
+      } else {
+        pendingInvalidMarketSale = true;
       }
       continue;
     }
@@ -1469,12 +1798,16 @@ function historicalMarketSaleCashClaimsForView(
       continue;
     }
 
-    if (pendingMarketSale === undefined) {
+    const cashEvent = projectCashChangedEvent(event, playerIds);
+    if (cashEvent === undefined) {
+      clearPendingMarketSale();
       continue;
     }
 
-    const cashEvent = projectCashChangedEvent(event, playerIds);
-    if (cashEvent === undefined) {
+    if (pendingMarketSale === undefined) {
+      if (pendingInvalidMarketSale && isMarketSaleCashReason(cashEvent.reason)) {
+        claims.set(event, false);
+      }
       clearPendingMarketSale();
       continue;
     }
@@ -1502,21 +1835,264 @@ function historicalMarketSaleCashClaimsForView(
   return claims;
 }
 
+type ActionSpendReason = 'build' | 'network' | 'develop iron';
+
+interface PendingBuildSpendCash {
+  event: Record<string, unknown>;
+  cash: ProjectedCashChangedEvent;
+  marketCost: number;
+}
+
+interface PendingBuildResourceSpend {
+  playerId: string;
+  marketCost: number;
+}
+
+interface PendingNetworkSpendEvidence {
+  playerId: string;
+  marketCost: number;
+  linkCount: number;
+  linkType?: LinkType;
+}
+
+interface PendingDevelopSpendEvidence {
+  playerId: string;
+  marketCost: number;
+}
+
+function isActionSpendReason(reason: string): reason is ActionSpendReason {
+  return reason === 'build' || reason === 'network' || reason === 'develop iron';
+}
+
+function resourceMarketCostForActionSpend(event: ProjectedResourceConsumedEvent): number {
+  return event.source.kind === 'market' ? event.source.price : 0;
+}
+
+function networkBaseSpend(linkCount: number, linkType: LinkType | undefined): number | undefined {
+  if (linkType === 'canal' && linkCount === 1) {
+    return staticConfig.rules.canalLinkCost;
+  }
+  if (linkType === 'rail' && linkCount === 1) {
+    return staticConfig.rules.railSingleLinkCost;
+  }
+  if (linkType === 'rail' && linkCount === 2) {
+    return staticConfig.rules.railDoubleLinkCost;
+  }
+  return undefined;
+}
+
+function historicalActionSpendCashClaimsForView(
+  events: readonly unknown[],
+  board: GameState['board'],
+  historicalResourceConsumptionClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalIndustryBuildClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalLinkBuildClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  playerIds: string[],
+  playerCount: GameState['playerCount'],
+): Map<Record<string, unknown>, boolean> {
+  const claims = new Map<Record<string, unknown>, boolean>();
+  let pendingBuildResources: PendingBuildResourceSpend | undefined;
+  let pendingBuildCash: PendingBuildSpendCash | undefined;
+  let pendingNetworkEvidence: PendingNetworkSpendEvidence | undefined;
+  let pendingDevelopEvidence: PendingDevelopSpendEvidence | undefined;
+
+  const clearActionEvidence = () => {
+    pendingBuildResources = undefined;
+    pendingNetworkEvidence = undefined;
+    pendingDevelopEvidence = undefined;
+  };
+
+  const rejectPendingBuildCash = () => {
+    if (pendingBuildCash !== undefined) {
+      claims.set(pendingBuildCash.event, false);
+      pendingBuildCash = undefined;
+    }
+  };
+
+  const appendResourceCost = (event: ProjectedResourceConsumedEvent) => {
+    const marketCost = resourceMarketCostForActionSpend(event);
+    if (event.reason === 'build') {
+      pendingNetworkEvidence = undefined;
+      pendingDevelopEvidence = undefined;
+      pendingBuildResources = pendingBuildResources?.playerId === event.byPlayerId
+        ? {playerId: event.byPlayerId, marketCost: pendingBuildResources.marketCost + marketCost}
+        : {playerId: event.byPlayerId, marketCost};
+      return;
+    }
+    if (event.reason === 'network') {
+      pendingBuildResources = undefined;
+      pendingDevelopEvidence = undefined;
+      pendingNetworkEvidence = pendingNetworkEvidence?.playerId === event.byPlayerId
+        ? {...pendingNetworkEvidence, marketCost: pendingNetworkEvidence.marketCost + marketCost}
+        : {playerId: event.byPlayerId, marketCost, linkCount: 0};
+      return;
+    }
+    if (event.reason === 'develop' || event.reason === 'develop iron') {
+      pendingBuildResources = undefined;
+      pendingNetworkEvidence = undefined;
+      pendingDevelopEvidence = pendingDevelopEvidence?.playerId === event.byPlayerId
+        ? {playerId: event.byPlayerId, marketCost: pendingDevelopEvidence.marketCost + marketCost}
+        : {playerId: event.byPlayerId, marketCost};
+      return;
+    }
+    clearActionEvidence();
+  };
+
+  for (const event of events) {
+    if (!isRecord(event)) {
+      rejectPendingBuildCash();
+      clearActionEvidence();
+      continue;
+    }
+
+    if (event.type === 'resource_consumed') {
+      rejectPendingBuildCash();
+      const consumedEvent = projectResourceConsumedEvent(event, board, playerIds);
+      if (consumedEvent === undefined || historicalResourceConsumptionClaims.get(event) === false) {
+        clearActionEvidence();
+        continue;
+      }
+      appendResourceCost(consumedEvent);
+      continue;
+    }
+
+    if (event.type === 'link_built') {
+      rejectPendingBuildCash();
+      const builtEvent = projectLinkBuiltEvent(event, board, playerIds, playerCount);
+      if (builtEvent === undefined || historicalLinkBuildClaims.get(event) === false) {
+        clearActionEvidence();
+        continue;
+      }
+      pendingBuildResources = undefined;
+      pendingDevelopEvidence = undefined;
+      pendingNetworkEvidence = pendingNetworkEvidence?.playerId === builtEvent.instance.ownerPlayerId
+        ? {
+          playerId: builtEvent.instance.ownerPlayerId,
+          marketCost: pendingNetworkEvidence.marketCost,
+          linkCount: pendingNetworkEvidence.linkCount + 1,
+          linkType: pendingNetworkEvidence.linkType ?? builtEvent.instance.linkType,
+        }
+        : {
+          playerId: builtEvent.instance.ownerPlayerId,
+          marketCost: 0,
+          linkCount: 1,
+          linkType: builtEvent.instance.linkType,
+        };
+      if (pendingNetworkEvidence.linkType !== builtEvent.instance.linkType) {
+        pendingNetworkEvidence = undefined;
+      }
+      continue;
+    }
+
+    if (event.type === 'cash_changed') {
+      rejectPendingBuildCash();
+      const cashEvent = projectCashChangedEvent(event, playerIds);
+      if (cashEvent === undefined) {
+        clearActionEvidence();
+        continue;
+      }
+      if (cashEvent.reason === 'build') {
+        pendingBuildCash = {
+          event,
+          cash: cashEvent,
+          marketCost: pendingBuildResources?.playerId === cashEvent.playerId
+            ? pendingBuildResources.marketCost
+            : 0,
+        };
+        clearActionEvidence();
+        continue;
+      }
+      if (cashEvent.reason === 'network') {
+        const baseSpend = pendingNetworkEvidence?.playerId === cashEvent.playerId
+          ? networkBaseSpend(pendingNetworkEvidence.linkCount, pendingNetworkEvidence.linkType)
+          : undefined;
+        claims.set(
+          event,
+          baseSpend !== undefined &&
+            cashEvent.delta === -(baseSpend + (pendingNetworkEvidence?.marketCost ?? 0)),
+        );
+        clearActionEvidence();
+        continue;
+      }
+      if (cashEvent.reason === 'develop iron') {
+        const marketCost = pendingDevelopEvidence?.playerId === cashEvent.playerId
+          ? pendingDevelopEvidence.marketCost
+          : undefined;
+        claims.set(event, marketCost !== undefined && marketCost > 0 && cashEvent.delta === -marketCost);
+        clearActionEvidence();
+        continue;
+      }
+      clearActionEvidence();
+      continue;
+    }
+
+    if (event.type === 'industry_removed') {
+      const removedEvent = projectIndustryRemovedEvent(event, board);
+      if (pendingBuildCash !== undefined && removedEvent?.reason === 'overbuild') {
+        clearActionEvidence();
+        continue;
+      }
+      rejectPendingBuildCash();
+      clearActionEvidence();
+      continue;
+    }
+
+    if (event.type === 'industry_built') {
+      if (pendingBuildCash === undefined) {
+        clearActionEvidence();
+        continue;
+      }
+      const builtEvent = projectIndustryBuiltEvent(event, board, playerIds);
+      const spec = builtEvent === undefined
+        ? undefined
+        : staticConfig.industryTileSpecs[builtEvent.instance.specId];
+      claims.set(
+        pendingBuildCash.event,
+        builtEvent !== undefined &&
+          spec !== undefined &&
+          historicalIndustryBuildClaims.get(event) !== false &&
+          builtEvent.instance.ownerPlayerId === pendingBuildCash.cash.playerId &&
+          pendingBuildCash.cash.delta === -(spec.cost.cash + pendingBuildCash.marketCost),
+      );
+      pendingBuildCash = undefined;
+      clearActionEvidence();
+      continue;
+    }
+
+    rejectPendingBuildCash();
+    clearActionEvidence();
+  }
+
+  rejectPendingBuildCash();
+  return claims;
+}
+
 function projectLinkBuiltEvent(
   event: Record<string, unknown>,
+  board: GameState['board'],
   playerIds: string[],
   playerCount: GameState['playerCount'],
 ): ProjectedLinkBuiltEvent | undefined {
   const instance = projectPlayerOwnedLinkInstance(event.instance, playerIds);
+  const boardInstance = instance === undefined ? undefined : board.linkInstances[instance.id];
   return instance === undefined ||
     !isGeneratedInstanceId(instance.id, 'link') ||
-    !isLinkLineActiveForPlayerCount(playerCount, instance.linkLineId)
+    !isLinkLineActiveForPlayerCount(playerCount, instance.linkLineId) ||
+    (
+      boardInstance !== undefined &&
+      (
+        boardInstance.ownerPlayerId !== instance.ownerPlayerId ||
+        boardInstance.linkType !== instance.linkType ||
+        boardInstance.linkLineId !== instance.linkLineId
+      )
+    )
     ? undefined
     : {type: 'link_built', instance};
 }
 
 function historicalLinkBuildClaimsForView(
   events: readonly unknown[],
+  board: GameState['board'],
   playerIds: string[],
   playerCount: GameState['playerCount'],
 ): Map<Record<string, unknown>, boolean> {
@@ -1528,7 +2104,7 @@ function historicalLinkBuildClaimsForView(
       continue;
     }
 
-    const builtEvent = projectLinkBuiltEvent(event, playerIds, playerCount);
+    const builtEvent = projectLinkBuiltEvent(event, board, playerIds, playerCount);
     if (builtEvent === undefined) {
       claims.set(event, false);
       continue;
@@ -1549,6 +2125,7 @@ function historicalLinkBuildClaimsForView(
 function projectNegativeIncomeStartedEvent(
   event: Record<string, unknown>,
   playerIds: string[],
+  turnOrder: string[],
 ): ProjectedNegativeIncomeStartedEvent | undefined {
   const playerId = playerIdField(event, 'playerId', playerIds);
   const amountOwed = positiveIntegerField(event, 'amountOwed');
@@ -1556,7 +2133,8 @@ function projectNegativeIncomeStartedEvent(
   return playerId === undefined ||
     amountOwed === undefined ||
     incomePlayerIndex === undefined ||
-    incomePlayerIndex >= playerIds.length
+    incomePlayerIndex >= turnOrder.length ||
+    turnOrder[incomePlayerIndex] !== playerId
     ? undefined
     : {type: 'negative_income_started', playerId, amountOwed, incomePlayerIndex};
 }
@@ -1583,18 +2161,53 @@ function projectNegativeIncomeResolvedEvent(
     : {type: 'negative_income_resolved', playerId, amountOwed, paid, victoryPointLoss, industryInstanceIds};
 }
 
+function isNegativeIncomePendingEvidenceEvent(
+  event: Record<string, unknown>,
+  board: GameState['board'],
+  pending: ProjectedNegativeIncomeStartedEvent,
+): boolean {
+  if (event.type === 'industry_removed') {
+    const removedEvent = projectIndustryRemovedEvent(event, board);
+    return removedEvent?.reason === 'negative_income' &&
+      knownIndustryInstanceId(board, removedEvent.industryInstanceId, pending.playerId);
+  }
+
+  if (event.type === 'cash_changed') {
+    const playerId = playerIdField(event, 'playerId', [pending.playerId]);
+    const reason = publicEventReason(event.reason);
+    return playerId === pending.playerId &&
+      (reason === 'negative income liquidation' || reason === 'income');
+  }
+
+  if (event.type === 'victory_points_changed') {
+    const playerId = playerIdField(event, 'playerId', [pending.playerId]);
+    return playerId === pending.playerId && publicEventReason(event.reason) === 'negative income shortfall';
+  }
+
+  return false;
+}
+
 function historicalNegativeIncomeClaimsForView(
   events: readonly unknown[],
   board: GameState['board'],
   playerIds: string[],
+  turnOrder: string[],
 ): {
   starts: Map<Record<string, unknown>, boolean>;
   resolutions: Map<Record<string, unknown>, boolean>;
 } {
   const starts = new Map<Record<string, unknown>, boolean>();
   const resolutions = new Map<Record<string, unknown>, boolean>();
-  let pending: ProjectedNegativeIncomeStartedEvent | undefined;
+  let pending:
+    | {event: Record<string, unknown>; started: ProjectedNegativeIncomeStartedEvent}
+    | undefined;
   let hasObservedStart = false;
+  const clearPending = () => {
+    if (pending !== undefined) {
+      starts.set(pending.event, false);
+      pending = undefined;
+    }
+  };
 
   for (const event of events) {
     if (!isRecord(event)) {
@@ -1602,13 +2215,13 @@ function historicalNegativeIncomeClaimsForView(
     }
 
     if (event.type === 'negative_income_started') {
-      const startedEvent = projectNegativeIncomeStartedEvent(event, playerIds);
+      const startedEvent = projectNegativeIncomeStartedEvent(event, playerIds, turnOrder);
       if (startedEvent === undefined || pending !== undefined) {
         starts.set(event, false);
         continue;
       }
 
-      pending = startedEvent;
+      pending = {event, started: startedEvent};
       hasObservedStart = true;
       starts.set(event, true);
       continue;
@@ -1617,20 +2230,19 @@ function historicalNegativeIncomeClaimsForView(
     if (event.type === 'negative_income_resolved') {
       const resolvedEvent = projectNegativeIncomeResolvedEvent(event, board, playerIds);
       if (resolvedEvent === undefined) {
-        if (hasObservedStart) {
-          resolutions.set(event, false);
-        }
+        resolutions.set(event, false);
         continue;
       }
 
       if (!hasObservedStart) {
+        resolutions.set(event, false);
         continue;
       }
 
       if (
         pending === undefined ||
-        resolvedEvent.playerId !== pending.playerId ||
-        resolvedEvent.amountOwed !== pending.amountOwed
+        resolvedEvent.playerId !== pending.started.playerId ||
+        resolvedEvent.amountOwed !== pending.started.amountOwed
       ) {
         resolutions.set(event, false);
         continue;
@@ -1638,10 +2250,253 @@ function historicalNegativeIncomeClaimsForView(
 
       pending = undefined;
       resolutions.set(event, true);
+      continue;
+    }
+
+    if (pending !== undefined && !isNegativeIncomePendingEvidenceEvent(event, board, pending.started)) {
+      clearPending();
     }
   }
 
   return {starts, resolutions};
+}
+
+function historicalNegativeIncomeShortfallClaimsForView(
+  events: readonly unknown[],
+  board: GameState['board'],
+  historicalNegativeIncomeResolutions: ReadonlyMap<Record<string, unknown>, boolean>,
+  playerIds: string[],
+): Map<Record<string, unknown>, boolean> {
+  const claims = new Map<Record<string, unknown>, boolean>();
+  let pendingShortfall:
+    | {event: Record<string, unknown>; change: ProjectedVictoryPointsChangedEvent}
+    | undefined;
+
+  const clearPendingShortfall = () => {
+    pendingShortfall = undefined;
+  };
+
+  for (const event of events) {
+    if (!isRecord(event)) {
+      clearPendingShortfall();
+      continue;
+    }
+
+    if (event.type === 'victory_points_changed') {
+      const change = projectVictoryPointsChangedEvent(event, playerIds);
+      pendingShortfall = change?.reason === 'negative income shortfall'
+        ? {event, change}
+        : undefined;
+      continue;
+    }
+
+    if (event.type !== 'negative_income_resolved') {
+      clearPendingShortfall();
+      continue;
+    }
+
+    if (pendingShortfall === undefined) {
+      continue;
+    }
+
+    const resolvedEvent = projectNegativeIncomeResolvedEvent(event, board, playerIds);
+    if (
+      resolvedEvent === undefined ||
+      historicalNegativeIncomeResolutions.get(event) !== true ||
+      resolvedEvent.playerId !== pendingShortfall.change.playerId ||
+      resolvedEvent.victoryPointLoss !== -pendingShortfall.change.delta
+    ) {
+      claims.set(pendingShortfall.event, false);
+      clearPendingShortfall();
+      continue;
+    }
+
+    claims.set(pendingShortfall.event, true);
+    clearPendingShortfall();
+  }
+
+  return claims;
+}
+
+function historicalRoundIncomeCashClaimsForView(
+  events: readonly unknown[],
+  board: GameState['board'],
+  historicalMerchantBonusValueChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalIndustryFlipIncomeChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalLoanValueChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalNegativeIncomeResolutions: ReadonlyMap<Record<string, unknown>, boolean>,
+  playerIds: string[],
+): Map<Record<string, unknown>, boolean> {
+  const claims = new Map<Record<string, unknown>, boolean>();
+  const incomePositions = new Map(playerIds.map((playerId) => [playerId, staticConfig.incomeTrack.startPosition]));
+  const knownIncomePositionPlayers = new Set<string>();
+  let incomeSettlementActive = false;
+  let settledIncomePlayers = new Set<string>();
+  let pendingNegativeIncomePayment:
+    | {event: Record<string, unknown>; change: ProjectedCashChangedEvent}
+    | undefined;
+
+  const startIncomeSettlement = () => {
+    incomeSettlementActive = true;
+    settledIncomePlayers = new Set();
+    pendingNegativeIncomePayment = undefined;
+  };
+
+  const clearPendingNegativeIncomePayment = () => {
+    pendingNegativeIncomePayment = undefined;
+  };
+
+  const stopIncomeSettlement = () => {
+    incomeSettlementActive = false;
+    settledIncomePlayers = new Set();
+    clearPendingNegativeIncomePayment();
+  };
+
+  const incomePositionChangeIsUsable = (
+    event: Record<string, unknown>,
+    incomeEvent: ProjectedIncomePositionChangedEvent,
+  ): boolean =>
+    (
+      incomeEvent.reason !== 'merchant bonus' ||
+      historicalMerchantBonusValueChangeClaims.get(event) === true
+    ) &&
+    (
+      industryFlipIncomeReason(incomeEvent.reason) === undefined ||
+      historicalIndustryFlipIncomeChangeClaims.get(event) === true
+    ) &&
+    historicalLoanValueChangeClaims.get(event) !== false;
+
+  for (const event of events) {
+    if (!isRecord(event)) {
+      clearPendingNegativeIncomePayment();
+      continue;
+    }
+
+    if (event.type === 'income_position_changed') {
+      const incomeEvent = projectIncomePositionChangedEvent(event, playerIds);
+      if (incomeEvent !== undefined && incomePositionChangeIsUsable(event, incomeEvent)) {
+        incomePositions.set(incomeEvent.playerId, incomeEvent.to);
+        knownIncomePositionPlayers.add(incomeEvent.playerId);
+      }
+      clearPendingNegativeIncomePayment();
+      continue;
+    }
+
+    if (event.type === 'turn_order_updated') {
+      const order = playerIdArray(event.order, playerIds);
+      if (isCompletePlayerOrder(order, playerIds)) {
+        startIncomeSettlement();
+      } else {
+        stopIncomeSettlement();
+      }
+      continue;
+    }
+
+    if (event.type === 'cash_changed') {
+      const cashEvent = projectCashChangedEvent(event, playerIds);
+      if (cashEvent?.reason !== 'income') {
+        if (cashEvent?.reason !== 'negative income liquidation') {
+          clearPendingNegativeIncomePayment();
+        }
+        continue;
+      }
+
+      if (!incomeSettlementActive) {
+        clearPendingNegativeIncomePayment();
+        continue;
+      }
+      if (!knownIncomePositionPlayers.has(cashEvent.playerId)) {
+        clearPendingNegativeIncomePayment();
+        continue;
+      }
+
+      const incomeLevel = getIncomeLevel(incomePositions.get(cashEvent.playerId) ?? staticConfig.incomeTrack.startPosition);
+      if (settledIncomePlayers.has(cashEvent.playerId)) {
+        claims.set(event, false);
+        clearPendingNegativeIncomePayment();
+        continue;
+      }
+
+      if (cashEvent.delta > 0) {
+        if (cashEvent.delta !== incomeLevel) {
+          claims.set(event, false);
+        } else {
+          claims.set(event, true);
+          settledIncomePlayers.add(cashEvent.playerId);
+        }
+        clearPendingNegativeIncomePayment();
+        continue;
+      }
+
+      if (incomeLevel >= 0 || -cashEvent.delta > -incomeLevel) {
+        claims.set(event, false);
+        clearPendingNegativeIncomePayment();
+        continue;
+      }
+
+      pendingNegativeIncomePayment = {event, change: cashEvent};
+      settledIncomePlayers.add(cashEvent.playerId);
+      continue;
+    }
+
+    if (event.type === 'victory_points_changed') {
+      const changedEvent = projectVictoryPointsChangedEvent(event, playerIds);
+      if (
+        pendingNegativeIncomePayment !== undefined &&
+        changedEvent?.reason === 'negative income shortfall' &&
+        changedEvent.playerId === pendingNegativeIncomePayment.change.playerId
+      ) {
+        continue;
+      }
+      stopIncomeSettlement();
+      continue;
+    }
+
+    if (event.type === 'negative_income_resolved') {
+      if (pendingNegativeIncomePayment === undefined) {
+        continue;
+      }
+
+      const resolvedEvent = projectNegativeIncomeResolvedEvent(event, board, playerIds);
+      if (
+        resolvedEvent === undefined ||
+        historicalNegativeIncomeResolutions.get(event) === false ||
+        resolvedEvent.playerId !== pendingNegativeIncomePayment.change.playerId ||
+        resolvedEvent.paid !== -pendingNegativeIncomePayment.change.delta
+      ) {
+        claims.set(pendingNegativeIncomePayment.event, false);
+      } else {
+        claims.set(pendingNegativeIncomePayment.event, true);
+      }
+      clearPendingNegativeIncomePayment();
+      continue;
+    }
+
+    if (event.type === 'turn_advanced' || event.type === 'era_ended' || event.type === 'game_ended') {
+      stopIncomeSettlement();
+      continue;
+    }
+
+    if (
+      event.type === 'card_discarded' ||
+      event.type === 'industry_built' ||
+      event.type === 'industry_flipped' ||
+      event.type === 'industry_sold' ||
+      event.type === 'resource_consumed' ||
+      event.type === 'resource_sold_to_market' ||
+      event.type === 'link_built' ||
+      event.type === 'link_scored' ||
+      event.type === 'industry_scored' ||
+      event.type === 'merchant_bonus_claimed' ||
+      event.type === 'merchant_develop_resolved' ||
+      event.type === 'loan_taken' ||
+      event.type === 'scouted'
+    ) {
+      stopIncomeSettlement();
+    }
+  }
+
+  return claims;
 }
 
 function negativeIncomeResolutionMatchesRules(
@@ -1651,8 +2506,20 @@ function negativeIncomeResolutionMatchesRules(
   paid: number,
   victoryPointLoss: number,
 ): industryInstanceIds is string[] {
-  return industryInstanceIds !== undefined &&
-    paid + victoryPointLoss === amountOwed &&
+  if (industryInstanceIds === undefined) {
+    return false;
+  }
+  const selectedLiquidationValue = [...new Set(industryInstanceIds)]
+    .reduce((sum, industryInstanceId) => {
+      const industry = board.industryInstances[industryInstanceId];
+      const cashCost = industry === undefined
+        ? undefined
+        : staticConfig.industryTileSpecs[industry.specId]?.cost.cash;
+      return sum + Math.floor((cashCost ?? 0) / 2);
+    }, 0);
+  const minimumPaidFromLiquidations = Math.min(amountOwed, selectedLiquidationValue);
+  return paid + victoryPointLoss === amountOwed &&
+    paid >= minimumPaidFromLiquidations &&
     industryInstanceIds.every((industryInstanceId) => industryIsRemoved(board, industryInstanceId));
 }
 
@@ -2012,10 +2879,28 @@ function merchantBonusClaimKey(playerId: string, merchantSpaceId: string): strin
   return `${playerId}:${merchantSpaceId}`;
 }
 
+function isProjectedMerchantBonusPendingBoundary(
+  event: Record<string, unknown>,
+  historicalEraEndedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  playerIds: string[],
+): boolean {
+  if (event.type === 'era_ended') {
+    return historicalEraEndedClaims.get(event) === true;
+  }
+  if (event.type === 'turn_order_updated') {
+    return isCompletePlayerOrder(playerIdArray(event.order, playerIds), playerIds);
+  }
+  if (event.type === 'turn_advanced') {
+    return projectTurnAdvancedEvent(event, playerIds) !== undefined;
+  }
+  return event.type === 'game_ended';
+}
+
 function historicalMerchantBonusClaimsForView(
   events: readonly unknown[],
   board: GameState['board'],
   historicalResourceConsumptionClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalEraEndedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   playerIds: string[],
 ): Map<Record<string, unknown>, boolean> {
   const claims = new Map<Record<string, unknown>, boolean>();
@@ -2024,6 +2909,11 @@ function historicalMerchantBonusClaimsForView(
 
   for (const event of events) {
     if (!isRecord(event)) {
+      continue;
+    }
+
+    if (isProjectedMerchantBonusPendingBoundary(event, historicalEraEndedClaims, playerIds)) {
+      pendingMerchantBeers.clear();
       continue;
     }
 
@@ -2050,6 +2940,7 @@ function historicalMerchantBonusClaimsForView(
 
     if (event.type === 'merchant_bonus_claimed') {
       if (!hasObservedMerchantBeerConsumption) {
+        claims.set(event, false);
         continue;
       }
 
@@ -2148,6 +3039,7 @@ function projectMerchantDevelopResolvedEvent(
   const merchantSpaceId = nonEmptyString(event.merchantSpaceId);
   const industryTypes = enumArray(event.industryTypes, INDUSTRY_TYPES);
   const specIds = trimmedStringArray(event.specIds);
+  const hasDuplicateSpecIds = specIds !== undefined && new Set(specIds).size !== specIds.length;
   const merchantSpaceIds = event.merchantSpaceIds === undefined ? undefined : trimmedStringArray(event.merchantSpaceIds);
   const safeMerchantSpaceIds = merchantSpaceId === undefined || merchantSpaceIds === undefined
     ? undefined
@@ -2157,6 +3049,7 @@ function projectMerchantDevelopResolvedEvent(
     !knownMerchantSpaceId(board, merchantSpaceId) ||
     !merchantSpaceHasDevelopBonus(merchantSpaceId) ||
     industryTypes === undefined ||
+    hasDuplicateSpecIds ||
     !knownIndustrySpecIdsForTypes(specIds, industryTypes) ||
     (event.merchantSpaceIds !== undefined && (
       !knownMerchantSpaceIds(board, safeMerchantSpaceIds) ||
@@ -2178,15 +3071,23 @@ function projectMerchantDevelopResolvedEvent(
 function historicalMerchantDevelopResolutionsForView(
   events: readonly unknown[],
   board: GameState['board'],
+  players: GameState['players'],
   historicalMerchantBonusClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalEraEndedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   playerIds: string[],
 ): Map<Record<string, unknown>, boolean> {
   const resolutions = new Map<Record<string, unknown>, boolean>();
   const pendingDevelopBonuses = new Map<string, number>();
+  const claimedRemovedSpecIdsByPlayer = new Map<string, Set<string>>();
   let hasObservedDevelopBonus = false;
 
   for (const event of events) {
     if (!isRecord(event)) {
+      continue;
+    }
+
+    if (isProjectedMerchantBonusPendingBoundary(event, historicalEraEndedClaims, playerIds)) {
+      pendingDevelopBonuses.clear();
       continue;
     }
 
@@ -2213,6 +3114,7 @@ function historicalMerchantDevelopResolutionsForView(
 
     if (event.type === 'merchant_develop_resolved') {
       if (!hasObservedDevelopBonus) {
+        resolutions.set(event, false);
         continue;
       }
 
@@ -2227,11 +3129,27 @@ function historicalMerchantDevelopResolutionsForView(
         (sum, merchantSpaceId) => sum + (pendingDevelopBonuses.get(merchantBonusClaimKey(resolvedEvent.playerId, merchantSpaceId)) ?? 0),
         0,
       );
-      if (availableDevelopCount <= 0 || resolvedEvent.industryTypes.length > availableDevelopCount) {
+      const player = players[resolvedEvent.playerId];
+      const claimedRemovedSpecIds = claimedRemovedSpecIdsByPlayer.get(resolvedEvent.playerId) ?? new Set<string>();
+      const specIdsMatchRemovedStacks = player !== undefined &&
+        resolvedEvent.specIds.every((specId, index) => {
+          const industryType = resolvedEvent.industryTypes[index];
+          return player.industryTileStacks[industryType]?.removedSpecIds.includes(specId) &&
+            !claimedRemovedSpecIds.has(specId);
+        });
+      if (
+        availableDevelopCount <= 0 ||
+        resolvedEvent.industryTypes.length > availableDevelopCount ||
+        !specIdsMatchRemovedStacks
+      ) {
         resolutions.set(event, false);
         continue;
       }
 
+      for (const specId of resolvedEvent.specIds) {
+        claimedRemovedSpecIds.add(specId);
+      }
+      claimedRemovedSpecIdsByPlayer.set(resolvedEvent.playerId, claimedRemovedSpecIds);
       for (const merchantSpaceId of resolvedMerchantSpaceIds) {
         pendingDevelopBonuses.delete(merchantBonusClaimKey(resolvedEvent.playerId, merchantSpaceId));
       }
@@ -2388,7 +3306,9 @@ function historicalScoringClaimsForView(
         playerIds,
       );
       if (scoredEvent === undefined) {
-        links.set(event, false);
+        if (projectRawLinkScoredEvent(event, playerIds) === undefined) {
+          links.set(event, false);
+        }
         continue;
       }
 
@@ -2406,7 +3326,9 @@ function historicalScoringClaimsForView(
     if (event.type === 'industry_scored') {
       const scoredEvent = projectIndustryScoredEvent(event, board, historicalIndustryScoreValues, playerIds);
       if (scoredEvent === undefined) {
-        industries.set(event, false);
+        if (projectRawIndustryScoredEvent(event, playerIds) === undefined) {
+          industries.set(event, false);
+        }
         continue;
       }
 
@@ -2695,6 +3617,7 @@ function historicalLifecycleClaimsForView(
   gameId: string,
   playerIds: string[],
   expectedGameEndedWinners: string[] | undefined,
+  terminalEra: GameState['era'] | undefined,
 ): {
   gameCreated: Map<Record<string, unknown>, boolean>;
   eraEnded: Map<Record<string, unknown>, boolean>;
@@ -2706,6 +3629,7 @@ function historicalLifecycleClaimsForView(
   let hasCreatedGame = false;
   const endedEras = new Set<string>();
   let hasEndedGame = false;
+  let hasObservedTerminalEraEnd = terminalEra === undefined;
 
   for (const event of events) {
     if (!isRecord(event)) {
@@ -2730,13 +3654,16 @@ function historicalLifecycleClaimsForView(
         continue;
       }
       endedEras.add(endedEvent.era);
+      if (endedEvent.era === terminalEra) {
+        hasObservedTerminalEraEnd = true;
+      }
       eraEnded.set(event, true);
       continue;
     }
 
     if (event.type === 'game_ended') {
       const endedEvent = projectGameEndedEvent(event, playerIds, expectedGameEndedWinners);
-      if (endedEvent === undefined || hasEndedGame) {
+      if (endedEvent === undefined || hasEndedGame || !hasObservedTerminalEraEnd) {
         gameEnded.set(event, false);
         continue;
       }
@@ -2746,6 +3673,43 @@ function historicalLifecycleClaimsForView(
   }
 
   return {gameCreated, eraEnded, gameEnded};
+}
+
+function eventsThroughTerminalLifecycle(
+  events: readonly unknown[],
+  historicalEraEndedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalGameEndedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  terminalEra: GameState['era'] | undefined,
+): readonly unknown[] {
+  const projectedEvents: unknown[] = [];
+  let waitingForGameEnd = false;
+  for (const event of events) {
+    if (waitingForGameEnd) {
+      if (isRecord(event) && event.type === 'game_ended') {
+        projectedEvents.push(event);
+        if (historicalGameEndedClaims.get(event) === true) {
+          break;
+        }
+      }
+      continue;
+    }
+
+    projectedEvents.push(event);
+    if (
+      terminalEra !== undefined &&
+      isRecord(event) &&
+      event.type === 'era_ended' &&
+      historicalEraEndedClaims.get(event) === true &&
+      nonEmptyString(event.era) === terminalEra
+    ) {
+      waitingForGameEnd = true;
+      continue;
+    }
+    if (isRecord(event) && event.type === 'game_ended' && historicalGameEndedClaims.get(event) === true) {
+      break;
+    }
+  }
+  return projectedEvents;
 }
 
 function historicalTurnAdvancedClaimsForView(
@@ -2798,11 +3762,149 @@ function historicalTurnAdvancedClaimsForView(
 
 function loanIncomePenaltyMatchesRules(event: ProjectedIncomePositionChangedEvent): boolean {
   return event.reason === 'loan' &&
-    getIncomeLevel(event.from) - getIncomeLevel(event.to) === staticConfig.rules.loanIncomeLevelPenalty;
+    event.to === retreatIncomeLevels(event.from, staticConfig.rules.loanIncomeLevelPenalty);
+}
+
+function rawLoanIncomePlayerId(event: Record<string, unknown>, playerIds: string[]): string | undefined {
+  return publicEventReason(event.reason) === 'loan'
+    ? playerIdField(event, 'playerId', playerIds)
+    : undefined;
+}
+
+function isLoanCashChange(event: ProjectedCashChangedEvent): boolean {
+  return event.reason === 'loan' && event.delta === staticConfig.rules.loanCash;
+}
+
+function historicalLoanValueChangeClaimsForView(
+  events: readonly unknown[],
+  hiddenDiscardIds: Map<string, Map<string, string>>,
+  historicalCardDiscardClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  playerIds: string[],
+  playerCount: GameState['playerCount'],
+): Map<Record<string, unknown>, boolean> {
+  const claims = new Map<Record<string, unknown>, boolean>();
+  let pendingCash:
+    | {event: Record<string, unknown>; change: ProjectedCashChangedEvent}
+    | undefined;
+  let pendingPair:
+    | {
+      cashEvent: Record<string, unknown>;
+      incomeEvent: Record<string, unknown>;
+      playerId: string;
+      hasDiscard: boolean;
+    }
+    | undefined;
+
+  const clearPendingLoanChanges = () => {
+    pendingCash = undefined;
+    pendingPair = undefined;
+  };
+  const rejectPendingLoanChanges = () => {
+    if (pendingCash !== undefined) {
+      claims.set(pendingCash.event, false);
+    }
+    if (pendingPair !== undefined) {
+      claims.set(pendingPair.cashEvent, false);
+      claims.set(pendingPair.incomeEvent, false);
+    }
+    clearPendingLoanChanges();
+  };
+
+  for (const event of events) {
+    if (!isRecord(event)) {
+      rejectPendingLoanChanges();
+      continue;
+    }
+
+    if (event.type === 'cash_changed') {
+      rejectPendingLoanChanges();
+      const cashEvent = projectCashChangedEvent(event, playerIds);
+      pendingCash = cashEvent !== undefined && isLoanCashChange(cashEvent)
+        ? {event, change: cashEvent}
+        : undefined;
+      continue;
+    }
+
+    if (event.type === 'income_position_changed') {
+      const incomeEvent = projectIncomePositionChangedEvent(event, playerIds);
+      if (pendingCash === undefined) {
+        if (incomeEvent !== undefined && incomeEvent.reason === 'loan') {
+          claims.set(event, false);
+        }
+        rejectPendingLoanChanges();
+        continue;
+      }
+
+      if (incomeEvent === undefined || incomeEvent.reason !== 'loan') {
+        if (rawLoanIncomePlayerId(event, playerIds) === pendingCash.change.playerId) {
+          claims.set(pendingCash.event, false);
+          claims.set(event, false);
+        }
+        clearPendingLoanChanges();
+        continue;
+      }
+
+      if (pendingCash.change.playerId !== incomeEvent.playerId || !loanIncomePenaltyMatchesRules(incomeEvent)) {
+        claims.set(pendingCash.event, false);
+        claims.set(event, false);
+        clearPendingLoanChanges();
+        continue;
+      }
+
+      pendingPair = {
+        cashEvent: pendingCash.event,
+        incomeEvent: event,
+        playerId: incomeEvent.playerId,
+        hasDiscard: false,
+      };
+      pendingCash = undefined;
+      continue;
+    }
+
+    if (event.type === 'card_discarded') {
+      const discardedEvent = projectCardDiscardedEvent(event, hiddenDiscardIds, playerIds, playerCount);
+      if (
+        pendingPair !== undefined &&
+        !pendingPair.hasDiscard &&
+        discardedEvent !== undefined &&
+        historicalCardDiscardClaims.get(event) !== false &&
+        discardedEvent.playerId === pendingPair.playerId
+      ) {
+        pendingPair = {...pendingPair, hasDiscard: true};
+        continue;
+      }
+      rejectPendingLoanChanges();
+      continue;
+    }
+
+    if (event.type === 'loan_taken') {
+      if (pendingPair === undefined) {
+        rejectPendingLoanChanges();
+        continue;
+      }
+
+      const loanEvent = projectLoanTakenEvent(event, playerIds);
+      if (loanEvent === undefined || loanEvent.playerId !== pendingPair.playerId || !pendingPair.hasDiscard) {
+        claims.set(pendingPair.cashEvent, false);
+        claims.set(pendingPair.incomeEvent, false);
+      } else if (loanEvent !== undefined) {
+        claims.set(pendingPair.cashEvent, true);
+        claims.set(pendingPair.incomeEvent, true);
+      }
+      clearPendingLoanChanges();
+      continue;
+    }
+
+    rejectPendingLoanChanges();
+  }
+
+  rejectPendingLoanChanges();
+  return claims;
 }
 
 function historicalLoanTakenClaimsForView(
   events: readonly unknown[],
+  historicalLoanValueChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   playerIds: string[],
 ): Map<Record<string, unknown>, boolean> {
   const claims = new Map<Record<string, unknown>, boolean>();
@@ -2818,6 +3920,7 @@ function historicalLoanTakenClaimsForView(
       const cashEvent = projectCashChangedEvent(event, playerIds);
       if (
         cashEvent !== undefined &&
+        historicalLoanValueChangeClaims.get(event) !== false &&
         cashEvent.reason === 'loan' &&
         cashEvent.delta === staticConfig.rules.loanCash
       ) {
@@ -2828,7 +3931,11 @@ function historicalLoanTakenClaimsForView(
 
     if (event.type === 'income_position_changed') {
       const incomeEvent = projectIncomePositionChangedEvent(event, playerIds);
-      if (incomeEvent !== undefined && loanIncomePenaltyMatchesRules(incomeEvent)) {
+      if (
+        incomeEvent !== undefined &&
+        historicalLoanValueChangeClaims.get(event) !== false &&
+        loanIncomePenaltyMatchesRules(incomeEvent)
+      ) {
         const pendingCashCount = pendingCashByPlayer.get(incomeEvent.playerId) ?? 0;
         if (pendingCashCount > 0) {
           pendingCashByPlayer.set(incomeEvent.playerId, pendingCashCount - 1);
@@ -2934,6 +4041,8 @@ function historicalVictoryPointChangeClaimsForView(
   let pendingScoringChange:
     | {event: Record<string, unknown>; change: ProjectedVictoryPointsChangedEvent}
     | undefined;
+  const tentativeEraScoringChanges:
+    Array<{event: Record<string, unknown>; change: ProjectedVictoryPointsChangedEvent}> = [];
 
   const rejectPendingScoringChange = () => {
     if (pendingScoringChange !== undefined) {
@@ -2942,18 +4051,47 @@ function historicalVictoryPointChangeClaimsForView(
     }
   };
 
-  const clearPendingScoringChange = () => {
-    pendingScoringChange = undefined;
+  const rejectTentativeEraScoringChanges = () => {
+    for (const tentative of tentativeEraScoringChanges.splice(0)) {
+      claims.set(tentative.event, false);
+    }
+  };
+
+  const resolveTentativeEraScoringChanges = (score: EraScoreBreakdown) => {
+    const linkTotals = Object.fromEntries(playerIds.map((playerId) => [playerId, 0])) as Record<string, number>;
+    const industryTotals = Object.fromEntries(playerIds.map((playerId) => [playerId, 0])) as Record<string, number>;
+    let hasLinkScoring = false;
+    let hasIndustryScoring = false;
+
+    for (const tentative of tentativeEraScoringChanges) {
+      if (tentative.change.reason === 'link scoring') {
+        linkTotals[tentative.change.playerId] += tentative.change.delta;
+        hasLinkScoring = true;
+      } else if (tentative.change.reason === 'industry scoring') {
+        industryTotals[tentative.change.playerId] += tentative.change.delta;
+        hasIndustryScoring = true;
+      }
+    }
+
+    const linkTotalsMatch = !hasLinkScoring ||
+      playerIds.every((playerId) => linkTotals[playerId] === score.linkVictoryPointsByPlayer[playerId]);
+    const industryTotalsMatch = !hasIndustryScoring ||
+      playerIds.every((playerId) => industryTotals[playerId] === score.industryVictoryPointsByPlayer[playerId]);
+    const totalsMatch = linkTotalsMatch && industryTotalsMatch;
+
+    for (const tentative of tentativeEraScoringChanges.splice(0)) {
+      claims.set(tentative.event, totalsMatch);
+    }
   };
 
   for (const event of events) {
     if (!isRecord(event)) {
-      clearPendingScoringChange();
+      rejectPendingScoringChange();
       continue;
     }
 
     if (event.type === 'victory_points_changed') {
-      clearPendingScoringChange();
+      rejectPendingScoringChange();
       const changedEvent = projectVictoryPointsChangedEvent(event, playerIds);
       if (
         changedEvent !== undefined &&
@@ -2966,26 +4104,36 @@ function historicalVictoryPointChangeClaimsForView(
 
     if (event.type === 'link_scored') {
       if (pendingScoringChange?.change.reason !== 'link scoring') {
-        clearPendingScoringChange();
+        rejectPendingScoringChange();
         continue;
       }
-      const scoredEvent = projectLinkScoredEvent(
+      const projectedScoredEvent = projectLinkScoredEvent(
         event,
         board,
         historicalLinkOwners,
         historicalLinkScoreValues,
         playerIds,
       );
-      if (scoredEvent === undefined || historicalLinkScoreClaims.get(event) === false) {
-        clearPendingScoringChange();
+      const rawScoredEvent = projectRawLinkScoredEvent(event, playerIds);
+      if (rawScoredEvent === undefined || historicalLinkScoreClaims.get(event) === false) {
+        if (hasGeneratedScoredInstanceId(event, 'link')) {
+          rejectPendingScoringChange();
+        } else {
+          rejectPendingScoringChange();
+        }
         continue;
       }
+      const scoredEvent = projectedScoredEvent ?? rawScoredEvent;
       if (
         pendingScoringChange.change.playerId === scoredEvent.ownerPlayerId &&
         pendingScoringChange.change.delta === scoredEvent.points
       ) {
-        claims.set(pendingScoringChange.event, true);
-        clearPendingScoringChange();
+        if (projectedScoredEvent !== undefined || historicalLinkScoreClaims.get(event) === true) {
+          claims.set(pendingScoringChange.event, true);
+        } else {
+          tentativeEraScoringChanges.push(pendingScoringChange);
+        }
+        pendingScoringChange = undefined;
         continue;
       }
       rejectPendingScoringChange();
@@ -2994,31 +4142,84 @@ function historicalVictoryPointChangeClaimsForView(
 
     if (event.type === 'industry_scored') {
       if (pendingScoringChange?.change.reason !== 'industry scoring') {
-        clearPendingScoringChange();
+        rejectPendingScoringChange();
         continue;
       }
-      const scoredEvent = projectIndustryScoredEvent(event, board, historicalIndustryScoreValues, playerIds);
-      if (scoredEvent === undefined || historicalIndustryScoreClaims.get(event) === false) {
-        clearPendingScoringChange();
+      const projectedScoredEvent = projectIndustryScoredEvent(event, board, historicalIndustryScoreValues, playerIds);
+      const rawScoredEvent = projectRawIndustryScoredEvent(event, playerIds);
+      if (rawScoredEvent === undefined || historicalIndustryScoreClaims.get(event) === false) {
+        if (hasGeneratedScoredInstanceId(event, 'industry')) {
+          rejectPendingScoringChange();
+        } else {
+          rejectPendingScoringChange();
+        }
         continue;
       }
+      const scoredEvent = projectedScoredEvent ?? rawScoredEvent;
       if (
         pendingScoringChange.change.playerId === scoredEvent.ownerPlayerId &&
         pendingScoringChange.change.delta === scoredEvent.points
       ) {
-        claims.set(pendingScoringChange.event, true);
-        clearPendingScoringChange();
+        if (projectedScoredEvent !== undefined || historicalIndustryScoreClaims.get(event) === true) {
+          claims.set(pendingScoringChange.event, true);
+        } else {
+          tentativeEraScoringChanges.push(pendingScoringChange);
+        }
+        pendingScoringChange = undefined;
         continue;
       }
       rejectPendingScoringChange();
       continue;
     }
 
-    clearPendingScoringChange();
+    if (event.type === 'era_ended') {
+      rejectPendingScoringChange();
+      const score = projectEraScoreBreakdown(event.score, playerIds);
+      if (score !== undefined && score.era === nonEmptyString(event.era)) {
+        resolveTentativeEraScoringChanges(score);
+      }
+      continue;
+    }
+
+    rejectPendingScoringChange();
   }
 
-  clearPendingScoringChange();
+  rejectPendingScoringChange();
+  rejectTentativeEraScoringChanges();
   return claims;
+}
+
+function hasGeneratedScoredInstanceId(event: Record<string, unknown>, prefix: 'link' | 'industry'): boolean {
+  const field = prefix === 'link' ? 'linkInstanceId' : 'industryInstanceId';
+  return isGeneratedInstanceId(nonEmptyString(event[field]), prefix);
+}
+
+function projectRawLinkScoredEvent(
+  event: Record<string, unknown>,
+  playerIds: string[],
+): ProjectedLinkScoredEvent | undefined {
+  const linkInstanceId = nonEmptyString(event.linkInstanceId);
+  const ownerPlayerId = playerIdField(event, 'ownerPlayerId', playerIds);
+  const points = nonNegativeIntegerField(event, 'points');
+  return linkInstanceId !== undefined &&
+    ownerPlayerId !== undefined &&
+    points !== undefined
+    ? {type: 'link_scored', linkInstanceId, ownerPlayerId, points}
+    : undefined;
+}
+
+function projectRawIndustryScoredEvent(
+  event: Record<string, unknown>,
+  playerIds: string[],
+): ProjectedIndustryScoredEvent | undefined {
+  const industryInstanceId = nonEmptyString(event.industryInstanceId);
+  const ownerPlayerId = playerIdField(event, 'ownerPlayerId', playerIds);
+  const points = nonNegativeIntegerField(event, 'points');
+  return industryInstanceId !== undefined &&
+    ownerPlayerId !== undefined &&
+    points !== undefined
+    ? {type: 'industry_scored', industryInstanceId, ownerPlayerId, points}
+    : undefined;
 }
 
 function projectKnownGameEvent(
@@ -3038,14 +4239,20 @@ function projectKnownGameEvent(
   historicalIndustryBuildClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalIndustryRemovalClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalIndustryFlipClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalIndustryFlipIncomeChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalIndustrySaleClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalResourceConsumptionClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalResourceSoldToMarketClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalMarketSaleCashClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalActionSpendCashClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalRoundIncomeCashClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalLinkBuildClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalMerchantBonusClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalMerchantBonusValueChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalLoanValueChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalNegativeIncomeLiquidationCashClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalMerchantDevelopResolutions: ReadonlyMap<Record<string, unknown>, boolean>,
+  historicalNegativeIncomeShortfallClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalNegativeIncomeStarts: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalNegativeIncomeResolutions: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalTurnAdvancedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
@@ -3053,6 +4260,7 @@ function projectKnownGameEvent(
   historicalScoutedClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   historicalVictoryPointChangeClaims: ReadonlyMap<Record<string, unknown>, boolean>,
   playerIds: string[],
+  turnOrder: string[],
   playerCount: GameState['playerCount'],
   expectedGameEndedWinners: string[] | undefined,
 ): GameEvent | undefined {
@@ -3076,18 +4284,37 @@ function projectKnownGameEvent(
       const cashEvent = projectCashChangedEvent(event, playerIds);
       return cashEvent === undefined ||
         historicalMarketSaleCashClaims.get(event) === false ||
-        historicalMerchantBonusValueChangeClaims.get(event) === false
+        (
+          isActionSpendReason(cashEvent.reason) &&
+          historicalActionSpendCashClaims.get(event) !== true
+        ) ||
+        historicalRoundIncomeCashClaims.get(event) === false ||
+        (
+          cashEvent.reason === 'merchant bonus' &&
+          historicalMerchantBonusValueChangeClaims.get(event) !== true
+        ) ||
+        historicalLoanValueChangeClaims.get(event) === false ||
+        historicalNegativeIncomeLiquidationCashClaims.get(event) === false
         ? undefined
         : cashEvent;
     }
     case 'income_position_changed': {
       const incomeEvent = projectIncomePositionChangedEvent(event, playerIds);
-      return incomeEvent === undefined || historicalMerchantBonusValueChangeClaims.get(event) === false
+      return incomeEvent === undefined ||
+        (
+          incomeEvent.reason === 'merchant bonus' &&
+          historicalMerchantBonusValueChangeClaims.get(event) !== true
+        ) ||
+        (
+          industryFlipIncomeReason(incomeEvent.reason) !== undefined &&
+          historicalIndustryFlipIncomeChangeClaims.get(event) !== true
+        ) ||
+        historicalLoanValueChangeClaims.get(event) === false
         ? undefined
         : incomeEvent;
     }
     case 'industry_built': {
-      const builtEvent = projectIndustryBuiltEvent(event, playerIds);
+      const builtEvent = projectIndustryBuiltEvent(event, board, playerIds);
       return builtEvent === undefined || historicalIndustryBuildClaims.get(event) === false
         ? undefined
         : builtEvent;
@@ -3123,7 +4350,7 @@ function projectKnownGameEvent(
         : soldEvent;
     }
     case 'link_built': {
-      const builtEvent = projectLinkBuiltEvent(event, playerIds, playerCount);
+      const builtEvent = projectLinkBuiltEvent(event, board, playerIds, playerCount);
       return builtEvent === undefined || historicalLinkBuildClaims.get(event) === false
         ? undefined
         : builtEvent;
@@ -3163,24 +4390,31 @@ function projectKnownGameEvent(
       return isCompletePlayerOrder(order, playerIds) ? {type: 'turn_order_updated', order} : undefined;
     }
     case 'negative_income_started': {
-      const startedEvent = projectNegativeIncomeStartedEvent(event, playerIds);
-      return startedEvent === undefined || historicalNegativeIncomeStarts.get(event) === false
+      const startedEvent = projectNegativeIncomeStartedEvent(event, playerIds, turnOrder);
+      return startedEvent === undefined || historicalNegativeIncomeStarts.get(event) !== true
         ? undefined
         : startedEvent;
     }
     case 'negative_income_resolved': {
       const resolvedEvent = projectNegativeIncomeResolvedEvent(event, board, playerIds);
-      return resolvedEvent === undefined || historicalNegativeIncomeResolutions.get(event) === false
+      return resolvedEvent === undefined || historicalNegativeIncomeResolutions.get(event) !== true
         ? undefined
         : resolvedEvent;
     }
     case 'victory_points_changed': {
       const changedEvent = projectVictoryPointsChangedEvent(event, playerIds);
       return changedEvent === undefined ||
-        historicalMerchantBonusValueChangeClaims.get(event) === false ||
+        (
+          changedEvent.reason === 'merchant bonus' &&
+          historicalMerchantBonusValueChangeClaims.get(event) !== true
+        ) ||
+        (
+          changedEvent.reason === 'negative income shortfall' &&
+          historicalNegativeIncomeShortfallClaims.get(event) !== true
+        ) ||
         (
           (changedEvent.reason === 'link scoring' || changedEvent.reason === 'industry scoring') &&
-          historicalVictoryPointChangeClaims.get(event) === false
+          historicalVictoryPointChangeClaims.get(event) !== true
         )
         ? undefined
         : changedEvent;
@@ -3220,43 +4454,65 @@ function eventLogForView(
   playerCount = projectPlayerCount(game.playerCount, playerIds),
   board = projectBoardState(game.board, playerIds, playerCount),
   players = projectPlayers(game.players, playerCount),
+  turnOrder = projectTurnOrder(game.turnOrder, playerIds),
   status: GameState['status'] = isOneOf(game.status, GAME_STATUSES) ? game.status : 'playing',
 ): GameEvent[] {
   const hiddenDiscardIds = hiddenFaceDownDiscardIds(game, playerIds, playerCount);
   const expectedGameEndedWinners = status === 'ended'
     ? determineWinners({players} as GameState)
     : undefined;
+  const terminalEra = status === 'ended'
+    ? game.variant === 'introductory_canal_only' ? 'canal' : 'rail'
+    : undefined;
   const historicalLifecycleClaims = historicalLifecycleClaimsForView(
     game.eventLog,
     game.id,
     playerIds,
     expectedGameEndedWinners,
+    terminalEra,
+  );
+  const visibleEventLog = eventsThroughTerminalLifecycle(
+    game.eventLog,
+    historicalLifecycleClaims.eraEnded,
+    historicalLifecycleClaims.gameEnded,
+    terminalEra,
   );
   const historicalCardDiscardClaims = historicalCardDiscardClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     hiddenDiscardIds,
     historicalLifecycleClaims.eraEnded,
     playerIds,
     playerCount,
   );
   const historicalTurnAdvancedClaims = historicalTurnAdvancedClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     historicalLifecycleClaims.eraEnded,
     playerIds,
   );
-  const historicalLoanTakenClaims = historicalLoanTakenClaimsForView(game.eventLog, playerIds);
-  const historicalScoutedClaims = historicalScoutedClaimsForView(
-    game.eventLog,
+  const historicalLoanValueChangeClaims = historicalLoanValueChangeClaimsForView(
+    visibleEventLog,
     hiddenDiscardIds,
     historicalCardDiscardClaims,
     playerIds,
     playerCount,
   );
-  const historicalLinkOwners = historicalLinkOwnersForView(game.eventLog, playerIds, playerCount);
-  const historicalLinkScoreValues = historicalLinkScoreValuesForView(game.eventLog, board, historicalLinkOwners, playerIds);
-  const historicalIndustryScoreValues = historicalIndustryScoreValuesForView(game.eventLog, board, playerIds);
+  const historicalLoanTakenClaims = historicalLoanTakenClaimsForView(
+    visibleEventLog,
+    historicalLoanValueChangeClaims,
+    playerIds,
+  );
+  const historicalScoutedClaims = historicalScoutedClaimsForView(
+    visibleEventLog,
+    hiddenDiscardIds,
+    historicalCardDiscardClaims,
+    playerIds,
+    playerCount,
+  );
+  const historicalLinkOwners = historicalLinkOwnersForView(visibleEventLog, playerIds, playerCount);
+  const historicalLinkScoreValues = historicalLinkScoreValuesForView(visibleEventLog, board, historicalLinkOwners, playerIds);
+  const historicalIndustryScoreValues = historicalIndustryScoreValuesForView(visibleEventLog, board, playerIds);
   const historicalScoringClaims = historicalScoringClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     board,
     historicalLinkOwners,
     historicalLinkScoreValues,
@@ -3265,7 +4521,7 @@ function eventLogForView(
     playerIds,
   );
   const historicalVictoryPointChangeClaims = historicalVictoryPointChangeClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     board,
     historicalLinkOwners,
     historicalLinkScoreValues,
@@ -3274,44 +4530,92 @@ function eventLogForView(
     historicalScoringClaims.industries,
     playerIds,
   );
-  const historicalIndustryBuildClaims = historicalIndustryBuildClaimsForView(game.eventLog, playerIds);
-  const historicalIndustryRemovalClaims = historicalIndustryRemovalClaimsForView(game.eventLog, board);
-  const historicalIndustryFlipClaims = historicalIndustryFlipClaimsForView(game.eventLog, board, playerIds);
-  const historicalIndustrySaleClaims = historicalIndustrySaleClaimsForView(game.eventLog, board, playerIds);
+  const historicalIndustryBuildClaims = historicalIndustryBuildClaimsForView(visibleEventLog, board, playerIds);
+  const historicalIndustryRemovalClaims = historicalIndustryRemovalClaimsForView(visibleEventLog, board);
+  const historicalNegativeIncomeLiquidationCashClaims = historicalNegativeIncomeLiquidationCashClaimsForView(
+    visibleEventLog,
+    game.board,
+    playerIds,
+  );
+  const historicalIndustryFlipClaims = historicalIndustryFlipClaimsForView(visibleEventLog, board, playerIds);
+  const historicalIndustryFlipIncomeChangeClaims = historicalIndustryFlipIncomeChangeClaimsForView(
+    visibleEventLog,
+    board,
+    historicalIndustryFlipClaims,
+    playerIds,
+  );
+  const historicalIndustrySaleClaims = historicalIndustrySaleClaimsForView(
+    visibleEventLog,
+    board,
+    historicalIndustryFlipClaims,
+    playerIds,
+  );
   const historicalResourceConsumptionClaims = historicalResourceConsumptionClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     board,
     historicalLifecycleClaims.eraEnded,
     playerIds,
   );
-  const historicalResourceSoldToMarketClaims = historicalResourceSoldToMarketClaimsForView(game.eventLog, board);
+  const historicalResourceSoldToMarketClaims = historicalResourceSoldToMarketClaimsForView(visibleEventLog, board);
   const historicalMarketSaleCashClaims = historicalMarketSaleCashClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     board,
     historicalResourceSoldToMarketClaims,
     playerIds,
   );
-  const historicalLinkBuildClaims = historicalLinkBuildClaimsForView(game.eventLog, playerIds, playerCount);
-  const historicalMerchantBonusClaims = historicalMerchantBonusClaimsForView(
-    game.eventLog,
+  const historicalLinkBuildClaims = historicalLinkBuildClaimsForView(visibleEventLog, board, playerIds, playerCount);
+  const historicalActionSpendCashClaims = historicalActionSpendCashClaimsForView(
+    visibleEventLog,
     board,
     historicalResourceConsumptionClaims,
+    historicalIndustryBuildClaims,
+    historicalLinkBuildClaims,
+    playerIds,
+    playerCount,
+  );
+  const historicalMerchantBonusClaims = historicalMerchantBonusClaimsForView(
+    visibleEventLog,
+    board,
+    historicalResourceConsumptionClaims,
+    historicalLifecycleClaims.eraEnded,
     playerIds,
   );
   const historicalMerchantBonusValueChangeClaims = historicalMerchantBonusValueChangeClaimsForView(
-    game.eventLog,
+    visibleEventLog,
     board,
     historicalMerchantBonusClaims,
     playerIds,
   );
   const historicalMerchantDevelopResolutions = historicalMerchantDevelopResolutionsForView(
-    game.eventLog,
+    visibleEventLog,
     board,
+    players,
     historicalMerchantBonusClaims,
+    historicalLifecycleClaims.eraEnded,
     playerIds,
   );
-  const historicalNegativeIncomeClaims = historicalNegativeIncomeClaimsForView(game.eventLog, board, playerIds);
-  return game.eventLog.flatMap((event) => {
+  const historicalNegativeIncomeClaims = historicalNegativeIncomeClaimsForView(
+    visibleEventLog,
+    board,
+    playerIds,
+    turnOrder,
+  );
+  const historicalNegativeIncomeShortfallClaims = historicalNegativeIncomeShortfallClaimsForView(
+    visibleEventLog,
+    board,
+    historicalNegativeIncomeClaims.resolutions,
+    playerIds,
+  );
+  const historicalRoundIncomeCashClaims = historicalRoundIncomeCashClaimsForView(
+    visibleEventLog,
+    board,
+    historicalMerchantBonusValueChangeClaims,
+    historicalIndustryFlipIncomeChangeClaims,
+    historicalLoanValueChangeClaims,
+    historicalNegativeIncomeClaims.resolutions,
+    playerIds,
+  );
+  return visibleEventLog.flatMap((event) => {
     const projectedEvent = projectKnownGameEvent(
       event,
       game.id,
@@ -3329,14 +4633,20 @@ function eventLogForView(
       historicalIndustryBuildClaims,
       historicalIndustryRemovalClaims,
       historicalIndustryFlipClaims,
+      historicalIndustryFlipIncomeChangeClaims,
       historicalIndustrySaleClaims,
       historicalResourceConsumptionClaims,
       historicalResourceSoldToMarketClaims,
       historicalMarketSaleCashClaims,
+      historicalActionSpendCashClaims,
+      historicalRoundIncomeCashClaims,
       historicalLinkBuildClaims,
       historicalMerchantBonusClaims,
       historicalMerchantBonusValueChangeClaims,
+      historicalLoanValueChangeClaims,
+      historicalNegativeIncomeLiquidationCashClaims,
       historicalMerchantDevelopResolutions,
+      historicalNegativeIncomeShortfallClaims,
       historicalNegativeIncomeClaims.starts,
       historicalNegativeIncomeClaims.resolutions,
       historicalTurnAdvancedClaims,
@@ -3344,6 +4654,7 @@ function eventLogForView(
       historicalScoutedClaims,
       historicalVictoryPointChangeClaims,
       playerIds,
+      turnOrder,
       playerCount,
       expectedGameEndedWinners,
     );
@@ -3352,14 +4663,17 @@ function eventLogForView(
 }
 
 function cloneKnownGameState(game: GameState): GameState {
-  const playerIds = projectPlayerIds(game.players);
+  const playerIds = projectPlayerIdsForDeclaredCount(game.players, declaredPlayerCount(game.playerCount));
   const playerCount = projectPlayerCount(game.playerCount, playerIds);
-  const players = projectPlayers(game.players, playerCount);
+  const players = projectPlayers(game.players, playerCount, playerIds);
   const era: GameState['era'] = isOneOf(game.era, ERAS) ? game.era : 'canal';
   const status: GameState['status'] = isOneOf(game.status, GAME_STATUSES) ? game.status : 'playing';
   const roundNumber = projectRoundNumber(game.roundNumber);
   const turnOrder = projectTurnOrder(game.turnOrder, playerIds);
   const actionsAllowedThisTurn = projectActionsAllowedThisTurn(game.actionsAllowedThisTurn, era, roundNumber);
+  const variant = game.variant === 'introductory_canal_only' && era === 'canal'
+    ? 'introductory_canal_only' as const
+    : undefined;
   const board = projectBoardState(game.board, playerIds, playerCount);
   projectBuiltIndustryReferences(players, board);
   projectCurrentEraRemainingLinks(players, board, era, status);
@@ -3368,7 +4682,7 @@ function cloneKnownGameState(game: GameState): GameState {
     : undefined;
   const lastEraScore = projectEraScoreBreakdown(game.lastEraScore, playerIds);
   const knownState: GameState = {
-    id: game.id,
+    id: publicGameId(game.id),
     playerCount,
     era,
     roundNumber,
@@ -3380,10 +4694,10 @@ function cloneKnownGameState(game: GameState): GameState {
     board,
     cardZones: projectCardZones(game.cardZones, playerCount),
     markets: projectMarkets(game.markets),
-    eventLog: eventLogForView(game, playerIds, playerCount, board, players, status),
+    eventLog: eventLogForView(game, playerIds, playerCount, board, players, turnOrder, status),
     nextInstanceId: projectNextInstanceId(game.nextInstanceId),
     status,
-    ...(game.variant === 'introductory_canal_only' ? {variant: 'introductory_canal_only' as const} : {}),
+    ...(variant ? {variant} : {}),
     ...(pendingDecision ? {pendingDecision} : {}),
     ...(lastEraScore ? {lastEraScore} : {}),
   };
@@ -3423,12 +4737,223 @@ function publicStaticConfig() {
   return JSON.parse(JSON.stringify(staticConfig)) as typeof staticConfig;
 }
 
+function publicFaceAuditChecklist() {
+  return JSON.parse(JSON.stringify(buildFaceAuditChecklistExport())) as ReturnType<typeof buildFaceAuditChecklistExport>;
+}
+
+function publicFaceAuditReviewTemplate() {
+  return JSON.parse(JSON.stringify(buildFaceAuditReviewTemplate())) as ReturnType<typeof buildFaceAuditReviewTemplate>;
+}
+
+function publicFaceAuditAreaReviewTemplate(area: FaceAuditArea) {
+  return JSON.parse(JSON.stringify(buildFaceAuditAreaReviewTemplate(area))) as ReturnType<typeof buildFaceAuditAreaReviewTemplate>;
+}
+
+function publicFaceAuditReviewTodoSummary() {
+  const todo = buildFaceAuditReviewTodo([]);
+  return JSON.parse(JSON.stringify(buildFaceAuditReviewTodoSummary(todo))) as ReturnType<typeof buildFaceAuditReviewTodoSummary>;
+}
+
+function publicFaceAuditAreaReviewTodoSummary(area: FaceAuditArea) {
+  return JSON.parse(JSON.stringify(buildFaceAuditAreaReviewTodoSummary([], area))) as ReturnType<typeof buildFaceAuditAreaReviewTodoSummary>;
+}
+
+function sendFaceAuditReviewSheet(
+  res: Response,
+  report: ReturnType<typeof buildFaceAuditReviewSheet>,
+): void {
+  res.setHeader('Content-Disposition', 'attachment; filename="face-audit-review-sheet.tsv"');
+  res.setHeader('X-Face-Audit-Checklist-Fingerprint', report.checklistFingerprint);
+  res.setHeader('X-Face-Audit-Review-Fingerprint', report.reviewFingerprint);
+  res.setHeader('X-Face-Audit-Row-Count', String(report.rowCount));
+  res.type('text/tab-separated-values').send(report.tsv);
+}
+
+function sendFaceAuditAreaReviewSheet(
+  res: Response,
+  report: ReturnType<typeof buildFaceAuditAreaReviewSheet>,
+): void {
+  res.setHeader('Content-Disposition', `attachment; filename="${faceAuditAreaReviewSheetArtifactFileName(report.area)}"`);
+  res.setHeader('X-Face-Audit-Checklist-Fingerprint', report.checklistFingerprint);
+  res.setHeader('X-Face-Audit-Review-Fingerprint', report.reviewFingerprint);
+  res.setHeader('X-Face-Audit-Area', report.area);
+  res.setHeader('X-Face-Audit-Row-Count', String(report.rowCount));
+  res.setHeader('X-Face-Audit-Area-Item-Count', String(report.areaItemCount));
+  res.type('text/tab-separated-values').send(report.tsv);
+}
+
+function faceAuditReviewerInstructionsReport(artifacts: readonly unknown[]) {
+  const status = summarizeFaceAuditReviewStatus(artifacts);
+  const todo = buildFaceAuditReviewTodo(artifacts);
+  const plan = buildFaceAuditReviewPlan(artifacts);
+  const handoff = buildFaceAuditReviewerHandoff(artifacts);
+  const markdown = buildFaceAuditReviewerInstructions({
+    status,
+    todo,
+    plan,
+    handoff,
+    areaFiles: handoff.areas.map((area) => ({
+      area: area.area,
+      fileName: faceAuditAreaReviewArtifactFileName(area.area),
+    })),
+  });
+  const issues = [
+    ...status.issues,
+    ...todo.issues,
+    ...plan.issues,
+    ...handoff.issues,
+  ];
+
+  return {
+    ok: status.ok && todo.ok && plan.ok && handoff.ok,
+    checklistFingerprint: status.checklistFingerprint,
+    reviewFingerprint: status.reviewFingerprint,
+    markdown,
+    issueCount: issues.length,
+    issues,
+  };
+}
+
+function sendFaceAuditReviewerInstructions(
+  res: Response,
+  report: ReturnType<typeof faceAuditReviewerInstructionsReport>,
+): void {
+  res.setHeader('Content-Disposition', 'attachment; filename="face-audit-reviewer-instructions.md"');
+  res.setHeader('X-Face-Audit-Checklist-Fingerprint', report.checklistFingerprint);
+  res.setHeader('X-Face-Audit-Review-Fingerprint', report.reviewFingerprint);
+  res.type('text/markdown').send(`${report.markdown}\n`);
+}
+
+function sendFaceAuditAreaReviewerInstructions(
+  res: Response,
+  report: ReturnType<typeof buildFaceAuditAreaReviewerInstructionsReport>,
+): void {
+  res.setHeader('Content-Disposition', `attachment; filename="${faceAuditAreaReviewerInstructionsArtifactFileName(report.area)}"`);
+  res.setHeader('X-Face-Audit-Checklist-Fingerprint', report.checklistFingerprint);
+  res.setHeader('X-Face-Audit-Review-Fingerprint', report.reviewFingerprint);
+  res.setHeader('X-Face-Audit-Area', report.area);
+  res.type('text/markdown').send(`${report.markdown}\n`);
+}
+
+function faceAuditReviewArtifactsFromPayload(payload: unknown): unknown[] | undefined {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+  if (isRecord(payload) && Array.isArray(payload.artifacts)) {
+    return payload.artifacts;
+  }
+  return undefined;
+}
+
+function faceAuditReviewSheetImportFromPayload(
+  payload: unknown,
+): {artifacts: unknown[]; reviewSheetTsv: string} | undefined {
+  if (!isRecord(payload) || !Array.isArray(payload.artifacts) || typeof payload.reviewSheetTsv !== 'string') {
+    return undefined;
+  }
+  return {
+    artifacts: payload.artifacts,
+    reviewSheetTsv: payload.reviewSheetTsv,
+  };
+}
+
+function faceAuditHandoffResponseFromPayload(
+  payload: unknown,
+): {handoff: unknown; artifacts: unknown[]} | undefined {
+  if (!isRecord(payload) || !('handoff' in payload) || !Array.isArray(payload.artifacts)) {
+    return undefined;
+  }
+  return {
+    handoff: payload.handoff,
+    artifacts: payload.artifacts,
+  };
+}
+
+function faceAuditReleaseGateLockArtifactFromPayload(payload: unknown): unknown | undefined {
+  if (payload === undefined) {
+    return undefined;
+  }
+  if (isRecord(payload) && Object.prototype.hasOwnProperty.call(payload, 'lockArtifact')) {
+    return payload.lockArtifact;
+  }
+  if (isRecord(payload) && Object.keys(payload).length === 0) {
+    return undefined;
+  }
+  return payload;
+}
+
+function faceAuditMatchTemplatePayloadFromPayload(payload: unknown): {
+  sourceArtifact: unknown;
+  sourceId: string;
+  sourceIdsByArea?: unknown;
+  reviewer: string;
+  reviewedAt: string;
+  mode: FaceAuditEvidenceRefMode;
+} {
+  const source = isRecord(payload) ? payload : {};
+  const rawMode = Object.prototype.hasOwnProperty.call(source, 'mode') ? source.mode : 'area';
+  return {
+    sourceArtifact: Object.prototype.hasOwnProperty.call(source, 'sourceArtifact')
+      ? source.sourceArtifact
+      : payload,
+    sourceId: nonEmptyString(source.sourceId) ?? '',
+    sourceIdsByArea: Object.prototype.hasOwnProperty.call(source, 'sourceIdsByArea')
+      ? source.sourceIdsByArea
+      : undefined,
+    reviewer: nonEmptyString(source.reviewer) ?? '',
+    reviewedAt: nonEmptyString(source.reviewedAt) ?? '',
+    mode: (parseFaceAuditEvidenceRefMode(rawMode) ?? rawMode) as FaceAuditEvidenceRefMode,
+  };
+}
+
+function faceAuditSourceIdsByAreaTemplatePayloadFromPayload(payload: unknown): {
+  sourceArtifact: unknown;
+  defaultSourceId: string;
+  overrides: unknown;
+} {
+  const source = isRecord(payload) ? payload : {};
+  const overrides = Object.prototype.hasOwnProperty.call(source, 'sourceIdsByArea')
+    ? source.sourceIdsByArea
+    : Object.prototype.hasOwnProperty.call(source, 'overrides')
+      ? source.overrides
+      : {};
+  return {
+    sourceArtifact: Object.prototype.hasOwnProperty.call(source, 'sourceArtifact')
+      ? source.sourceArtifact
+      : payload,
+    defaultSourceId: nonEmptyString(source.defaultSourceId) ?? '',
+    overrides,
+  };
+}
+
+function connectedPlayerIdsForGame(io: SocketIOServer, game: GameSummary): string[] {
+  const room = io.sockets.adapter.rooms.get(game.id);
+  if (!room) {
+    return [];
+  }
+
+  const activeSeats = new Set(PUBLIC_PLAYER_IDS.slice(0, game.playerCount));
+  const connectedPlayerIds = new Set<string>();
+  for (const socketId of room) {
+    const socket = io.sockets.sockets.get(socketId);
+    const playerId = optionalString(socket?.data.playerId);
+    if (playerId && activeSeats.has(playerId as typeof PUBLIC_PLAYER_IDS[number])) {
+      connectedPlayerIds.add(playerId);
+    }
+  }
+  return PUBLIC_PLAYER_IDS.filter((playerId) => connectedPlayerIds.has(playerId));
+}
+
 function publicGameList(io: SocketIOServer, store: GameStore) {
   return {
-    games: store.list().map((game) => ({
-      ...game,
-      connectedClientCount: io.sockets.adapter.rooms.get(game.id)?.size ?? 0,
-    })),
+    games: store.list().map((game) => {
+      const connectedPlayerIds = connectedPlayerIdsForGame(io, game);
+      return {
+        ...game,
+        connectedClientCount: io.sockets.adapter.rooms.get(game.id)?.size ?? 0,
+        ...(connectedPlayerIds.length > 0 ? {connectedPlayerIds} : {}),
+      };
+    }),
   };
 }
 
@@ -3470,6 +4995,535 @@ export function createBrassServer(options: BrassServerOptions): BrassServer {
 
   app.get('/api/static-config', (_req, res) => {
     res.json({config: publicStaticConfig()});
+  });
+
+  app.get('/api/face-audit-checklist', (_req, res) => {
+    res.json({faceAudit: publicFaceAuditChecklist()});
+  });
+
+  app.get('/api/face-audit-review-template', (_req, res) => {
+    res.json({faceAuditReview: publicFaceAuditReviewTemplate()});
+  });
+
+  app.get('/api/face-audit-review-template/todo-summary', (_req, res) => {
+    res.json({faceAuditReviewTodoSummary: publicFaceAuditReviewTodoSummary()});
+  });
+
+  app.get('/api/face-audit-review-template/:area/todo-summary', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    res.json({faceAuditAreaReviewTodoSummary: publicFaceAuditAreaReviewTodoSummary(area)});
+  });
+
+  app.get('/api/face-audit-review-template/status', (_req, res) => {
+    res.json({faceAuditReviewStatus: summarizeFaceAuditReviewStatus([])});
+  });
+
+  app.get('/api/face-audit-review-template/todo', (_req, res) => {
+    res.json({faceAuditReviewTodo: buildFaceAuditReviewTodo([])});
+  });
+
+  app.get('/api/face-audit-review-template/review-sheet', (_req, res) => {
+    sendFaceAuditReviewSheet(res, buildFaceAuditReviewSheet([]));
+  });
+
+  app.get('/api/face-audit-review-template/:area/review-sheet', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    sendFaceAuditAreaReviewSheet(res, buildFaceAuditAreaReviewSheet([], area));
+  });
+
+  app.get('/api/face-audit-review-template/review-plan', (_req, res) => {
+    res.json({faceAuditReviewPlan: buildFaceAuditReviewPlan([])});
+  });
+
+  app.get('/api/face-audit-review-template/reviewer-instructions', (_req, res) => {
+    sendFaceAuditReviewerInstructions(res, faceAuditReviewerInstructionsReport([]));
+  });
+
+  app.get('/api/face-audit-review-template/:area/reviewer-instructions', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    sendFaceAuditAreaReviewerInstructions(res, buildFaceAuditAreaReviewerInstructionsReport([], area));
+  });
+
+  app.get('/api/face-audit-review-template/handoff', (_req, res) => {
+    res.json({faceAuditReviewerHandoff: buildFaceAuditReviewerHandoff([])});
+  });
+
+  app.get('/api/face-audit-review-template/:area', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    res.json({faceAuditAreaReview: publicFaceAuditAreaReviewTemplate(area)});
+  });
+
+  app.post('/api/face-audit-evidence-ref-template', (req, res) => {
+    const payload = isRecord(req.body) ? req.body : {};
+    const sourceId = nonEmptyString(payload.sourceId) ?? '';
+    const area = parseFaceAuditArea(payload.area);
+    const mode = parseFaceAuditEvidenceRefMode(payload.mode ?? 'area');
+    const issues: Array<{field: string; message: string}> = [];
+    if (!validFaceAuditEvidenceSourceId(sourceId)) {
+      issues.push({
+        field: 'sourceId',
+        message: 'Face-audit evidence ref template source id must match the evidenceRef source id format',
+      });
+    }
+    if (!area) {
+      issues.push({
+        field: 'area',
+        message: 'Face-audit evidence ref template area must be a known face-audit area',
+      });
+    }
+    if (!mode) {
+      issues.push({
+        field: 'mode',
+        message: 'Face-audit evidence ref template mode must be area or items',
+      });
+    }
+    if (issues.length > 0 || !area || !mode) {
+      res.status(422).json({faceAuditEvidenceRefTemplateValidation: {
+        ok: false,
+        issueCount: issues.length,
+        issues,
+      }});
+      return;
+    }
+    res.json({faceAuditEvidenceRefTemplate: buildFaceAuditEvidenceRefTemplate(sourceId, area, mode)});
+  });
+
+  app.post('/api/face-audit-source-ids-by-area-template', (req, res) => {
+    const payload = faceAuditSourceIdsByAreaTemplatePayloadFromPayload(req.body);
+    const validation = buildFaceAuditSourceIdsByAreaTemplate(
+      payload.sourceArtifact,
+      payload.defaultSourceId,
+      payload.overrides,
+    );
+    res.status(validation.ok ? 200 : 422).json(validation.ok
+      ? {
+          faceAuditSourceIdsByArea: validation.sourceIdsByArea,
+          faceAuditSourceIdsByAreaTemplateValidation: validation,
+        }
+      : {faceAuditSourceIdsByAreaTemplateValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/match', (req, res) => {
+    const payload = faceAuditMatchTemplatePayloadFromPayload(req.body);
+    const validation = payload.sourceIdsByArea === undefined
+      ? buildFaceAuditMatchReviewArtifact(
+          payload.sourceArtifact,
+          payload.sourceId,
+          payload.reviewer,
+          payload.reviewedAt,
+          payload.mode,
+        )
+      : buildFaceAuditMappedMatchReviewArtifact(
+          payload.sourceArtifact,
+          payload.sourceIdsByArea,
+          payload.reviewer,
+          payload.reviewedAt,
+          payload.mode,
+        );
+    res.status(validation.ok ? 200 : 422).json(validation.ok
+      ? {faceAuditReview: validation.review, faceAuditReviewValidation: validation}
+      : {faceAuditReviewValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/:area/match', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    const payload = faceAuditMatchTemplatePayloadFromPayload(req.body);
+    const validation = buildFaceAuditAreaMatchReviewArtifact(
+      area,
+      payload.sourceArtifact,
+      payload.sourceId,
+      payload.reviewer,
+      payload.reviewedAt,
+      payload.mode,
+    );
+    res.status(validation.ok ? 200 : 422).json(validation.ok
+      ? {faceAuditAreaReview: validation.review, faceAuditAreaReviewValidation: validation}
+      : {faceAuditAreaReviewValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/merge', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      res.status(422).json({
+        faceAuditReviewValidation: {
+          ok: false,
+          review: publicFaceAuditReviewTemplate(),
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit review merge expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const validation = mergeFaceAuditReviewArtifacts(artifacts);
+    res.status(validation.ok ? 200 : 422).json({faceAuditReviewValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/status', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = summarizeFaceAuditReviewStatus([]);
+      res.status(422).json({
+        faceAuditReviewStatus: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit review status expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = summarizeFaceAuditReviewStatus(artifacts);
+    res.status(report.ok ? 200 : 422).json({faceAuditReviewStatus: report});
+  });
+
+  app.post('/api/face-audit-review-template/todo', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditReviewTodo([]);
+      res.status(422).json({
+        faceAuditReviewTodo: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit review todo expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = buildFaceAuditReviewTodo(artifacts);
+    res.status(report.ok ? 200 : 422).json({faceAuditReviewTodo: report});
+  });
+
+  app.post('/api/face-audit-review-template/todo-summary', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditReviewTodo([]);
+      res.status(422).json({
+        faceAuditReviewTodoSummary: buildFaceAuditReviewTodoSummary({
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit review todo summary expects a JSON array or an object with an artifacts array',
+          }],
+        }),
+      });
+      return;
+    }
+    const report = buildFaceAuditReviewTodo(artifacts);
+    res.status(report.ok ? 200 : 422).json({faceAuditReviewTodoSummary: buildFaceAuditReviewTodoSummary(report)});
+  });
+
+  app.post('/api/face-audit-review-template/:area/todo-summary', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditAreaReviewTodoSummary([], area);
+      res.status(422).json({
+        faceAuditAreaReviewTodoSummary: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit area review todo summary expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = buildFaceAuditAreaReviewTodoSummary(artifacts, area);
+    res.status(report.ok ? 200 : 422).json({faceAuditAreaReviewTodoSummary: report});
+  });
+
+  app.post('/api/face-audit-review-template/review-plan', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditReviewPlan([]);
+      res.status(422).json({
+        faceAuditReviewPlan: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit review plan expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = buildFaceAuditReviewPlan(artifacts);
+    res.status(report.ok ? 200 : 422).json({faceAuditReviewPlan: report});
+  });
+
+  app.post('/api/face-audit-review-template/review-sheet', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditReviewSheet([]);
+      res.status(422).json({
+        faceAuditReviewSheet: {
+          ...report,
+          ok: false,
+          rowCount: 0,
+          tsv: '',
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit review sheet expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = buildFaceAuditReviewSheet(artifacts);
+    if (!report.ok) {
+      res.status(422).json({faceAuditReviewSheet: report});
+      return;
+    }
+    sendFaceAuditReviewSheet(res, report);
+  });
+
+  app.post('/api/face-audit-review-template/:area/review-sheet', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditAreaReviewSheet([], area);
+      res.status(422).json({
+        faceAuditAreaReviewSheet: {
+          ...report,
+          ok: false,
+          rowCount: 0,
+          tsv: '',
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit area review sheet expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = buildFaceAuditAreaReviewSheet(artifacts, area);
+    if (!report.ok) {
+      res.status(422).json({faceAuditAreaReviewSheet: report});
+      return;
+    }
+    sendFaceAuditAreaReviewSheet(res, report);
+  });
+
+  app.post('/api/face-audit-review-template/apply-review-sheet', (req, res) => {
+    const payload = faceAuditReviewSheetImportFromPayload(req.body);
+    if (!payload) {
+      const report = applyFaceAuditReviewSheet([], '');
+      res.status(422).json({
+        faceAuditReviewSheetImport: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'payload',
+            message: 'Face-audit review sheet import expects an object with artifacts array and reviewSheetTsv string',
+          }],
+        },
+      });
+      return;
+    }
+
+    const report = applyFaceAuditReviewSheet(payload.artifacts, payload.reviewSheetTsv);
+    res.status(report.ok ? 200 : 422).json(report.ok
+      ? {faceAuditReviewSheetImport: report, faceAuditReview: report.review}
+      : {faceAuditReviewSheetImport: report});
+  });
+
+  app.post('/api/face-audit-review-template/reviewer-instructions', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = faceAuditReviewerInstructionsReport([]);
+      res.status(422).json({
+        faceAuditReviewerInstructions: {
+          ...report,
+          ok: false,
+          issueCount: report.issueCount + 1,
+          issues: [
+            ...report.issues,
+            {
+              field: 'artifacts',
+              message: 'Face-audit reviewer instructions expects a JSON array or an object with an artifacts array',
+            },
+          ],
+        },
+      });
+      return;
+    }
+
+    const report = faceAuditReviewerInstructionsReport(artifacts);
+    if (!report.ok) {
+      res.status(422).json({
+        faceAuditReviewerInstructions: report,
+      });
+      return;
+    }
+
+    sendFaceAuditReviewerInstructions(res, report);
+  });
+
+  app.post('/api/face-audit-review-template/:area/reviewer-instructions', (req, res) => {
+    const area = parseFaceAuditArea(req.params.area);
+    if (!area) {
+      res.status(404).json({errors: ['Face-audit area not found']});
+      return;
+    }
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditAreaReviewerInstructionsReport([], area);
+      res.status(422).json({
+        faceAuditAreaReviewerInstructions: {
+          ...report,
+          ok: false,
+          issueCount: report.issueCount + 1,
+          issues: [
+            ...report.issues,
+            {
+              field: 'artifacts',
+              message: 'Face-audit area reviewer instructions expects a JSON array or an object with an artifacts array',
+            },
+          ],
+        },
+      });
+      return;
+    }
+
+    const report = buildFaceAuditAreaReviewerInstructionsReport(artifacts, area);
+    if (!report.ok) {
+      res.status(422).json({faceAuditAreaReviewerInstructions: report});
+      return;
+    }
+    sendFaceAuditAreaReviewerInstructions(res, report);
+  });
+
+  app.post('/api/face-audit-review-template/handoff', (req, res) => {
+    const artifacts = faceAuditReviewArtifactsFromPayload(req.body);
+    if (!artifacts) {
+      const report = buildFaceAuditReviewerHandoff([]);
+      res.status(422).json({
+        faceAuditReviewerHandoff: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'artifacts',
+            message: 'Face-audit reviewer handoff expects a JSON array or an object with an artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = buildFaceAuditReviewerHandoff(artifacts);
+    res.status(report.ok ? 200 : 422).json({faceAuditReviewerHandoff: report});
+  });
+
+  app.post('/api/face-audit-reviewer-handoff/verify', (req, res) => {
+    const validation = validateFaceAuditReviewerHandoffArtifact(req.body);
+    res.status(validation.ok ? 200 : 422).json({faceAuditReviewerHandoffValidation: validation});
+  });
+
+  app.post('/api/face-audit-reviewer-handoff/response', (req, res) => {
+    const payload = faceAuditHandoffResponseFromPayload(req.body);
+    if (!payload) {
+      const report = summarizeFaceAuditReviewerHandoffResponse({}, []);
+      res.status(422).json({
+        faceAuditReviewerHandoffResponse: {
+          ...report,
+          ok: false,
+          issueCount: 1,
+          issues: [{
+            field: 'payload',
+            message: 'Face-audit reviewer handoff response expects an object with handoff and artifacts array',
+          }],
+        },
+      });
+      return;
+    }
+    const report = summarizeFaceAuditReviewerHandoffResponse(payload.handoff, payload.artifacts);
+    res.status(report.ok ? 200 : 422).json({faceAuditReviewerHandoffResponse: report});
+  });
+
+  app.post('/api/face-audit-review-template/validate', (req, res) => {
+    const validation = validateFaceAuditReviewArtifact(req.body);
+    res.status(validation.ok ? 200 : 422).json({faceAuditReviewValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/ready', (req, res) => {
+    const validation = validateFaceAuditReadyArtifact(req.body);
+    res.status(validation.ok ? 200 : 422).json({faceAuditReviewValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/lock-preview', (req, res) => {
+    const validation = buildFaceAuditLockPreview(req.body);
+    res.status(validation.ok ? 200 : 422).json({faceAuditReviewValidation: validation});
+  });
+
+  app.post('/api/face-audit-review-template/lock-artifact', (req, res) => {
+    const validation = buildFaceAuditLockArtifact(req.body);
+    if (!validation.ok || !validation.lockArtifact) {
+      res.status(422).json({faceAuditReviewValidation: validation});
+      return;
+    }
+    res.json({faceAuditLockArtifact: validation.lockArtifact});
+  });
+
+  app.post('/api/face-audit-lock-artifact/verify', (req, res) => {
+    const validation = validateFaceAuditLockArtifact(req.body);
+    res.status(validation.ok ? 200 : 422).json({faceAuditLockArtifactValidation: validation});
+  });
+
+  app.post('/api/face-audit-release-gate', (req, res) => {
+    const lockArtifact = faceAuditReleaseGateLockArtifactFromPayload(req.body);
+    const validation = validateFaceAuditStaticLockGate(lockArtifact);
+    res.status(validation.ok ? 200 : 422).json({faceAuditStaticLockGate: validation});
+  });
+
+  app.use('/api/games', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
   });
 
   app.get('/api/games', (_req, res) => {
@@ -3519,7 +5573,12 @@ export function createBrassServer(options: BrassServerOptions): BrassServer {
     const bodySessionToken = isRecord(req.body) && typeof req.body.sessionToken === 'string'
       ? nonEmptyString(req.body.sessionToken)
       : undefined;
-    const sessionToken = bodySessionToken ?? nonEmptyString(req.get('x-player-token'));
+    const headerSessionToken = nonEmptyString(req.get('x-player-token'));
+    if (bodySessionToken && headerSessionToken && bodySessionToken !== headerSessionToken) {
+      res.status(400).json({errors: ['Player token header does not match body session token']});
+      return;
+    }
+    const sessionToken = bodySessionToken ?? headerSessionToken;
     const headerPlayerId = nonEmptyString(req.get('x-player-id'));
     const commandPlayerId = playerIdFromCommand(command);
     if (headerPlayerId && commandPlayerId && headerPlayerId !== commandPlayerId) {

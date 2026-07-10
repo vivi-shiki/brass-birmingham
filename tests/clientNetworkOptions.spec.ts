@@ -117,6 +117,18 @@ describe('client network link options', () => {
     expect(networkLinkOptionsForSelect(rail, 'p1', ['cannock-stafford'], 1)).toEqual([]);
   });
 
+  it('does not offer Network links when dirty player state is missing the current era link count', () => {
+    const canal = testGame();
+    delete (canal.players.p1.remainingLinks as Partial<typeof canal.players.p1.remainingLinks>).canal;
+
+    const rail = testGame();
+    rail.era = 'rail';
+    delete (rail.players.p1.remainingLinks as Partial<typeof rail.players.p1.remainingLinks>).rail;
+
+    expect(networkLinkOptionsForSelect(canal, 'p1', [], 0)).toEqual([]);
+    expect(networkLinkOptionsForSelect(rail, 'p1', [], 0)).toEqual([]);
+  });
+
   it('allows a valid Canal network command', () => {
     const state = testGame();
 

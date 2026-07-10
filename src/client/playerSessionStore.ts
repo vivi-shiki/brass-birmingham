@@ -25,6 +25,10 @@ function nonEmptyString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
+function isSupportedPlayerId(playerId: string): boolean {
+  return playerId === 'p1' || playerId === 'p2' || playerId === 'p3' || playerId === 'p4';
+}
+
 function comparePlayerIds(a: string, b: string): number {
   return a.localeCompare(b, undefined, {numeric: true});
 }
@@ -33,6 +37,19 @@ function playerSessionsFromRecord(sessions: Record<string, string>): PlayerSessi
   return Object.entries(sessions)
     .sort(([a], [b]) => comparePlayerIds(a, b))
     .map(([playerId, token]) => ({playerId, token}));
+}
+
+function sessionsWithUniqueTokens(sessions: Record<string, string>): Record<string, string> {
+  const normalized: Record<string, string> = {};
+  const seenTokens = new Set<string>();
+  for (const [playerId, token] of Object.entries(sessions).sort(([a], [b]) => comparePlayerIds(a, b))) {
+    if (seenTokens.has(token)) {
+      continue;
+    }
+    normalized[playerId] = token;
+    seenTokens.add(token);
+  }
+  return normalized;
 }
 
 function normalizeStoredSessions(value: unknown): StoredSessions {
@@ -51,13 +68,16 @@ function normalizeStoredSessions(value: unknown): StoredSessions {
     for (const [rawPlayerId, rawToken] of Object.entries(rawSessions)) {
       const playerId = nonEmptyString(rawPlayerId);
       const token = nonEmptyString(rawToken);
-      if (playerId && token) {
+      if (playerId && token && isSupportedPlayerId(playerId)) {
         sessions[playerId] = token;
       }
     }
 
     if (Object.keys(sessions).length > 0) {
-      normalized[gameId] = {...(normalized[gameId] ?? {}), ...sessions};
+      normalized[gameId] = sessionsWithUniqueTokens({
+        ...(normalized[gameId] ?? {}),
+        ...sessions,
+      });
     }
   }
 
@@ -119,12 +139,12 @@ export function rememberSessions(
   for (const session of sessions) {
     const playerId = nonEmptyString(session.playerId);
     const token = nonEmptyString(session.token);
-    if (playerId && token) {
+    if (playerId && token && isSupportedPlayerId(playerId)) {
       current[playerId] = token;
     }
   }
 
-  stored[normalizedGameId] = current;
+  stored[normalizedGameId] = sessionsWithUniqueTokens(current);
   writeStoredSessions(stored, storage);
-  return playerSessionsFromRecord(current);
+  return playerSessionsFromRecord(stored[normalizedGameId]);
 }

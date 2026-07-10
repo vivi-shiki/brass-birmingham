@@ -26,6 +26,10 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
+function httpUrlHost(host: string): string {
+  return host.includes(':') ? `[${host}]` : host;
+}
+
 export function listenOptionsFromEnv(env: ListenOptionsEnv): ListenOptions {
   const host = env.HOST?.trim() || DEFAULT_HOST;
   const port = parsePort(env.PORT);
@@ -33,6 +37,6 @@ export function listenOptionsFromEnv(env: ListenOptionsEnv): ListenOptions {
   return {
     host,
     port,
-    url: `http://${host}:${port}`,
+    url: `http://${httpUrlHost(host)}:${port}`,
   };
 }

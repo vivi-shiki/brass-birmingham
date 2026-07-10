@@ -306,6 +306,8 @@ export interface MerchantDevelopDecision {
 
 export interface GameState {
   id: string;
+  createdAt?: string;
+  updatedAt?: string;
   playerCount: PlayerCount;
   era: Era;
   roundNumber: number;

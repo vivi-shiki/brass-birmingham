@@ -5,10 +5,12 @@ import {
   executeDevelop,
   executeNetwork,
   legalCoalSourcesForNetworkSelect,
+  legalResourceSourcesForSelect,
   validateBuild,
   validateDevelop,
   validateNetwork,
 } from '../src/common/gameEngine';
+import {staticConfig} from '../src/common/staticData';
 import type {BuildCommand, DevelopCommand, ResourceSource} from '../src/common/types';
 import {addIndustry, addLink, setHand, testGame} from './helpers';
 
@@ -1441,6 +1443,62 @@ describe('manual resource source selection', () => {
     expect(state.players.p1.industryTileStacks.iron_works.removedSpecIds).toEqual(['iron_works-1-1']);
   });
 
+  it('normalizes missing iron market counts before offering and consuming market iron', () => {
+    const state = testGame();
+    const cardId = state.players.p1.handCardIds[0];
+    delete (state.markets.iron as Partial<typeof state.markets.iron>).occupiedCount;
+
+    expect(legalResourceSourcesForSelect(state, 'iron', 'birmingham', [], 0)).toEqual([
+      {kind: 'market', market: 'iron', price: 2},
+    ]);
+
+    applyCommand(state, {
+      type: 'develop',
+      playerId: 'p1',
+      cardId,
+      industryTypes: ['coal_mine'],
+      ironSources: [{kind: 'market', market: 'iron', price: 2}],
+    });
+
+    expect(state.markets.iron.occupiedCount).toBe(staticConfig.markets.iron.initialOccupiedCount - 1);
+    expect(state.players.p1.cash).toBe(15);
+    expect(state.eventLog).toContainEqual({
+      type: 'resource_consumed',
+      source: {kind: 'market', market: 'iron', price: 2},
+      byPlayerId: 'p1',
+      reason: 'develop',
+    });
+  });
+
+  it('normalizes missing markets before offering and consuming market iron', () => {
+    const state = testGame();
+    const cardId = state.players.p1.handCardIds[0];
+    delete (state as Partial<typeof state>).markets;
+
+    expect(legalResourceSourcesForSelect(state, 'iron', 'birmingham', [], 0)).toEqual([
+      {kind: 'market', market: 'iron', price: 2},
+    ]);
+    expect((state as Partial<typeof state>).markets).toBeUndefined();
+
+    applyCommand(state, {
+      type: 'develop',
+      playerId: 'p1',
+      cardId,
+      industryTypes: ['coal_mine'],
+      ironSources: [{kind: 'market', market: 'iron', price: 2}],
+    });
+
+    expect(state.markets.coal.occupiedCount).toBe(staticConfig.markets.coal.initialOccupiedCount);
+    expect(state.markets.iron.occupiedCount).toBe(staticConfig.markets.iron.initialOccupiedCount - 1);
+    expect(state.players.p1.cash).toBe(15);
+    expect(state.eventLog).toContainEqual({
+      type: 'resource_consumed',
+      source: {kind: 'market', market: 'iron', price: 2},
+      byPlayerId: 'p1',
+      reason: 'develop',
+    });
+  });
+
   it('uses fallback iron market pricing after the iron market is empty', () => {
     const state = testGame();
     const cardId = state.players.p1.handCardIds[0];
@@ -1523,5 +1581,32 @@ describe('manual resource source selection', () => {
       {type: 'resource_consumed', source: {kind: 'market', market: 'iron', price: 2}, byPlayerId: 'p1', reason: 'build'},
       {type: 'resource_consumed', source: {kind: 'market', market: 'iron', price: 3}, byPlayerId: 'p1', reason: 'build'},
     ]));
+  });
+
+  it('normalizes negative coal market counts before selling a new coal mine to the market', () => {
+    const state = testGame();
+    setHand(state, 'p1', ['p2-location-coalbrookdale-1']);
+    state.markets.coal.occupiedCount = -2;
+    addLink(state, 'link-1', 'p1', 'coalbrookdale-shrewsbury');
+
+    applyCommand(state, {
+      type: 'build',
+      playerId: 'p1',
+      cardId: 'p2-location-coalbrookdale-1',
+      locationId: 'coalbrookdale',
+      slotId: 'coalbrookdale-2',
+      industryType: 'coal_mine',
+    });
+
+    const built = state.board.industryInstances[state.board.slots['coalbrookdale-2'].occupiedBy ?? ''];
+    expect(state.markets.coal.occupiedCount).toBe(staticConfig.markets.coal.priceSlotsCheapestToMostExpensive.length);
+    expect(built.remainingResource).toBe(1);
+    expect(built.flipped).toBe(false);
+    expect(state.eventLog).toContainEqual({
+      type: 'resource_sold_to_market',
+      industryInstanceId: built.id,
+      market: 'coal',
+      cashReceived: 1,
+    });
   });
 });

@@ -97,6 +97,39 @@ describe('actions', () => {
     expect(state.currentTurnIndex).toBe(1);
   });
 
+  it('recreates dirty card zones when returning a wild card and drawing after Pass', () => {
+    const state = testGame();
+    setHand(state, 'p1', ['wild-location-1']);
+    delete (state as Partial<typeof state>).cardZones;
+
+    expect(() => applyCommand(state, {type: 'pass', playerId: 'p1', cardId: 'wild-location-1'})).not.toThrow();
+
+    expect(state.players.p1.handCardIds).toEqual([]);
+    expect(state.cardZones.drawDeck).toEqual([]);
+    expect(state.cardZones.wildLocationPool).toEqual(['wild-location-1']);
+    expect(state.cardZones.wildIndustryPool).toEqual([]);
+    expect(state.currentTurnIndex).toBe(1);
+    expect(state.eventLog).toContainEqual({
+      type: 'card_discarded',
+      playerId: 'p1',
+      cardId: 'wild-location-1',
+      destination: 'wild_pool',
+    });
+  });
+
+  it('treats a missing draw deck as empty when drawing after Pass', () => {
+    const state = testGame();
+    const cardId = firstHandCard(state, 'p1');
+    delete (state.cardZones as Partial<typeof state.cardZones>).drawDeck;
+
+    applyCommand(state, {type: 'pass', playerId: 'p1', cardId});
+
+    expect(state.players.p1.handCardIds).toHaveLength(7);
+    expect(state.players.p1.discardCardIds).toContain(cardId);
+    expect(state.cardZones.drawDeck).toEqual([]);
+    expect(state.currentTurnIndex).toBe(1);
+  });
+
   it.each([
     ['wild-location-1', 'wildLocationPool'],
     ['wild-industry-1', 'wildIndustryPool'],
@@ -1084,6 +1117,56 @@ describe('actions', () => {
     expect(missingIndustryWild.errors.join(' ')).toContain('Wild card pools');
   });
 
+  it('returns validation errors instead of throwing when dirty Scout card state is missing', () => {
+    const missingHand = testGame();
+    const missingHandCardIds = missingHand.players.p1.handCardIds.slice(0, 3) as [string, string, string];
+    delete (missingHand.players.p1 as Partial<typeof missingHand.players.p1>).handCardIds;
+
+    expect(() => validatePass(missingHand, {
+      type: 'pass',
+      playerId: 'p1',
+      cardId: missingHandCardIds[0],
+    })).not.toThrow();
+    expect(() => validateLoan(missingHand, {
+      type: 'loan',
+      playerId: 'p1',
+      cardId: missingHandCardIds[0],
+    })).not.toThrow();
+    expect(() => validateScout(missingHand, {
+      type: 'scout',
+      playerId: 'p1',
+      cardIds: missingHandCardIds,
+    })).not.toThrow();
+    expect(validatePass(missingHand, {
+      type: 'pass',
+      playerId: 'p1',
+      cardId: missingHandCardIds[0],
+    }).errors.join(' ')).toContain('does not have card');
+    expect(validateLoan(missingHand, {
+      type: 'loan',
+      playerId: 'p1',
+      cardId: missingHandCardIds[0],
+    }).errors.join(' ')).toContain('does not have card');
+    expect(validateScout(missingHand, {
+      type: 'scout',
+      playerId: 'p1',
+      cardIds: missingHandCardIds,
+    }).errors.join(' ')).toContain('does not have card');
+
+    const missingWildPools = testGame();
+    setHand(missingWildPools, 'p1', missingHandCardIds);
+    delete (missingWildPools as Partial<typeof missingWildPools>).cardZones;
+
+    const result = validateScout(missingWildPools, {
+      type: 'scout',
+      playerId: 'p1',
+      cardIds: missingHandCardIds,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toContain('Wild card pools');
+  });
+
   it('rejects developing lightbulb pottery and allows developing a coal mine with market iron', () => {
     const state = testGame();
     const cardId = firstHandCard(state, 'p1');
@@ -1803,6 +1886,23 @@ describe('actions', () => {
     expect(state.players.p1.industryTileStacks.coal_mine.builtInstanceIds).not.toContain(ownCoal.id);
     expect(state.players.p1.industryTileStacks.coal_mine.builtInstanceIds).toContain(built.id);
     expect(state.eventLog).toContainEqual({type: 'industry_removed', industryInstanceId: ownCoal.id, reason: 'overbuild'});
+    const removalEventIndex = state.eventLog.findIndex((event) =>
+      event.type === 'industry_removed' &&
+      event.industryInstanceId === ownCoal.id &&
+      event.reason === 'overbuild',
+    );
+    const buildSpendEventIndex = state.eventLog.findIndex((event) =>
+      event.type === 'cash_changed' &&
+      event.playerId === 'p1' &&
+      event.reason === 'build',
+    );
+    const builtEventIndex = state.eventLog.findIndex((event) =>
+      event.type === 'industry_built' &&
+      event.instance.id === built.id,
+    );
+    expect(removalEventIndex).toBeGreaterThan(-1);
+    expect(buildSpendEventIndex).toBeGreaterThan(removalEventIndex);
+    expect(builtEventIndex).toBeGreaterThan(buildSpendEventIndex);
   });
 
   it('allows overbuilding an own sellable industry with a higher same-type tile', () => {
@@ -1983,6 +2083,62 @@ describe('actions', () => {
 
     expect(validation.ok).toBe(false);
     expect(validation.errors.join(' ')).toContain('globally depleted');
+  });
+
+  it('rejects overbuilding an opponent resource industry when the market count is missing', () => {
+    const coalState = testGame();
+    setHand(coalState, 'p1', ['p2-location-cannock-1']);
+    coalState.players.p1.industryTileStacks.coal_mine.availableSpecIdsInOrder = ['coal_mine-2-1'];
+    delete (coalState.markets.coal as Partial<typeof coalState.markets.coal>).occupiedCount;
+    const opponentCoal = addIndustry(coalState, {
+      id: 'coal-1',
+      ownerPlayerId: 'p2',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-1-1',
+      locationId: 'cannock',
+      slotId: 'cannock-1',
+      flipped: true,
+    });
+
+    const coalValidation = validateBuild(coalState, {
+      type: 'build',
+      playerId: 'p1',
+      cardId: 'p2-location-cannock-1',
+      locationId: 'cannock',
+      slotId: 'cannock-1',
+      industryType: 'coal_mine',
+    });
+
+    expect(coalValidation.ok).toBe(false);
+    expect(coalValidation.errors.join(' ')).toContain('globally depleted');
+    expect(coalState.board.industryInstances[opponentCoal.id].removedFromGame).toBe(false);
+
+    const ironState = testGame();
+    setHand(ironState, 'p1', ['p2-location-dudley-1']);
+    ironState.players.p1.industryTileStacks.iron_works.availableSpecIdsInOrder = ['iron_works-2-1'];
+    delete (ironState.markets.iron as Partial<typeof ironState.markets.iron>).occupiedCount;
+    const opponentIron = addIndustry(ironState, {
+      id: 'iron-1',
+      ownerPlayerId: 'p2',
+      industryType: 'iron_works',
+      specId: 'iron_works-1-1',
+      locationId: 'dudley',
+      slotId: 'dudley-1',
+      flipped: true,
+    });
+
+    const ironValidation = validateBuild(ironState, {
+      type: 'build',
+      playerId: 'p1',
+      cardId: 'p2-location-dudley-1',
+      locationId: 'dudley',
+      slotId: 'dudley-1',
+      industryType: 'iron_works',
+    });
+
+    expect(ironValidation.ok).toBe(false);
+    expect(ironValidation.errors.join(' ')).toContain('globally depleted');
+    expect(ironState.board.industryInstances[opponentIron.id].removedFromGame).toBe(false);
   });
 
   it('rejects overbuilding an opponent coal mine while coal remains on the board', () => {

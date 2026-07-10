@@ -60,6 +60,34 @@ describe('client action validation reasons', () => {
     expect(scoutActionReason(state, 'p1', state.players.p1.handCardIds)).toBe('Pending decision must be resolved first');
   });
 
+  it('returns stable Scout reasons when dirty card state is missing', () => {
+    const missingHand = testGame();
+    delete (missingHand.players.p1 as Partial<typeof missingHand.players.p1>).handCardIds;
+
+    expect(() => scoutActionReason(missingHand, 'p1', [
+      'p2-location-birmingham-1',
+      'p2-location-cannock-1',
+      'p2-location-dudley-1',
+    ])).not.toThrow();
+    expect(scoutActionReason(missingHand, 'p1', [
+      'p2-location-birmingham-1',
+      'p2-location-cannock-1',
+      'p2-location-dudley-1',
+    ])).toBe('Need at least three cards to Scout');
+
+    const missingWildPools = testGame();
+    setHand(missingWildPools, 'p1', [
+      'p2-location-birmingham-1',
+      'p2-location-cannock-1',
+      'p2-location-dudley-1',
+    ]);
+    delete (missingWildPools as Partial<typeof missingWildPools>).cardZones;
+
+    expect(() => scoutActionReason(missingWildPools, 'p1', missingWildPools.players.p1.handCardIds)).not.toThrow();
+    expect(scoutActionReason(missingWildPools, 'p1', missingWildPools.players.p1.handCardIds))
+      .toBe('Wild card pools are empty');
+  });
+
   it('returns ordinary-action blockers before local form selection reasons', () => {
     const state = testGame();
     const cardId = firstHandCard(state, 'p1');

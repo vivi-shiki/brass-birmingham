@@ -190,6 +190,72 @@ describe('client build slot options', () => {
     expect(buildIndustryOptionsForLocation(ironBlocked, 'p1', 'birmingham')).toContain('iron_works');
   });
 
+  it('does not offer opponent resource overbuilds when market counts are missing', () => {
+    const coalBlocked = testGame();
+    coalBlocked.players.p1.industryTileStacks.coal_mine.availableSpecIdsInOrder = ['coal_mine-2-1'];
+    delete (coalBlocked.markets.coal as Partial<typeof coalBlocked.markets.coal>).occupiedCount;
+    addIndustry(coalBlocked, {
+      id: 'opponent-coal-1',
+      ownerPlayerId: 'p2',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-1-1',
+      locationId: 'cannock',
+      slotId: 'cannock-1',
+      remainingResource: 0,
+    });
+
+    expect(buildSlotOptionsForIndustry(coalBlocked, 'cannock', 'coal_mine', 'p1').map((slot) => slot.id))
+      .toEqual(['cannock-0']);
+
+    const ironBlocked = testGame();
+    ironBlocked.players.p1.industryTileStacks.iron_works.availableSpecIdsInOrder = ['iron_works-2-1'];
+    delete (ironBlocked.markets.iron as Partial<typeof ironBlocked.markets.iron>).occupiedCount;
+    addIndustry(ironBlocked, {
+      id: 'opponent-iron-1',
+      ownerPlayerId: 'p2',
+      industryType: 'iron_works',
+      specId: 'iron_works-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-2',
+      remainingResource: 0,
+    });
+
+    expect(buildIndustryOptionsForLocation(ironBlocked, 'p1', 'birmingham')).not.toContain('iron_works');
+  });
+
+  it('does not offer opponent resource overbuilds when markets are missing', () => {
+    const coalBlocked = testGame();
+    coalBlocked.players.p1.industryTileStacks.coal_mine.availableSpecIdsInOrder = ['coal_mine-2-1'];
+    delete (coalBlocked as Partial<typeof coalBlocked>).markets;
+    addIndustry(coalBlocked, {
+      id: 'opponent-coal-1',
+      ownerPlayerId: 'p2',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-1-1',
+      locationId: 'cannock',
+      slotId: 'cannock-1',
+      remainingResource: 0,
+    });
+
+    expect(buildSlotOptionsForIndustry(coalBlocked, 'cannock', 'coal_mine', 'p1').map((slot) => slot.id))
+      .toEqual(['cannock-0']);
+
+    const ironBlocked = testGame();
+    ironBlocked.players.p1.industryTileStacks.iron_works.availableSpecIdsInOrder = ['iron_works-2-1'];
+    delete (ironBlocked as Partial<typeof ironBlocked>).markets;
+    addIndustry(ironBlocked, {
+      id: 'opponent-iron-1',
+      ownerPlayerId: 'p2',
+      industryType: 'iron_works',
+      specId: 'iron_works-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-2',
+      remainingResource: 0,
+    });
+
+    expect(buildIndustryOptionsForLocation(ironBlocked, 'p1', 'birmingham')).not.toContain('iron_works');
+  });
+
   it('ignores orphan resource industries when offering depleted opponent overbuild slots', () => {
     const state = testGame();
     state.players.p1.industryTileStacks.iron_works.availableSpecIdsInOrder = ['iron_works-2-1'];

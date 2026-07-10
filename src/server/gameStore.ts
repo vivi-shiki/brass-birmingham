@@ -10,6 +10,7 @@ import {
 } from '../common/eventLogValidation';
 import {applyCommand, determineWinners, validateCommand} from '../common/gameEngine';
 import {createGame, INDUSTRY_TYPES, LINK_TYPES, validateGameSeed} from '../common/gameSetup';
+import {advanceIncomeSpaces, retreatIncomeLevels} from '../common/income';
 import {isLinkLineActiveForPlayerCount} from '../common/selectors';
 import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../common/staticData';
 import type {BoardState, GameCommand, GameEvent, GameState, IndustryInstance, IndustryTileSpec, IndustryType, LinkInstance, LinkType, MerchantBonus, PlayerCount, ResourceSource, ResourceType} from '../common/types';
@@ -38,6 +39,8 @@ export interface ListedPendingDecision {
 
 export interface GameSummary {
   id: string;
+  createdAt?: string;
+  updatedAt?: string;
   playerNames: string[];
   playerCount: PlayerCount;
   roundNumber: number;
@@ -45,6 +48,7 @@ export interface GameSummary {
   status: GameState['status'];
   variant?: GameState['variant'];
   connectedClientCount?: number;
+  connectedPlayerIds?: string[];
   currentPlayerId?: string;
   pendingDecision?: ListedPendingDecision;
   winners?: string[];
@@ -65,7 +69,7 @@ type CommandPayload = {type: string; playerId: string} & Record<string, unknown>
 
 const MAX_MERCHANT_DEVELOP_REMOVALS = Object.values(staticConfig.locations).reduce((max, location) =>
   location.kind === 'merchant' && location.bonus.type === 'develop'
-    ? Math.max(max, location.spaces.length)
+    ? Math.max(max, location.spaces.length * location.bonus.count)
     : max,
   0,
 );
@@ -115,6 +119,48 @@ const MARKETS = ['coal', 'iron'] as const;
 const validIndustryTypes = new Set<string>(INDUSTRY_TYPES);
 const supportedPlayerIds = ['p1', 'p2', 'p3', 'p4'] as const;
 const supportedPlayerIdSet = new Set<string>(supportedPlayerIds);
+
+type MerchantBonusValueChangeEvent = Extract<GameEvent, {type: 'cash_changed' | 'income_position_changed' | 'victory_points_changed'}>;
+type MerchantBonusClaimedEvent = Extract<GameEvent, {type: 'merchant_bonus_claimed'}>;
+type IndustryFlipIncomeChangeEvent = Extract<GameEvent, {type: 'income_position_changed'}>;
+type IndustryFlippedEvent = Extract<GameEvent, {type: 'industry_flipped'}>;
+type ScoringVictoryPointChangeEvent = Extract<GameEvent, {type: 'victory_points_changed'}>;
+type LinkScoredEvent = Extract<GameEvent, {type: 'link_scored'}>;
+type IndustryScoredEvent = Extract<GameEvent, {type: 'industry_scored'}>;
+type ActionSpendReason = 'build' | 'network' | 'develop iron';
+type ActionSpendCashEvent = Extract<GameEvent, {type: 'cash_changed'}>;
+
+interface PendingIndustryFlipIncomeChange {
+  event: IndustryFlipIncomeChangeEvent;
+  industryType: IndustryType;
+}
+
+interface PendingScoringVictoryPointChange {
+  event: ScoringVictoryPointChangeEvent;
+  reason: 'link scoring' | 'industry scoring';
+}
+
+interface PendingBuildSpendCash {
+  event: ActionSpendCashEvent;
+  marketCost: number;
+}
+
+interface PendingBuildSpendResources {
+  playerId: string;
+  marketCost: number;
+}
+
+interface PendingNetworkSpendEvidence {
+  playerId: string;
+  marketCost: number;
+  linkCount: number;
+  linkType?: LinkType;
+}
+
+interface PendingDevelopSpendEvidence {
+  playerId: string;
+  marketCost: number;
+}
 
 function isPlayerCount(value: unknown): value is PlayerCount {
   return value === 2 || value === 3 || value === 4;
@@ -492,6 +538,179 @@ function merchantBonusMatchesSpace(merchantSpaceId: string, bonus: MerchantBonus
   return expected !== undefined && merchantBonusesMatch(bonus, expected);
 }
 
+function isMerchantBonusValueChangeEvent(event: GameEvent): event is MerchantBonusValueChangeEvent {
+  return (
+    event.type === 'cash_changed' ||
+    event.type === 'income_position_changed' ||
+    event.type === 'victory_points_changed'
+  ) && event.reason === 'merchant bonus';
+}
+
+function merchantBonusValueChangeMatchesClaim(
+  valueChange: MerchantBonusValueChangeEvent,
+  claimedEvent: MerchantBonusClaimedEvent,
+): boolean {
+  if (valueChange.playerId !== claimedEvent.playerId) {
+    return false;
+  }
+
+  switch (claimedEvent.bonus.type) {
+    case 'cash':
+      return valueChange.type === 'cash_changed' && valueChange.delta === claimedEvent.bonus.cash;
+    case 'income_spaces':
+      return valueChange.type === 'income_position_changed' &&
+        valueChange.to === advanceIncomeSpaces(valueChange.from, claimedEvent.bonus.spaces);
+    case 'victory_points':
+      return valueChange.type === 'victory_points_changed' && valueChange.delta === claimedEvent.bonus.points;
+    case 'develop':
+      return false;
+  }
+}
+
+function industryFlipIncomeReason(reason: string): {industryType: IndustryType} | undefined {
+  for (const industryType of INDUSTRY_TYPES) {
+    if (reason === `flipped ${industryType}` || reason === `sold ${industryType}`) {
+      return {industryType};
+    }
+  }
+  return undefined;
+}
+
+function industryFlipIncomeChangeForEvent(event: GameEvent): PendingIndustryFlipIncomeChange | undefined {
+  if (event.type !== 'income_position_changed') {
+    return undefined;
+  }
+
+  const reason = industryFlipIncomeReason(event.reason);
+  return reason === undefined ? undefined : {event, industryType: reason.industryType};
+}
+
+function industryFlipIncomeChangeMatchesFlip(
+  incomeChange: PendingIndustryFlipIncomeChange,
+  flippedEvent: IndustryFlippedEvent,
+  game: GameState,
+): boolean {
+  const industry = game.board.industryInstances[flippedEvent.industryInstanceId];
+  const spec = industry === undefined ? undefined : staticConfig.industryTileSpecs[industry.specId];
+  const expectedTo = spec === undefined
+    ? undefined
+    : advanceIncomeSpaces(incomeChange.event.from, spec.flip.incomeSpaces);
+  return industry !== undefined &&
+    expectedTo !== undefined &&
+    flippedEvent.ownerPlayerId === incomeChange.event.playerId &&
+    industry.industryType === incomeChange.industryType &&
+    incomeChange.event.to === expectedTo;
+}
+
+function scoringVictoryPointChangeForEvent(event: GameEvent): PendingScoringVictoryPointChange | undefined {
+  if (
+    event.type !== 'victory_points_changed' ||
+    (event.reason !== 'link scoring' && event.reason !== 'industry scoring')
+  ) {
+    return undefined;
+  }
+
+  return {event, reason: event.reason};
+}
+
+function scoringVictoryPointChangeMatchesScore(
+  change: PendingScoringVictoryPointChange,
+  scoredEvent: LinkScoredEvent | IndustryScoredEvent,
+): boolean {
+  if (change.reason === 'link scoring') {
+    return scoredEvent.type === 'link_scored' &&
+      change.event.playerId === scoredEvent.ownerPlayerId &&
+      change.event.delta === scoredEvent.points;
+  }
+
+  return scoredEvent.type === 'industry_scored' &&
+    change.event.playerId === scoredEvent.ownerPlayerId &&
+    change.event.delta === scoredEvent.points;
+}
+
+function isActionSpendCashEvent(event: GameEvent): event is ActionSpendCashEvent {
+  return event.type === 'cash_changed' &&
+    (event.reason === 'build' || event.reason === 'network' || event.reason === 'develop iron');
+}
+
+function isNegativeIncomePendingEvidenceEvent(
+  event: GameEvent,
+  game: GameState,
+  pending: Extract<GameEvent, {type: 'negative_income_started'}>,
+): boolean {
+  if (event.type === 'negative_income_started') {
+    return event.playerId === pending.playerId && event.amountOwed === pending.amountOwed;
+  }
+
+  if (event.type === 'industry_removed') {
+    const industry = game.board.industryInstances[event.industryInstanceId];
+    return event.reason === 'negative_income' && industry?.ownerPlayerId === pending.playerId;
+  }
+
+  if (event.type === 'cash_changed') {
+    return event.playerId === pending.playerId &&
+      (event.reason === 'negative income liquidation' || event.reason === 'income');
+  }
+
+  if (event.type === 'victory_points_changed') {
+    return event.playerId === pending.playerId && event.reason === 'negative income shortfall';
+  }
+
+  return false;
+}
+
+function isLifecycleBoundaryEvent(event: GameEvent): boolean {
+  return event.type === 'turn_advanced' ||
+    event.type === 'turn_order_updated' ||
+    event.type === 'era_ended' ||
+    event.type === 'game_ended';
+}
+
+function resourceMarketCostForActionSpend(event: Extract<GameEvent, {type: 'resource_consumed'}>): number {
+  return event.source.kind === 'market' ? event.source.price : 0;
+}
+
+function networkBaseSpend(linkCount: number, linkType: LinkType | undefined): number | undefined {
+  if (linkType === 'canal' && linkCount === 1) {
+    return staticConfig.rules.canalLinkCost;
+  }
+  if (linkType === 'rail' && linkCount === 1) {
+    return staticConfig.rules.railSingleLinkCost;
+  }
+  if (linkType === 'rail' && linkCount === 2) {
+    return staticConfig.rules.railDoubleLinkCost;
+  }
+  return undefined;
+}
+
+function buildSpendCashMatchesIndustry(
+  pendingCash: PendingBuildSpendCash,
+  builtEvent: Extract<GameEvent, {type: 'industry_built'}>,
+): boolean {
+  const spec = staticConfig.industryTileSpecs[builtEvent.instance.specId];
+  return spec !== undefined &&
+    builtEvent.instance.ownerPlayerId === pendingCash.event.playerId &&
+    pendingCash.event.delta === -(spec.cost.cash + pendingCash.marketCost);
+}
+
+function merchantBonusClaimKey(playerId: string, merchantSpaceId: string): string {
+  return `${playerId}:${merchantSpaceId}`;
+}
+
+function resourceSoldToMarketLimit(industry: IndustryInstance): number {
+  const spec = staticConfig.industryTileSpecs[industry.specId];
+  return spec === undefined ? 0 : maxResourceCapacityForIndustrySpec(spec);
+}
+
+function industryResourceConsumptionLimit(game: GameState, industryInstanceId: string): number {
+  const industry = game.board.industryInstances[industryInstanceId];
+  return industry === undefined ? 0 : resourceSoldToMarketLimit(industry);
+}
+
+function merchantBeerConsumptionKey(source: Extract<ResourceSource, {kind: 'merchant_beer'}>): string {
+  return `${source.merchantSpaceId}:${source.merchantTileInstanceId}`;
+}
+
 function industryIsFlipped(game: GameState, industryInstanceId: string): boolean {
   return game.board.industryInstances[industryInstanceId]?.flipped === true;
 }
@@ -507,7 +726,17 @@ function negativeIncomeResolutionMatchesRules(
   paid: number,
   victoryPointLoss: number,
 ): boolean {
+  const selectedLiquidationValue = [...new Set(industryInstanceIds)]
+    .reduce((sum, industryInstanceId) => {
+      const industry = game.board.industryInstances[industryInstanceId];
+      const cashCost = industry === undefined
+        ? undefined
+        : staticConfig.industryTileSpecs[industry.specId]?.cost.cash;
+      return sum + Math.floor((cashCost ?? 0) / 2);
+    }, 0);
+  const minimumPaidFromLiquidations = Math.min(amountOwed, selectedLiquidationValue);
   return paid + victoryPointLoss === amountOwed &&
+    paid >= minimumPaidFromLiquidations &&
     industryInstanceIds.every((industryInstanceId) => industryIsRemoved(game, industryInstanceId));
 }
 
@@ -550,6 +779,19 @@ function normalizedEventSpecIdsForIndustryTypes(value: unknown, industryTypes: r
     specIds.push(specId);
   }
   return specIds;
+}
+
+function merchantDevelopResolutionMatchesPlayerStacks(
+  game: GameState,
+  playerId: string,
+  industryTypes: readonly IndustryType[],
+  specIds: readonly string[],
+): boolean {
+  const player = game.players[playerId];
+  return player !== undefined && specIds.every((specId, index) => {
+    const industryType = industryTypes[index];
+    return player.industryTileStacks[industryType]?.removedSpecIds.includes(specId) === true;
+  });
 }
 
 interface HistoricalLinkReference {
@@ -645,10 +887,9 @@ function linkScoreMatchesRules(
 }
 
 function isCommandEnvelope(command: unknown): command is CommandPayload {
-  return typeof command === 'object' &&
-    command !== null &&
-    typeof (command as {type?: unknown}).type === 'string' &&
-    typeof (command as {playerId?: unknown}).playerId === 'string';
+  return isObjectMap(command) &&
+    typeof command.type === 'string' &&
+    typeof command.playerId === 'string';
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -692,7 +933,7 @@ function normalizeCommandEnvelope(command: CommandPayload): CommandPayload {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null;
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function isObjectMap(value: unknown): value is Record<string, unknown> {
@@ -1152,6 +1393,33 @@ function parsePersistedGameStore(raw: string, storagePath: string): Partial<Pers
   }
 }
 
+function currentTimestamp(): string {
+  return new Date().toISOString();
+}
+
+function normalizedTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.trim() !== value || value.length === 0) {
+    return undefined;
+  }
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value ? value : undefined;
+}
+
+function compareTimestampsDesc(left: string | undefined, right: string | undefined): number {
+  return Date.parse(right ?? '') - Date.parse(left ?? '');
+}
+
+function latestTimestamp(...values: Array<string | undefined>): string {
+  let latest = currentTimestamp();
+  for (const value of values) {
+    const timestamp = normalizedTimestamp(value);
+    if (timestamp !== undefined && Date.parse(timestamp) > Date.parse(latest)) {
+      latest = timestamp;
+    }
+  }
+  return latest;
+}
+
 interface ExpectedBoardSlot {
   id: string;
   locationId: string;
@@ -1500,7 +1768,11 @@ function normalizeCardZones(game: GameState): void {
   }
 }
 
-function normalizeTurnState(game: GameState): void {
+interface TurnStateNormalization {
+  loadedActionIndexWasValid: boolean;
+}
+
+function normalizeTurnState(game: GameState): TurnStateNormalization {
   const playerIds = playerIdsInSeatOrder(game);
   const validPlayerIds = new Set(playerIds);
   const normalizedTurnOrder: string[] = [];
@@ -1534,7 +1806,7 @@ function normalizeTurnState(game: GameState): void {
   if (game.turnOrder.length === 0) {
     game.currentTurnIndex = 0;
     game.actionIndexInTurn = 0;
-    return;
+    return {loadedActionIndexWasValid: false};
   }
 
   const restoredCurrentIndex = typeof loadedCurrentPlayerId === 'string' && validPlayerIds.has(loadedCurrentPlayerId)
@@ -1555,9 +1827,16 @@ function normalizeTurnState(game: GameState): void {
     : staticConfig.rules.normalActionsPerTurn;
 
   const loadedActionIndex = (game as {actionIndexInTurn?: unknown}).actionIndexInTurn;
+  const loadedActionIndexWasValid =
+    typeof loadedActionIndex === 'number' &&
+    Number.isFinite(loadedActionIndex) &&
+    Number.isInteger(loadedActionIndex) &&
+    loadedActionIndex >= 0 &&
+    loadedActionIndex < game.actionsAllowedThisTurn;
   game.actionIndexInTurn = typeof loadedActionIndex === 'number' && Number.isFinite(loadedActionIndex)
     ? Math.max(0, Math.min(Math.floor(loadedActionIndex), game.actionsAllowedThisTurn - 1))
     : 0;
+  return {loadedActionIndexWasValid};
 }
 
 function integerInRange(value: unknown, fallback: number, min: number, max: number): number {
@@ -1565,6 +1844,14 @@ function integerInRange(value: unknown, fallback: number, min: number, max: numb
     return fallback;
   }
   return Math.max(min, Math.min(Math.floor(value), max));
+}
+
+function marketOccupiedCount(value: unknown, marketName: 'coal' | 'iron'): number {
+  const config = staticConfig.markets[marketName];
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    return config.initialOccupiedCount;
+  }
+  return Math.min(value, config.priceSlotsCheapestToMostExpensive.length);
 }
 
 function nonNegativeInteger(value: unknown, fallback: number): number {
@@ -1597,6 +1884,12 @@ function normalizeNextInstanceIdFromBoard(game: GameState): void {
   game.nextInstanceId = nextInstanceId;
 }
 
+function normalizeVariantState(game: GameState): void {
+  if ((game as Partial<GameState>).variant !== 'introductory_canal_only' || game.era !== 'canal') {
+    delete (game as Partial<GameState>).variant;
+  }
+}
+
 function normalizeNumericState(game: GameState): void {
   if (game.era !== 'canal' && game.era !== 'rail') {
     game.era = 'canal';
@@ -1604,9 +1897,7 @@ function normalizeNumericState(game: GameState): void {
   if (game.status !== 'playing' && game.status !== 'ended') {
     game.status = 'playing';
   }
-  if ((game as Partial<GameState>).variant !== 'introductory_canal_only') {
-    delete (game as Partial<GameState>).variant;
-  }
+  normalizeVariantState(game);
   game.roundNumber = nonNegativeInteger(game.roundNumber, 1) || 1;
   game.nextInstanceId = nonNegativeInteger(game.nextInstanceId, 1) || 1;
 
@@ -1620,12 +1911,7 @@ function normalizeNumericState(game: GameState): void {
     const market = isObjectMap(game.markets[marketName])
       ? game.markets[marketName]
       : {occupiedCount: staticConfig.markets[marketName].initialOccupiedCount};
-    market.occupiedCount = integerInRange(
-      (market as {occupiedCount?: unknown}).occupiedCount,
-      staticConfig.markets[marketName].initialOccupiedCount,
-      0,
-      staticConfig.markets[marketName].priceSlotsCheapestToMostExpensive.length,
-    );
+    market.occupiedCount = marketOccupiedCount((market as {occupiedCount?: unknown}).occupiedCount, marketName);
     game.markets[marketName] = market;
   }
 
@@ -1790,6 +2076,20 @@ function merchantSpaceHasDevelopBonus(merchantSpaceId: string): boolean {
   );
 }
 
+function merchantDevelopBonusCount(merchantSpaceId: string): number {
+  const merchant = Object.values(staticConfig.locations).find((location) =>
+    location.kind === 'merchant' &&
+    location.spaces.some((space) => space.id === merchantSpaceId),
+  );
+  return merchant?.kind === 'merchant' && merchant.bonus.type === 'develop'
+    ? merchant.bonus.count
+    : 0;
+}
+
+function merchantDevelopBonusCapacity(merchantSpaceIds: readonly string[]): number {
+  return merchantSpaceIds.reduce((sum, merchantSpaceId) => sum + merchantDevelopBonusCount(merchantSpaceId), 0);
+}
+
 function normalizeMerchantDevelopSpaceIds(game: GameState, decision: Record<string, unknown>, fallbackSpaceId: string): string[] {
   const candidateSpaceIds = [
     fallbackSpaceId,
@@ -1802,7 +2102,7 @@ function normalizeMerchantDevelopSpaceIds(game: GameState, decision: Record<stri
   ))];
 }
 
-function normalizePendingDecision(game: GameState): void {
+function normalizePendingDecision(game: GameState, turnState: TurnStateNormalization): void {
   if (game.status !== 'playing') {
     game.pendingDecision = undefined;
     return;
@@ -1858,14 +2158,21 @@ function normalizePendingDecision(game: GameState): void {
     }
 
     const currentTurnIndex = game.turnOrder.indexOf(playerId);
-    const normalizedCount = Math.min(2, Math.floor(count));
+    const merchantSpaceIds = normalizeMerchantDevelopSpaceIds(game, decision, merchantSpaceId);
+    const normalizedCount = Math.min(
+      MAX_MERCHANT_DEVELOP_REMOVALS,
+      merchantDevelopBonusCapacity(merchantSpaceIds),
+      Math.floor(count),
+    );
     if (currentTurnIndex < 0 || normalizedCount <= 0) {
       game.pendingDecision = undefined;
       return;
     }
-    const merchantSpaceIds = normalizeMerchantDevelopSpaceIds(game, decision, merchantSpaceId);
 
     game.currentTurnIndex = currentTurnIndex;
+    if (!turnState.loadedActionIndexWasValid) {
+      game.actionIndexInTurn = 0;
+    }
     game.pendingDecision = {
       type: 'merchant_develop',
       playerId,
@@ -1913,6 +2220,162 @@ function normalizeEventLog(game: GameState): void {
   const playerIds = playerIdsInSeatOrder(game);
   const validPlayerIds = new Set(playerIds);
   const historicalLinkReferences = new Map<string, HistoricalLinkReferenceEntry>();
+  let hasCreatedGameEvent = false;
+  const endedEraEvents = new Set<GameState['era']>();
+  let hasEndedGameEvent = false;
+  const terminalEra = game.status === 'ended'
+    ? game.variant === 'introductory_canal_only' ? 'canal' : 'rail'
+    : undefined;
+  let hasSeenTerminalEraEnd = terminalEra === undefined;
+  let waitingForGameEndAfterTerminalEra = false;
+  const discardedRegularCardKeys = new Set<string>();
+  const builtIndustryInstanceIds = new Set<string>();
+  const removedIndustryInstanceIds = new Set<string>();
+  const flippedIndustryInstanceIds = new Set<string>();
+  const soldIndustryInstanceIds = new Set<string>();
+  const industryResourceConsumptionCounts = new Map<string, number>();
+  const merchantBeerConsumptionCounts = new Map<string, number>();
+  const resourceSoldToMarketCounts = new Map<string, number>();
+  const builtLinkInstanceIds = new Set<string>();
+  const scoredLinkKeys = new Set<string>();
+  const scoredIndustryInstanceIdsThisEra = new Set<string>();
+  const advancedTurnKeysThisEra = new Set<string>();
+  let lastAdvancedRoundNumber = 0;
+  const pendingMerchantBeerBonuses = new Map<string, number>();
+  const pendingMerchantDevelopBonuses = new Map<string, number>();
+  const claimedMerchantDevelopSpecIdsByPlayer = new Map<string, Set<string>>();
+  let pendingMerchantBonusValueChange: MerchantBonusValueChangeEvent | undefined;
+  let pendingIndustryFlipIncomeChange: PendingIndustryFlipIncomeChange | undefined;
+  let pendingScoringVictoryPointChange: PendingScoringVictoryPointChange | undefined;
+  let pendingBuildSpendResources: PendingBuildSpendResources | undefined;
+  let pendingBuildSpendCash: PendingBuildSpendCash | undefined;
+  let pendingNetworkSpendEvidence: PendingNetworkSpendEvidence | undefined;
+  let pendingDevelopSpendEvidence: PendingDevelopSpendEvidence | undefined;
+  let pendingLoanCashPlayerId: string | undefined;
+  let pendingLoanIncomePlayerId: string | undefined;
+  let pendingLoanDiscardPlayerId: string | undefined;
+  let consecutiveScoutDiscards: Extract<GameEvent, {type: 'card_discarded'}>[] = [];
+  let pendingNegativeIncomeStart:
+    | {
+      event: Extract<GameEvent, {type: 'negative_income_started'}>;
+      normalizedEventIndex: number;
+    }
+    | undefined;
+  const clearPendingLoanEvidence = () => {
+    pendingLoanCashPlayerId = undefined;
+    pendingLoanIncomePlayerId = undefined;
+    pendingLoanDiscardPlayerId = undefined;
+  };
+  const clearScoutEvidence = () => {
+    consecutiveScoutDiscards = [];
+  };
+  const clearActionSpendEvidence = () => {
+    pendingBuildSpendResources = undefined;
+    pendingNetworkSpendEvidence = undefined;
+    pendingDevelopSpendEvidence = undefined;
+  };
+  const clearPendingBuildSpendCash = () => {
+    pendingBuildSpendCash = undefined;
+  };
+  const clearPendingNegativeIncomeStart = () => {
+    if (pendingNegativeIncomeStart !== undefined) {
+      normalizedEvents.splice(pendingNegativeIncomeStart.normalizedEventIndex, 1);
+      pendingNegativeIncomeStart = undefined;
+    }
+  };
+  const appendActionSpendResourceCost = (event: Extract<GameEvent, {type: 'resource_consumed'}>) => {
+    const marketCost = resourceMarketCostForActionSpend(event);
+    if (event.reason === 'build') {
+      pendingNetworkSpendEvidence = undefined;
+      pendingDevelopSpendEvidence = undefined;
+      pendingBuildSpendResources = pendingBuildSpendResources?.playerId === event.byPlayerId
+        ? {playerId: event.byPlayerId, marketCost: pendingBuildSpendResources.marketCost + marketCost}
+        : {playerId: event.byPlayerId, marketCost};
+      return;
+    }
+    if (event.reason === 'network') {
+      pendingBuildSpendResources = undefined;
+      pendingDevelopSpendEvidence = undefined;
+      pendingNetworkSpendEvidence = pendingNetworkSpendEvidence?.playerId === event.byPlayerId
+        ? {...pendingNetworkSpendEvidence, marketCost: pendingNetworkSpendEvidence.marketCost + marketCost}
+        : {playerId: event.byPlayerId, marketCost, linkCount: 0};
+      return;
+    }
+    if (event.reason === 'develop' || event.reason === 'develop iron') {
+      pendingBuildSpendResources = undefined;
+      pendingNetworkSpendEvidence = undefined;
+      pendingDevelopSpendEvidence = pendingDevelopSpendEvidence?.playerId === event.byPlayerId
+        ? {playerId: event.byPlayerId, marketCost: pendingDevelopSpendEvidence.marketCost + marketCost}
+        : {playerId: event.byPlayerId, marketCost};
+      return;
+    }
+    clearActionSpendEvidence();
+  };
+  const appendNetworkSpendLink = (event: Extract<GameEvent, {type: 'link_built'}>) => {
+    const {ownerPlayerId, linkType} = event.instance;
+    pendingBuildSpendResources = undefined;
+    pendingDevelopSpendEvidence = undefined;
+    pendingNetworkSpendEvidence = pendingNetworkSpendEvidence?.playerId === ownerPlayerId
+      ? {
+        playerId: ownerPlayerId,
+        marketCost: pendingNetworkSpendEvidence.marketCost,
+        linkCount: pendingNetworkSpendEvidence.linkCount + 1,
+        linkType: pendingNetworkSpendEvidence.linkType ?? linkType,
+      }
+      : {playerId: ownerPlayerId, marketCost: 0, linkCount: 1, linkType};
+    if (pendingNetworkSpendEvidence.linkType !== linkType) {
+      pendingNetworkSpendEvidence = undefined;
+    }
+  };
+  const recordActionEvidence = (event: GameEvent) => {
+    if (event.type === 'cash_changed') {
+      clearScoutEvidence();
+      if (event.reason === 'loan' && event.delta === staticConfig.rules.loanCash) {
+        pendingLoanCashPlayerId = event.playerId;
+        pendingLoanIncomePlayerId = undefined;
+        pendingLoanDiscardPlayerId = undefined;
+      } else {
+        clearPendingLoanEvidence();
+      }
+      return;
+    }
+
+    if (event.type === 'income_position_changed') {
+      clearScoutEvidence();
+      if (
+        event.reason === 'loan' &&
+        pendingLoanCashPlayerId === event.playerId &&
+        event.to === retreatIncomeLevels(event.from, staticConfig.rules.loanIncomeLevelPenalty)
+      ) {
+        pendingLoanCashPlayerId = undefined;
+        pendingLoanIncomePlayerId = event.playerId;
+        pendingLoanDiscardPlayerId = undefined;
+      } else {
+        clearPendingLoanEvidence();
+      }
+      return;
+    }
+
+    if (event.type === 'card_discarded') {
+      if (pendingLoanIncomePlayerId === event.playerId) {
+        pendingLoanCashPlayerId = undefined;
+        pendingLoanIncomePlayerId = undefined;
+        pendingLoanDiscardPlayerId = event.playerId;
+      } else {
+        clearPendingLoanEvidence();
+      }
+
+      if (event.destination === 'discard') {
+        consecutiveScoutDiscards = [...consecutiveScoutDiscards, event];
+      } else {
+        clearScoutEvidence();
+      }
+      return;
+    }
+
+    clearPendingLoanEvidence();
+    clearScoutEvidence();
+  };
   if (Array.isArray(game.eventLog)) {
     for (const event of game.eventLog) {
       if (!isRecord(event) || typeof event.type !== 'string') {
@@ -1926,14 +2389,32 @@ function normalizeEventLog(game: GameState): void {
 
       let normalizedEvent: GameEvent | undefined;
       if (type === 'game_created') {
+        if (hasCreatedGameEvent) {
+          continue;
+        }
+        hasCreatedGameEvent = true;
         normalizedEvent = {type: 'game_created', gameId: game.id, playerIds};
       } else if (type === 'card_discarded') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
         const cardId = normalizedEventCardId(rawEvent.cardId);
-        if (playerId === undefined || cardId === undefined) {
+        const destination = cardId === undefined ? undefined : discardDestinationForCard(cardId);
+        const discardKey = playerId === undefined || cardId === undefined ? undefined : `${playerId}:${cardId}`;
+        if (
+          playerId === undefined ||
+          cardId === undefined ||
+          destination === undefined ||
+          (
+            destination === 'discard' &&
+            discardKey !== undefined &&
+            discardedRegularCardKeys.has(discardKey)
+          )
+        ) {
           continue;
         }
-        normalizedEvent = {type: 'card_discarded', playerId, cardId, destination: discardDestinationForCard(cardId)};
+        if (destination === 'discard' && discardKey !== undefined) {
+          discardedRegularCardKeys.add(discardKey);
+        }
+        normalizedEvent = {type: 'card_discarded', playerId, cardId, destination};
       } else if (type === 'cash_changed') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
         const delta = integerEventValue(rawEvent.delta);
@@ -1964,16 +2445,23 @@ function normalizeEventLog(game: GameState): void {
         normalizedEvent = {type: 'income_position_changed', playerId, from, to, reason};
       } else if (type === 'industry_built') {
         const instance = normalizedEventIndustryInstance(rawEvent.instance, validPlayerIds);
-        if (instance === undefined) {
+        if (instance === undefined || builtIndustryInstanceIds.has(instance.id)) {
           continue;
         }
+        builtIndustryInstanceIds.add(instance.id);
         normalizedEvent = {type: 'industry_built', instance};
       } else if (type === 'industry_removed') {
         const industryInstanceId = normalizedKnownIndustryInstanceId(rawEvent.industryInstanceId, game);
         const reason = normalizedIndustryRemovalReason(rawEvent.reason);
-        if (industryInstanceId === undefined || reason === undefined || !industryIsRemoved(game, industryInstanceId)) {
+        if (
+          industryInstanceId === undefined ||
+          reason === undefined ||
+          !industryIsRemoved(game, industryInstanceId) ||
+          removedIndustryInstanceIds.has(industryInstanceId)
+        ) {
           continue;
         }
+        removedIndustryInstanceIds.add(industryInstanceId);
         normalizedEvent = {type: 'industry_removed', industryInstanceId, reason};
       } else if (type === 'industry_flipped') {
         const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
@@ -1983,10 +2471,12 @@ function normalizeEventLog(game: GameState): void {
         if (
           industryInstanceId === undefined ||
           ownerPlayerId === undefined ||
-          !industryIsFlipped(game, industryInstanceId)
+          !industryIsFlipped(game, industryInstanceId) ||
+          flippedIndustryInstanceIds.has(industryInstanceId)
         ) {
           continue;
         }
+        flippedIndustryInstanceIds.add(industryInstanceId);
         normalizedEvent = {type: 'industry_flipped', industryInstanceId, ownerPlayerId};
       } else if (type === 'industry_sold') {
         const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
@@ -2003,22 +2493,43 @@ function normalizeEventLog(game: GameState): void {
           merchantSpaceId === undefined ||
           industry === undefined ||
           !industryIsFlipped(game, industryInstanceId) ||
-          !merchantSpaceAcceptsIndustry(game, merchantSpaceId, industry.industryType)
+          !merchantSpaceAcceptsIndustry(game, merchantSpaceId, industry.industryType) ||
+          soldIndustryInstanceIds.has(industryInstanceId)
         ) {
           continue;
         }
+        soldIndustryInstanceIds.add(industryInstanceId);
         normalizedEvent = {type: 'industry_sold', industryInstanceId, ownerPlayerId, merchantSpaceId};
       } else if (type === 'resource_consumed') {
         const source = normalizedEventResourceSource(rawEvent.source, game);
         const byPlayerId = normalizedEventPlayerId(rawEvent.byPlayerId, validPlayerIds);
         const reason = normalizedEventReason(rawEvent.reason);
+        const industryResourceConsumptionCount = source?.kind === 'industry_tile'
+          ? industryResourceConsumptionCounts.get(source.industryInstanceId) ?? 0
+          : 0;
+        const industryResourceLimit = source?.kind === 'industry_tile'
+          ? industryResourceConsumptionLimit(game, source.industryInstanceId)
+          : 0;
+        const merchantBeerKey = source?.kind === 'merchant_beer'
+          ? merchantBeerConsumptionKey(source)
+          : undefined;
+        const merchantBeerConsumptionCount = merchantBeerKey === undefined
+          ? 0
+          : merchantBeerConsumptionCounts.get(merchantBeerKey) ?? 0;
         if (
           source === undefined ||
           byPlayerId === undefined ||
           reason === undefined ||
-          !resourceConsumptionReasonMatchesSource(source, reason)
+          !resourceConsumptionReasonMatchesSource(source, reason) ||
+          (source.kind === 'industry_tile' && industryResourceConsumptionCount >= industryResourceLimit) ||
+          (merchantBeerKey !== undefined && merchantBeerConsumptionCount >= 1)
         ) {
           continue;
+        }
+        if (source.kind === 'industry_tile') {
+          industryResourceConsumptionCounts.set(source.industryInstanceId, industryResourceConsumptionCount + 1);
+        } else if (merchantBeerKey !== undefined) {
+          merchantBeerConsumptionCounts.set(merchantBeerKey, merchantBeerConsumptionCount + 1);
         }
         normalizedEvent = {type: 'resource_consumed', source, byPlayerId, reason};
       } else if (type === 'resource_sold_to_market') {
@@ -2028,22 +2539,28 @@ function normalizeEventLog(game: GameState): void {
         const industry = industryInstanceId === undefined
           ? undefined
           : game.board.industryInstances[industryInstanceId];
+        const soldCount = industryInstanceId === undefined
+          ? 0
+          : resourceSoldToMarketCounts.get(industryInstanceId) ?? 0;
         if (
           industryInstanceId === undefined ||
           market === undefined ||
           cashReceived === undefined ||
           industry === undefined ||
           !isMarketSlotPrice(market, cashReceived) ||
-          !resourceTypeMatchesIndustry(market, industry)
+          !resourceTypeMatchesIndustry(market, industry) ||
+          soldCount >= resourceSoldToMarketLimit(industry)
         ) {
           continue;
         }
+        resourceSoldToMarketCounts.set(industryInstanceId, soldCount + 1);
         normalizedEvent = {type: 'resource_sold_to_market', industryInstanceId, market, cashReceived};
       } else if (type === 'link_built') {
         const instance = normalizedEventLinkInstance(rawEvent.instance, validPlayerIds, game);
-        if (instance === undefined) {
+        if (instance === undefined || builtLinkInstanceIds.has(instance.id)) {
           continue;
         }
+        builtLinkInstanceIds.add(instance.id);
         normalizedEvent = {type: 'link_built', instance};
       } else if (type === 'link_scored') {
         const linkInstanceId = trimmedNonEmptyString(rawEvent.linkInstanceId);
@@ -2055,10 +2572,12 @@ function normalizeEventLog(game: GameState): void {
           ownerPlayerId === undefined ||
           points === undefined ||
           !normalizedKnownLinkOwner(linkInstanceId, ownerPlayerId, game, historicalLinkReferences) ||
-          !linkScoreMatchesRules(game, linkInstanceId, points, historicalLinkReferences)
+          !linkScoreMatchesRules(game, linkInstanceId, points, historicalLinkReferences) ||
+          scoredLinkKeys.has(`${linkInstanceId}:${ownerPlayerId}`)
         ) {
           continue;
         }
+        scoredLinkKeys.add(`${linkInstanceId}:${ownerPlayerId}`);
         normalizedEvent = {type: 'link_scored', linkInstanceId, ownerPlayerId, points};
       } else if (type === 'industry_scored') {
         const ownerPlayerId = normalizedEventPlayerId(rawEvent.ownerPlayerId, validPlayerIds);
@@ -2070,22 +2589,38 @@ function normalizeEventLog(game: GameState): void {
           industryInstanceId === undefined ||
           ownerPlayerId === undefined ||
           points === undefined ||
-          !industryScoreMatchesRules(game, industryInstanceId, points)
+          !industryScoreMatchesRules(game, industryInstanceId, points) ||
+          scoredIndustryInstanceIdsThisEra.has(industryInstanceId)
         ) {
           continue;
         }
+        scoredIndustryInstanceIdsThisEra.add(industryInstanceId);
         normalizedEvent = {type: 'industry_scored', industryInstanceId, ownerPlayerId, points};
       } else if (type === 'merchant_bonus_claimed') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
         const merchantSpaceId = normalizedKnownMerchantSpaceId(rawEvent.merchantSpaceId, game);
         const bonus = normalizedMerchantBonus(rawEvent.bonus);
+        const pendingMerchantBeerBonusCount = playerId === undefined || merchantSpaceId === undefined
+          ? 0
+          : pendingMerchantBeerBonuses.get(merchantBonusClaimKey(playerId, merchantSpaceId)) ?? 0;
         if (
           playerId === undefined ||
           merchantSpaceId === undefined ||
           bonus === undefined ||
-          !merchantBonusMatchesSpace(merchantSpaceId, bonus)
+          !merchantBonusMatchesSpace(merchantSpaceId, bonus) ||
+          pendingMerchantBeerBonusCount <= 0
         ) {
           continue;
+        }
+        pendingMerchantBeerBonuses.set(
+          merchantBonusClaimKey(playerId, merchantSpaceId),
+          pendingMerchantBeerBonusCount - 1,
+        );
+        if (bonus.type === 'develop') {
+          pendingMerchantDevelopBonuses.set(
+            merchantBonusClaimKey(playerId, merchantSpaceId),
+            (pendingMerchantDevelopBonuses.get(merchantBonusClaimKey(playerId, merchantSpaceId)) ?? 0) + bonus.count,
+          );
         }
         normalizedEvent = {type: 'merchant_bonus_claimed', playerId, merchantSpaceId, bonus};
       } else if (type === 'merchant_develop_resolved') {
@@ -2100,18 +2635,40 @@ function normalizeEventLog(game: GameState): void {
           : rawEvent.merchantSpaceIds === undefined
             ? [merchantSpaceId]
             : normalizedKnownMerchantSpaceIds(rawEvent.merchantSpaceIds, game, merchantSpaceId);
+        const availableDevelopCount = playerId === undefined || merchantSpaceIds === undefined
+          ? 0
+          : merchantSpaceIds.reduce(
+            (sum, candidateMerchantSpaceId) =>
+              sum + (pendingMerchantDevelopBonuses.get(merchantBonusClaimKey(playerId, candidateMerchantSpaceId)) ?? 0),
+            0,
+          );
+        const claimedMerchantDevelopSpecIds = playerId === undefined
+          ? undefined
+          : claimedMerchantDevelopSpecIdsByPlayer.get(playerId) ?? new Set<string>();
+        const hasDuplicateMerchantDevelopSpecId = specIds === undefined || claimedMerchantDevelopSpecIds === undefined ||
+          specIds.some((specId, index) => specIds.indexOf(specId) !== index || claimedMerchantDevelopSpecIds.has(specId));
         if (
           playerId === undefined ||
           merchantSpaceId === undefined ||
           !merchantSpaceHasDevelopBonus(merchantSpaceId) ||
+          merchantSpaceIds === undefined ||
           industryTypes === undefined ||
           specIds === undefined ||
-          (rawEvent.merchantSpaceIds !== undefined && (
-            merchantSpaceIds === undefined ||
-            !merchantSpaceIds.every(merchantSpaceHasDevelopBonus)
-          ))
+          claimedMerchantDevelopSpecIds === undefined ||
+          !merchantDevelopResolutionMatchesPlayerStacks(game, playerId, industryTypes, specIds) ||
+          hasDuplicateMerchantDevelopSpecId ||
+          availableDevelopCount <= 0 ||
+          industryTypes.length > availableDevelopCount ||
+          (rawEvent.merchantSpaceIds !== undefined && !merchantSpaceIds.every(merchantSpaceHasDevelopBonus))
         ) {
           continue;
+        }
+        for (const specId of specIds) {
+          claimedMerchantDevelopSpecIds.add(specId);
+        }
+        claimedMerchantDevelopSpecIdsByPlayer.set(playerId, claimedMerchantDevelopSpecIds);
+        for (const candidateMerchantSpaceId of merchantSpaceIds) {
+          pendingMerchantDevelopBonuses.delete(merchantBonusClaimKey(playerId, candidateMerchantSpaceId));
         }
         normalizedEvent = {
           type: 'merchant_develop_resolved',
@@ -2124,8 +2681,20 @@ function normalizeEventLog(game: GameState): void {
       } else if (type === 'turn_advanced') {
         const currentPlayerId = normalizedEventPlayerId(rawEvent.currentPlayerId, validPlayerIds);
         const roundNumber = positiveIntegerEventValue(rawEvent.roundNumber);
-        if (currentPlayerId === undefined || roundNumber === undefined) {
+        const turnKey = currentPlayerId === undefined || roundNumber === undefined
+          ? undefined
+          : `${roundNumber}:${currentPlayerId}`;
+        if (
+          currentPlayerId === undefined ||
+          roundNumber === undefined ||
+          roundNumber < lastAdvancedRoundNumber ||
+          (turnKey !== undefined && advancedTurnKeysThisEra.has(turnKey))
+        ) {
           continue;
+        }
+        lastAdvancedRoundNumber = roundNumber;
+        if (turnKey !== undefined) {
+          advancedTurnKeysThisEra.add(turnKey);
         }
         normalizedEvent = {type: 'turn_advanced', currentPlayerId, roundNumber};
       } else if (type === 'turn_order_updated') {
@@ -2136,13 +2705,21 @@ function normalizeEventLog(game: GameState): void {
         normalizedEvent = {type: 'turn_order_updated', order};
       } else if (type === 'loan_taken') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
-        if (playerId === undefined) {
+        if (playerId === undefined || pendingLoanDiscardPlayerId !== playerId) {
+          clearPendingLoanEvidence();
+          clearScoutEvidence();
           continue;
         }
         normalizedEvent = {type: 'loan_taken', playerId};
       } else if (type === 'scouted') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
-        if (playerId === undefined) {
+        if (
+          playerId === undefined ||
+          consecutiveScoutDiscards.length !== 3 ||
+          !consecutiveScoutDiscards.every((discardedEvent) => discardedEvent.playerId === playerId)
+        ) {
+          clearPendingLoanEvidence();
+          clearScoutEvidence();
           continue;
         }
         normalizedEvent = {type: 'scouted', playerId};
@@ -2150,10 +2727,18 @@ function normalizeEventLog(game: GameState): void {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
         const amountOwed = positiveIntegerEventValue(rawEvent.amountOwed);
         const incomePlayerIndex = nonNegativeIntegerEventValue(rawEvent.incomePlayerIndex);
-        if (playerId === undefined || amountOwed === undefined || incomePlayerIndex === undefined) {
+        if (
+          playerId === undefined ||
+          amountOwed === undefined ||
+          incomePlayerIndex === undefined ||
+          incomePlayerIndex >= game.turnOrder.length ||
+          game.turnOrder[incomePlayerIndex] !== playerId ||
+          pendingNegativeIncomeStart !== undefined
+        ) {
           continue;
         }
         normalizedEvent = {type: 'negative_income_started', playerId, amountOwed, incomePlayerIndex};
+        pendingNegativeIncomeStart = {event: normalizedEvent, normalizedEventIndex: normalizedEvents.length};
       } else if (type === 'negative_income_resolved') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
         const amountOwed = positiveIntegerEventValue(rawEvent.amountOwed);
@@ -2168,6 +2753,9 @@ function normalizeEventLog(game: GameState): void {
           paid === undefined ||
           victoryPointLoss === undefined ||
           industryInstanceIds === undefined ||
+          pendingNegativeIncomeStart === undefined ||
+          pendingNegativeIncomeStart.event.playerId !== playerId ||
+          pendingNegativeIncomeStart.event.amountOwed !== amountOwed ||
           !negativeIncomeResolutionMatchesRules(game, industryInstanceIds, amountOwed, paid, victoryPointLoss)
         ) {
           continue;
@@ -2180,6 +2768,7 @@ function normalizeEventLog(game: GameState): void {
           victoryPointLoss,
           industryInstanceIds,
         };
+        pendingNegativeIncomeStart = undefined;
       } else if (type === 'victory_points_changed') {
         const playerId = normalizedEventPlayerId(rawEvent.playerId, validPlayerIds);
         const delta = integerEventValue(rawEvent.delta);
@@ -2196,24 +2785,205 @@ function normalizeEventLog(game: GameState): void {
       } else if (type === 'era_ended') {
         const era = trimmedNonEmptyString(rawEvent.era);
         const score = normalizeEventEraScore(rawEvent.score, playerIds);
-        if ((era !== 'canal' && era !== 'rail') || score === undefined || score.era !== era) {
+        if (
+          (era !== 'canal' && era !== 'rail') ||
+          score === undefined ||
+          score.era !== era ||
+          endedEraEvents.has(era)
+        ) {
           continue;
         }
+        endedEraEvents.add(era);
         normalizedEvent = {type: 'era_ended', era, score};
       } else if (type === 'game_ended') {
         const winners = normalizedGameEndedWinners(rawEvent.winners, game, validPlayerIds);
-        if (winners === undefined) {
+        if (winners === undefined || hasEndedGameEvent || !hasSeenTerminalEraEnd) {
           continue;
         }
+        hasEndedGameEvent = true;
         normalizedEvent = {type: 'game_ended', winners};
       }
 
       if (normalizedEvent === undefined) {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+        clearPendingBuildSpendCash();
+        clearActionSpendEvidence();
         continue;
       }
+
+      if (waitingForGameEndAfterTerminalEra && normalizedEvent.type !== 'game_ended') {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+        clearPendingBuildSpendCash();
+        clearActionSpendEvidence();
+        continue;
+      }
+
+      if (
+        pendingNegativeIncomeStart !== undefined &&
+        !isNegativeIncomePendingEvidenceEvent(normalizedEvent, game, pendingNegativeIncomeStart.event)
+      ) {
+        clearPendingNegativeIncomeStart();
+      }
+
+      if (isLifecycleBoundaryEvent(normalizedEvent)) {
+        pendingMerchantBeerBonuses.clear();
+        pendingMerchantDevelopBonuses.clear();
+      }
+
+      if (
+        pendingBuildSpendCash !== undefined &&
+        normalizedEvent.type !== 'industry_built' &&
+        !(normalizedEvent.type === 'industry_removed' && normalizedEvent.reason === 'overbuild')
+      ) {
+        clearPendingBuildSpendCash();
+      }
+
+      if (normalizedEvent.type === 'resource_consumed') {
+        clearPendingBuildSpendCash();
+        appendActionSpendResourceCost(normalizedEvent);
+      } else if (normalizedEvent.type === 'link_built') {
+        clearPendingBuildSpendCash();
+        appendNetworkSpendLink(normalizedEvent);
+      } else if (isActionSpendCashEvent(normalizedEvent)) {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+        if (normalizedEvent.reason === 'build') {
+          pendingBuildSpendCash = {
+            event: normalizedEvent,
+            marketCost: pendingBuildSpendResources?.playerId === normalizedEvent.playerId
+              ? pendingBuildSpendResources.marketCost
+              : 0,
+          };
+          clearActionSpendEvidence();
+          continue;
+        }
+        if (normalizedEvent.reason === 'network') {
+          const baseSpend = pendingNetworkSpendEvidence?.playerId === normalizedEvent.playerId
+            ? networkBaseSpend(pendingNetworkSpendEvidence.linkCount, pendingNetworkSpendEvidence.linkType)
+            : undefined;
+          const totalSpend = baseSpend === undefined
+            ? undefined
+            : baseSpend + (pendingNetworkSpendEvidence?.marketCost ?? 0);
+          clearActionSpendEvidence();
+          if (totalSpend === undefined || normalizedEvent.delta !== -totalSpend) {
+            continue;
+          }
+        } else {
+          const marketCost = pendingDevelopSpendEvidence?.playerId === normalizedEvent.playerId
+            ? pendingDevelopSpendEvidence.marketCost
+            : undefined;
+          clearActionSpendEvidence();
+          if (marketCost === undefined || marketCost <= 0 || normalizedEvent.delta !== -marketCost) {
+            continue;
+          }
+        }
+      } else if (normalizedEvent.type === 'industry_built') {
+        if (
+          pendingBuildSpendCash !== undefined &&
+          buildSpendCashMatchesIndustry(pendingBuildSpendCash, normalizedEvent)
+        ) {
+          normalizedEvents.push(pendingBuildSpendCash.event);
+          recordActionEvidence(pendingBuildSpendCash.event);
+        }
+        clearPendingBuildSpendCash();
+        clearActionSpendEvidence();
+      } else if (!(normalizedEvent.type === 'industry_removed' && normalizedEvent.reason === 'overbuild')) {
+        clearActionSpendEvidence();
+      }
+
+      if (isMerchantBonusValueChangeEvent(normalizedEvent)) {
+        pendingMerchantBonusValueChange = normalizedEvent;
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+        continue;
+      }
+
+      const industryFlipIncomeChange = industryFlipIncomeChangeForEvent(normalizedEvent);
+      if (industryFlipIncomeChange !== undefined) {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = industryFlipIncomeChange;
+        pendingScoringVictoryPointChange = undefined;
+        continue;
+      }
+
+      const scoringVictoryPointChange = scoringVictoryPointChangeForEvent(normalizedEvent);
+      if (scoringVictoryPointChange !== undefined) {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = scoringVictoryPointChange;
+        continue;
+      }
+
+      if (normalizedEvent.type === 'merchant_bonus_claimed') {
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+        if (
+          pendingMerchantBonusValueChange !== undefined &&
+          merchantBonusValueChangeMatchesClaim(pendingMerchantBonusValueChange, normalizedEvent)
+        ) {
+          normalizedEvents.push(pendingMerchantBonusValueChange);
+          recordActionEvidence(pendingMerchantBonusValueChange);
+        }
+        pendingMerchantBonusValueChange = undefined;
+      } else if (normalizedEvent.type === 'industry_flipped') {
+        pendingMerchantBonusValueChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+        if (
+          pendingIndustryFlipIncomeChange !== undefined &&
+          industryFlipIncomeChangeMatchesFlip(pendingIndustryFlipIncomeChange, normalizedEvent, game)
+        ) {
+          normalizedEvents.push(pendingIndustryFlipIncomeChange.event);
+          recordActionEvidence(pendingIndustryFlipIncomeChange.event);
+        }
+        pendingIndustryFlipIncomeChange = undefined;
+      } else if (normalizedEvent.type === 'link_scored' || normalizedEvent.type === 'industry_scored') {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = undefined;
+        if (
+          pendingScoringVictoryPointChange !== undefined &&
+          scoringVictoryPointChangeMatchesScore(pendingScoringVictoryPointChange, normalizedEvent)
+        ) {
+          normalizedEvents.push(pendingScoringVictoryPointChange.event);
+          recordActionEvidence(pendingScoringVictoryPointChange.event);
+        }
+        pendingScoringVictoryPointChange = undefined;
+      } else {
+        pendingMerchantBonusValueChange = undefined;
+        pendingIndustryFlipIncomeChange = undefined;
+        pendingScoringVictoryPointChange = undefined;
+      }
+
       normalizedEvents.push(normalizedEvent);
+      recordActionEvidence(normalizedEvent);
       if (normalizedEvent.type === 'link_built') {
         recordHistoricalLinkReference(historicalLinkReferences, normalizedEvent.instance);
+      } else if (normalizedEvent.type === 'game_ended') {
+        break;
+      } else if (normalizedEvent.type === 'era_ended') {
+        pendingMerchantBeerBonuses.clear();
+        pendingMerchantDevelopBonuses.clear();
+        if (normalizedEvent.era === 'canal') {
+          discardedRegularCardKeys.clear();
+          scoredIndustryInstanceIdsThisEra.clear();
+          advancedTurnKeysThisEra.clear();
+          lastAdvancedRoundNumber = 0;
+          merchantBeerConsumptionCounts.clear();
+        }
+        if (normalizedEvent.era === terminalEra) {
+          hasSeenTerminalEraEnd = true;
+          waitingForGameEndAfterTerminalEra = true;
+        }
+      } else if (
+        normalizedEvent.type === 'resource_consumed' &&
+        normalizedEvent.source.kind === 'merchant_beer'
+      ) {
+        const key = merchantBonusClaimKey(normalizedEvent.byPlayerId, normalizedEvent.source.merchantSpaceId);
+        pendingMerchantBeerBonuses.set(key, (pendingMerchantBeerBonuses.get(key) ?? 0) + 1);
       }
     }
   }
@@ -2238,8 +3008,8 @@ function normalizeLoadedGame(game: GameState): GameState {
   normalizeNextInstanceIdFromBoard(game);
   normalizeRemainingLinksFromBoard(game);
   normalizeCardZones(game);
-  normalizeTurnState(game);
-  normalizePendingDecision(game);
+  const turnState = normalizeTurnState(game);
+  normalizePendingDecision(game, turnState);
   normalizeEventLog(game);
   normalizeLastEraScore(game);
 
@@ -2291,9 +3061,15 @@ function cloneGame(game: GameState): GameState {
   return structuredClone(game) as GameState;
 }
 
-function normalizeRuntimeStateForApply(game: GameState): void {
-  normalizeTurnState(game);
-  normalizePendingDecision(game);
+function normalizeRuntimeState(game: GameState, gameId: string): void {
+  game.id = gameId;
+  const createdAt = normalizedTimestamp((game as {createdAt?: unknown}).createdAt) ?? currentTimestamp();
+  const updatedAt = normalizedTimestamp((game as {updatedAt?: unknown}).updatedAt) ?? createdAt;
+  game.createdAt = createdAt;
+  game.updatedAt = Date.parse(updatedAt) < Date.parse(createdAt) ? createdAt : updatedAt;
+  normalizeVariantState(game);
+  const turnState = normalizeTurnState(game);
+  normalizePendingDecision(game, turnState);
 }
 
 export class GameStore {
@@ -2314,6 +3090,9 @@ export class GameStore {
       seed,
       introductoryCanalOnly: input.introductoryCanalOnly,
     });
+    const createdAt = currentTimestamp();
+    game.createdAt = createdAt;
+    game.updatedAt = createdAt;
     this.games.set(game.id, game);
     this.sessions.set(game.id, this.createSessionsForGame(game));
     try {
@@ -2328,22 +3107,38 @@ export class GameStore {
 
   get(id: string): GameState | undefined {
     const gameId = trimmedNonEmptyString(id);
-    return gameId ? this.games.get(gameId) : undefined;
+    if (!gameId) {
+      return undefined;
+    }
+    const game = this.games.get(gameId);
+    if (game) {
+      normalizeRuntimeState(game, gameId);
+    }
+    return game;
   }
 
   getPlayerSessions(gameId: string): PlayerSession[] {
     const normalizedGameId = trimmedNonEmptyString(gameId);
-    return [...(normalizedGameId ? this.sessions.get(normalizedGameId)?.entries() ?? [] : [])]
-      .map(([playerId, token]) => ({playerId, token}));
+    const game = normalizedGameId ? this.games.get(normalizedGameId) : undefined;
+    const sessions = normalizedGameId ? this.sessions.get(normalizedGameId) : undefined;
+    if (!game || !sessions) {
+      return [];
+    }
+    return playerIdsInSeatOrder(game).flatMap((playerId) => {
+      const token = trimmedNonEmptyString(sessions.get(playerId));
+      return token ? [{playerId, token}] : [];
+    });
   }
 
   getPlayerSession(gameId: string, playerId: string): PlayerSession | undefined {
     const normalizedGameId = trimmedNonEmptyString(gameId);
     const normalizedPlayerId = trimmedNonEmptyString(playerId);
-    const token = normalizedGameId && normalizedPlayerId
-      ? this.sessions.get(normalizedGameId)?.get(normalizedPlayerId)
-      : undefined;
-    return token && normalizedPlayerId ? {playerId: normalizedPlayerId, token} : undefined;
+    const game = normalizedGameId ? this.games.get(normalizedGameId) : undefined;
+    if (!normalizedGameId || !normalizedPlayerId || !game || !playerIdsInSeatOrder(game).includes(normalizedPlayerId)) {
+      return undefined;
+    }
+    const token = trimmedNonEmptyString(this.sessions.get(normalizedGameId)?.get(normalizedPlayerId));
+    return token ? {playerId: normalizedPlayerId, token} : undefined;
   }
 
   verifyPlayerSession(gameId: string, playerId: string, token: string | undefined): boolean {
@@ -2353,25 +3148,37 @@ export class GameStore {
   }
 
   list(): GameSummary[] {
-    return [...this.games.values()].map((game) => {
+    return [...this.games.entries()].map(([storedGameId, game]) => {
+      normalizeRuntimeState(game, storedGameId);
       const currentPlayerId = publicCurrentPlayerId(game);
       const pendingDecision = publicPendingDecisionSummary(game);
       const winners = publicGameWinners(game);
       const victoryPointsByPlayer = publicVictoryPointsByPlayer(game);
+      const era = publicEra(game);
+      const status = publicStatus(game);
+      const variant = game.variant === 'introductory_canal_only' && era === 'canal'
+        ? game.variant
+        : undefined;
       return {
-        id: game.id,
+        id: storedGameId,
+        createdAt: game.createdAt,
+        updatedAt: game.updatedAt,
         playerNames: playerIdsInSeatOrder(game).map((playerId) => publicPlayerName(playerId, game.players[playerId])),
         playerCount: publicPlayerCount(game),
         roundNumber: publicRoundNumber(game),
-        era: publicEra(game),
-        status: publicStatus(game),
-        ...(game.variant === 'introductory_canal_only' ? {variant: game.variant} : {}),
+        era,
+        status,
+        ...(variant ? {variant} : {}),
         ...(currentPlayerId ? {currentPlayerId} : {}),
         ...(pendingDecision ? {pendingDecision} : {}),
         ...(winners ? {winners} : {}),
         ...(victoryPointsByPlayer ? {victoryPointsByPlayer} : {}),
       };
-    });
+    }).sort((left, right) =>
+      compareTimestampsDesc(this.games.get(left.id)?.updatedAt, this.games.get(right.id)?.updatedAt) ||
+      compareTimestampsDesc(this.games.get(left.id)?.createdAt, this.games.get(right.id)?.createdAt) ||
+      left.id.localeCompare(right.id),
+    );
   }
 
   apply(gameId: string, command: unknown, token?: string): CommandResult {
@@ -2403,13 +3210,14 @@ export class GameStore {
     try {
       const gameCommand = normalizedCommand as unknown as GameCommand;
       const candidate = cloneGame(game);
-      normalizeRuntimeStateForApply(candidate);
+      normalizeRuntimeState(candidate, normalizedGameId);
       const validation = validateCommand(candidate, gameCommand);
       if (!validation.ok) {
         return {ok: false, errors: validation.errors};
       }
 
       applyCommand(candidate, gameCommand);
+      candidate.updatedAt = latestTimestamp(candidate.updatedAt, candidate.createdAt);
       this.games.set(normalizedGameId, candidate);
       try {
         this.persist();
@@ -2424,16 +3232,17 @@ export class GameStore {
   }
 
   private createSessionsForGame(game: GameState): Map<string, string> {
-    return new Map(Object.keys(game.players).map((playerId) => [playerId, randomUUID()]));
+    return new Map(playerIdsInSeatOrder(game).map((playerId) => [playerId, randomUUID()]));
   }
 
   private normalizeSessionsForGame(game: GameState, persistedSessions: unknown): Map<string, string> {
-    const playerIds = Object.keys(game.players);
+    const playerIds = playerIdsInSeatOrder(game);
     if (!Array.isArray(persistedSessions)) {
       return this.createSessionsForGame(game);
     }
 
     const loadedSessions = new Map<string, string>();
+    const loadedTokens = new Set<string>();
     const validPlayerIds = new Set(playerIds);
     for (const session of persistedSessions) {
       const playerId = isObjectMap(session) && typeof session.playerId === 'string'
@@ -2446,9 +3255,11 @@ export class GameStore {
         playerId &&
         token &&
         validPlayerIds.has(playerId) &&
-        !loadedSessions.has(playerId)
+        !loadedSessions.has(playerId) &&
+        !loadedTokens.has(token)
       ) {
         loadedSessions.set(playerId, token);
+        loadedTokens.add(token);
       }
     }
 
@@ -2496,10 +3307,14 @@ export class GameStore {
     fs.mkdirSync(directory, {recursive: true});
     const payload: PersistedGameStore = {
       version: 1,
-      games: [...this.games.values()],
-      sessions: Object.fromEntries([...this.sessions.entries()].map(([gameId, sessions]) => [
+      games: [...this.games.entries()].map(([gameId, game]) => {
+        const persistedGame = cloneGame(game);
+        normalizeRuntimeState(persistedGame, gameId);
+        return persistedGame;
+      }),
+      sessions: Object.fromEntries([...this.games.keys()].map((gameId) => [
         gameId,
-        [...sessions.entries()].map(([playerId, token]) => ({playerId, token})),
+        this.getPlayerSessions(gameId),
       ])),
     };
     const temporaryPath = `${this.storagePath}.tmp`;

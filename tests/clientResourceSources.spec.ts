@@ -7,7 +7,16 @@ import {
   type SaleBeerSourceSelection,
 } from '../src/common/gameEngine';
 import {staticConfig} from '../src/common/staticData';
-import {decodeSource, normalizeResourceSelection, optionalSource, optionalSources, resourceOptionsFromSources} from '../src/client/resourceSources';
+import {
+  decodeSource,
+  marketOccupiedCount,
+  marketPrice,
+  normalizeResourceSelection,
+  optionalSource,
+  optionalSources,
+  resourceSourcesForBuildSlot,
+  resourceOptionsFromSources,
+} from '../src/client/resourceSources';
 import {addIndustry, addLink, setMerchantSpace, testGame} from './helpers';
 
 function marketOption(options: Array<{value: string; label: string}>, marketName: 'coal' | 'iron') {
@@ -61,6 +70,29 @@ describe('client resource source options', () => {
       {kind: 'market', market: 'coal', price: 1},
       {kind: 'market', market: 'coal', price: 2},
     ]);
+  });
+
+  it('uses initial market pricing when markets are missing', () => {
+    const state = testGame();
+    delete (state as Partial<typeof state>).markets;
+
+    expect(marketOccupiedCount(state, 'coal')).toBe(staticConfig.markets.coal.initialOccupiedCount);
+    expect(marketOccupiedCount(state, 'iron')).toBe(staticConfig.markets.iron.initialOccupiedCount);
+    expect(marketPrice(state, 'coal')).toBe(1);
+    expect(marketPrice(state, 'iron')).toBe(2);
+
+    const options = resourceOptionsFromSources(
+      state,
+      legalResourceSourcesForSelect(state, 'coal', 'shrewsbury', [], 0),
+      [''],
+      0,
+    );
+
+    expect(decodeSource(marketOption(options, 'coal').value)).toEqual({
+      kind: 'market',
+      market: 'coal',
+      price: 1,
+    });
   });
 
   it('treats malformed encoded sources as empty optional selections', () => {
@@ -237,6 +269,46 @@ describe('client resource source options', () => {
     expect(options.map((option) => decodeSource(option.value)).filter((source) =>
       source.kind === 'industry_tile' && source.industryInstanceId === iron.id
     )).toEqual([expectedSource]);
+  });
+
+  it('removes the occupied Build slot industry from payment source options', () => {
+    const state = testGame();
+    const overbuiltCoal = addIndustry(state, {
+      id: 'coal-overbuilt',
+      ownerPlayerId: 'p1',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      remainingResource: 1,
+    });
+    const otherCoal = addIndustry(state, {
+      id: 'coal-other',
+      ownerPlayerId: 'p2',
+      industryType: 'coal_mine',
+      specId: 'coal_mine-1-1',
+      locationId: 'tamworth',
+      slotId: 'tamworth-0',
+      remainingResource: 1,
+    });
+    const sources = [
+      {kind: 'industry_tile' as const, industryInstanceId: overbuiltCoal.id, resourceType: 'coal' as const},
+      {kind: 'industry_tile' as const, industryInstanceId: otherCoal.id, resourceType: 'coal' as const},
+      {kind: 'market' as const, market: 'coal' as const, price: 1},
+    ];
+
+    const filteredSources = resourceSourcesForBuildSlot(state, 'birmingham-0', sources);
+    const options = resourceOptionsFromSources(state, filteredSources, [''], 0);
+
+    expect(filteredSources).not.toContainEqual({
+      kind: 'industry_tile',
+      industryInstanceId: overbuiltCoal.id,
+      resourceType: 'coal',
+    });
+    expect(options.map((option) => decodeSource(option.value))).toEqual([
+      {kind: 'industry_tile', industryInstanceId: otherCoal.id, resourceType: 'coal'},
+      {kind: 'market', market: 'coal', price: 1},
+    ]);
   });
 
   it('keeps iron source options independent of the selected anchor location', () => {

@@ -308,4 +308,59 @@ describe('pending decision payload validation', () => {
     expect(() => applyCommand(state, command)).toThrow('Invalid pending merchant develop decision');
     expect(state).toEqual(before);
   });
+
+  it('normalizes dirty merchant develop source lists by appending the primary source', () => {
+    const state = testGame();
+    state.pendingDecision = {
+      type: 'merchant_develop',
+      playerId: 'p1',
+      count: 2,
+      merchantSpaceId: ' gloucester-0 ',
+      merchantSpaceIds: ['gloucester-1', ' ', 'gloucester-1'],
+    } as unknown as typeof state.pendingDecision;
+    const command = {
+      type: 'resolve_merchant_develop',
+      playerId: 'p1',
+      industryTypes: ['coal_mine', 'iron_works'],
+    } as unknown as GameCommand;
+
+    expect(validateCommand(state, command)).toEqual({ok: true, errors: []});
+
+    applyCommand(state, command);
+
+    expect(state.pendingDecision).toBeUndefined();
+    expect(state.players.p1.industryTileStacks.coal_mine.removedSpecIds).toEqual(['coal_mine-1-1']);
+    expect(state.players.p1.industryTileStacks.iron_works.removedSpecIds).toEqual(['iron_works-1-1']);
+    expect(state.eventLog).toContainEqual({
+      type: 'merchant_develop_resolved',
+      playerId: 'p1',
+      merchantSpaceId: 'gloucester-0',
+      merchantSpaceIds: ['gloucester-1', 'gloucester-0'],
+      industryTypes: ['coal_mine', 'iron_works'],
+      specIds: ['coal_mine-1-1', 'iron_works-1-1'],
+    });
+  });
+
+  it('rejects merchant develop decisions whose count exceeds their merchant source capacity', () => {
+    const state = testGame();
+    state.pendingDecision = {
+      type: 'merchant_develop',
+      playerId: 'p1',
+      count: 2,
+      merchantSpaceId: 'gloucester-0',
+      merchantSpaceIds: ['gloucester-0'],
+    };
+    const before = structuredClone(state);
+    const command = {
+      type: 'resolve_merchant_develop',
+      playerId: 'p1',
+      industryTypes: ['coal_mine', 'iron_works'],
+    } as unknown as GameCommand;
+
+    const result = validateCommand(state, command);
+
+    expect(result).toEqual({ok: false, errors: ['Invalid pending merchant develop decision']});
+    expect(() => applyCommand(state, command)).toThrow('Invalid pending merchant develop decision');
+    expect(state).toEqual(before);
+  });
 });

@@ -48,6 +48,7 @@ describe('client player session store', () => {
         ' p1 ': ' token-1 ',
         p2: '   ',
         p3: 42,
+        p5: 'token-5',
         ' ': 'ghost-token',
       },
       ' ': {p1: 'ignored-token'},
@@ -67,6 +68,7 @@ describe('client player session store', () => {
     storage.setItem(sessionStorageKey, JSON.stringify({
       'game-10': {
         p10: 'token-10',
+        p4: 'token-4',
         p2: 'token-2',
       },
       ' game-1 ': {
@@ -79,7 +81,7 @@ describe('client player session store', () => {
 
     expect(readStoredSessions(storage)).toEqual({
       'game-1': {p1: 'token-1', p2: 'token-2'},
-      'game-10': {p2: 'token-2', p10: 'token-10'},
+      'game-10': {p2: 'token-2', p4: 'token-4'},
     });
     expect(sessionsForGame('game-1', storage)).toEqual([
       {playerId: 'p1', token: 'token-1'},
@@ -87,7 +89,30 @@ describe('client player session store', () => {
     ]);
     expect(sessionsForGame('game-10', storage)).toEqual([
       {playerId: 'p2', token: 'token-2'},
-      {playerId: 'p10', token: 'token-10'},
+      {playerId: 'p4', token: 'token-4'},
+    ]);
+  });
+
+  it('drops duplicate tokens within one game while preserving the first seat', () => {
+    const storage = new MemoryStorage();
+    storage.setItem(sessionStorageKey, JSON.stringify({
+      'game-1': {
+        p2: 'shared-token',
+        p1: 'shared-token',
+        p3: 'token-3',
+      },
+      'game-2': {
+        p1: 'shared-token',
+      },
+    }));
+
+    expect(readStoredSessions(storage)).toEqual({
+      'game-1': {p1: 'shared-token', p3: 'token-3'},
+      'game-2': {p1: 'shared-token'},
+    });
+    expect(sessionsForGame('game-1', storage)).toEqual([
+      {playerId: 'p1', token: 'shared-token'},
+      {playerId: 'p3', token: 'token-3'},
     ]);
   });
 
@@ -110,6 +135,24 @@ describe('client player session store', () => {
     });
   });
 
+  it('returns the same de-duplicated sessions that it writes after remembering new sessions', () => {
+    const storage = new MemoryStorage();
+    writeStoredSessions({
+      'game-1': {p2: 'shared-token'},
+    }, storage);
+
+    expect(rememberSessions('game-1', [
+      {playerId: 'p1', token: 'shared-token'},
+      {playerId: 'p3', token: 'token-3'},
+    ], storage)).toEqual([
+      {playerId: 'p1', token: 'shared-token'},
+      {playerId: 'p3', token: 'token-3'},
+    ]);
+    expect(readStoredSessions(storage)).toEqual({
+      'game-1': {p1: 'shared-token', p3: 'token-3'},
+    });
+  });
+
   it('preserves existing sessions when remembering only invalid entries', () => {
     const storage = new MemoryStorage();
     writeStoredSessions({
@@ -118,6 +161,7 @@ describe('client player session store', () => {
 
     expect(rememberSessions(' game-1 ', [
       {playerId: ' p1 ', token: '   '},
+      {playerId: 'p5', token: 'new-token'},
       {playerId: ' ', token: 'new-token'},
     ], storage)).toEqual([
       {playerId: 'p1', token: 'token-1'},

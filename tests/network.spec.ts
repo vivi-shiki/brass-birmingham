@@ -219,6 +219,21 @@ describe('network connectivity', () => {
     expect(result.errors.join(' ')).toContain('fewer than 1 canal links remaining');
   });
 
+  it('rejects Network when dirty player state is missing the current era link count', () => {
+    const state = testGame();
+    delete (state.players.p1.remainingLinks as Partial<typeof state.players.p1.remainingLinks>).canal;
+
+    const result = validateNetwork(state, {
+      type: 'network',
+      playerId: 'p1',
+      cardId: firstHandCard(state, 'p1'),
+      linkLineIds: ['birmingham-walsall'],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(' ')).toContain('fewer than 1 canal links remaining');
+  });
+
   it('rejects duplicate link selections and canal coal sources', () => {
     const duplicateRail = testGame();
     duplicateRail.era = 'rail';

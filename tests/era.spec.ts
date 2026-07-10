@@ -105,6 +105,20 @@ describe('era scoring and transition', () => {
     expect(state.eventLog.some((event) => event.type === 'era_ended' && event.era === 'canal')).toBe(true);
   });
 
+  it('rebuilds the Rail deck when a dirty discard pile is missing at Canal cleanup', () => {
+    const state = testGame();
+    emptyHandsAndPrepareRailDeck(state);
+    const expectedRailCards = [...state.players.p2.discardCardIds].sort();
+    delete (state.players.p1 as Partial<typeof state.players.p1>).discardCardIds;
+
+    expect(() => endCurrentEra(state)).not.toThrow();
+
+    expect(state.era).toBe('rail');
+    expect(state.players.p1.discardCardIds).toEqual([]);
+    expect(state.players.p2.discardCardIds).toEqual([]);
+    expect(cardsInPrivateZones(state).sort()).toEqual(expectedRailCards);
+  });
+
   it('ends an introductory Canal-only game after Canal scoring and applies the extra variant scoring', () => {
     const state = createGame({
       id: 'introductory',

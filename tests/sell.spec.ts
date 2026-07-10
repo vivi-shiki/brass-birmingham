@@ -846,6 +846,62 @@ describe('sell action', () => {
     });
   });
 
+  it('continues the same player turn after resolving a first-action Gloucester develop bonus', () => {
+    const state = testGame();
+    state.roundNumber = 2;
+    state.actionsAllowedThisTurn = 2;
+    setHand(state, 'p1', ['p2-location-birmingham-1', 'p2-location-cannock-1']);
+    const cotton = addIndustry(state, {
+      id: 'cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+    });
+    addLink(state, 'link-1', 'p1', 'birmingham-worcester');
+    addLink(state, 'link-2', 'p1', 'gloucester-worcester');
+    setMerchantSpace(state, 'gloucester-0', 'gloucester-cotton-0', true);
+
+    applyCommand(state, {
+      type: 'sell',
+      playerId: 'p1',
+      cardId: 'p2-location-birmingham-1',
+      sales: [{industryInstanceId: cotton.id, merchantSpaceId: 'gloucester-0'}],
+    });
+
+    expect(state.pendingDecision?.type).toBe('merchant_develop');
+    expect(state.currentTurnIndex).toBe(0);
+    expect(state.actionIndexInTurn).toBe(0);
+    expect(state.players.p1.handCardIds).toEqual(['p2-location-cannock-1']);
+
+    applyCommand(state, {
+      type: 'resolve_merchant_develop',
+      playerId: 'p1',
+      industryTypes: ['manufacturer'],
+    });
+
+    expect(state.pendingDecision).toBeUndefined();
+    expect(state.currentTurnIndex).toBe(0);
+    expect(state.actionIndexInTurn).toBe(1);
+    expect(state.roundNumber).toBe(2);
+    expect(state.players.p1.handCardIds).toEqual(['p2-location-cannock-1']);
+    expect(state.players.p1.industryTileStacks.manufacturer.removedSpecIds).toEqual(['manufacturer-1-1']);
+
+    applyCommand(state, {
+      type: 'pass',
+      playerId: 'p1',
+      cardId: 'p2-location-cannock-1',
+    });
+
+    expect(state.currentTurnIndex).toBe(1);
+    expect(state.actionIndexInTurn).toBe(0);
+    expect(state.players.p1.discardCardIds).toEqual(expect.arrayContaining([
+      'p2-location-birmingham-1',
+      'p2-location-cannock-1',
+    ]));
+  });
+
   it('combines two Gloucester merchant develop bonuses from one Sell action', () => {
     const state = testGame();
     setHand(state, 'p1', ['p2-location-birmingham-1']);

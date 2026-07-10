@@ -26,6 +26,24 @@ function ordinaryActionBlockReason(game: GameState, playerId: string): string | 
   return currentPlayerId === playerId ? undefined : `It is ${currentPlayerId}'s turn`;
 }
 
+function stringIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function playerHandCardIds(game: GameState, playerId: string): string[] {
+  const player = game.players[playerId] as ({handCardIds?: unknown} | undefined);
+  return stringIds(player?.handCardIds);
+}
+
+function cardZoneIds(game: GameState, zoneName: keyof GameState['cardZones']): string[] {
+  const zones = (game as unknown as {
+    cardZones?: Partial<Record<keyof GameState['cardZones'], unknown>>;
+  }).cardZones;
+  return stringIds(zones?.[zoneName]);
+}
+
 export function passActionReason(game: GameState, playerId: string, cardId: string): string | undefined {
   return validationReason(() => validatePass(game, {type: 'pass', playerId, cardId}));
 }
@@ -43,16 +61,17 @@ export function scoutActionReason(game: GameState, playerId: string, cardIds: st
   if (!player) {
     return `Unknown player: ${playerId}`;
   }
-  if (player.handCardIds.length < 3) {
+  const handCardIds = playerHandCardIds(game, playerId);
+  if (handCardIds.length < 3) {
     return 'Need at least three cards to Scout';
   }
-  if (player.handCardIds.some((cardId) => {
+  if (handCardIds.some((cardId) => {
     const type = staticConfig.cardSpecs[cardId]?.type;
     return type === 'wild_location' || type === 'wild_industry';
   })) {
     return 'Cannot Scout while holding a wild card';
   }
-  if (game.cardZones.wildLocationPool.length === 0 || game.cardZones.wildIndustryPool.length === 0) {
+  if (cardZoneIds(game, 'wildLocationPool').length === 0 || cardZoneIds(game, 'wildIndustryPool').length === 0) {
     return 'Wild card pools are empty';
   }
   return validationReason(() => validateScout(game, {type: 'scout', playerId, cardIds}));

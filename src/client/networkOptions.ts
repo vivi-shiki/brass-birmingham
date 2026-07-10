@@ -45,6 +45,11 @@ function sourceKey(source: ResourceSource): string {
   return `market:${source.market}:${source.price}`;
 }
 
+function remainingLinksForType(game: GameState, playerId: string, linkType: LinkType): number {
+  const count = game.players[playerId]?.remainingLinks?.[linkType];
+  return Number.isInteger(count) && count > 0 ? count : 0;
+}
+
 export function networkLinkOptionsForSelect(
   game: GameState,
   playerId: string,
@@ -57,7 +62,7 @@ export function networkLinkOptionsForSelect(
   }
 
   const linkType = linkTypeForEra(game);
-  if (player.remainingLinks[linkType] <= index) {
+  if (remainingLinksForType(game, playerId, linkType) <= index) {
     return [];
   }
 

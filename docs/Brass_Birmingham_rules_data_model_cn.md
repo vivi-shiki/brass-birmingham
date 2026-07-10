@@ -691,7 +691,8 @@ interface ResolveNegativeIncomeCommand {
 
 - 只能在 `pendingDecision.type === "negative_income"` 时执行。
 - `playerId` 必须是欠款玩家。
-- 每个 `industryInstanceIds` 必须指向该玩家版图上尚未翻面的产业。
+- 每个 `industryInstanceIds` 必须指向该玩家版图上的产业；已翻面或未翻面产业都可被移除。
+- 已翻面产业被移除时，不回退已经获得的收入或已经结算过的 VP，但之后不能再参与时代结算。
 - 按所选顺序出售产业，每个产业获得其现金成本向下取整的一半，产业从版图移除且不再计分。
 - 若已无合法可出售产业，或通过出售与现金已经足以覆盖欠款，则结算剩余欠款；仍不足的部分转为 VP 损失。
 - 结算完成后清除挂起决策，并继续原本被打断的收入/时代推进流程。
@@ -755,6 +756,8 @@ function connectedComponent(state: GameState, start: string): Set<string>;
 ```ts
 interface GameState {
   id: string;
+  createdAt?: string;
+  updatedAt?: string;
   playerCount: PlayerCount;
   era: Era;
   roundNumber: number;
@@ -964,18 +967,30 @@ type GameEvent =
 
 ## 11. 对外房间摘要
 
+`GameState.createdAt` 和 `GameState.updatedAt` 使用 ISO 时间字符串，由服务端
+创建房间、恢复旧存档和成功执行命令时维护；成功命令会把 `updatedAt`
+推进到当前时间和既有活动时间中的较晚者，避免系统时钟回拨导致大厅排序倒退。
+公开房间列表会暴露 `createdAt` 和 `updatedAt` 两个 ISO 时间戳，并用
+`updatedAt` 倒序排列，让最近发生行动的房间优先出现在大厅，
+但不把完整 `GameState` 暴露给大厅。
+
 `GET /api/games` 返回的是公开房间摘要，不是完整 `GameState`。进行中房间只暴露
-当前行动玩家、待决类型和当前连接的 Socket 数；已结束房间可暴露胜者与每名玩家当前 VP，但不暴露手牌、
+当前行动玩家、待决类型、当前连接的 Socket 数和已认证在线玩家席位；
+已结束房间可暴露胜者与每名玩家当前 VP，但不暴露手牌、
 session token、抽牌堆或待决金额等私有状态。Socket.IO 可通过 `games:list:get`
 ACK 拉取同样 payload；创建房间或成功提交命令后，服务端也会广播 `games:list`，
 用于打开中的大厅实时刷新。客户端加入、离开或断开房间时，`connectedClientCount`
-也会随 `games:list` 更新。客户端返回大厅或切换房间时，可通过 `game:leave`
+和 `connectedPlayerIds` 也会随 `games:list` 更新；观察者只计入
+`connectedClientCount`，不会出现在 `connectedPlayerIds` 中。客户端返回大厅或切换房间时，可通过 `game:leave`
 ACK 显式解除当前 Socket 与旧房间/玩家视图的绑定，避免继续收到旧房间的
-`game:state` 广播：
+`game:state` 广播。手动加入玩家视图时，客户端只在 Socket.IO ACK 返回匹配的
+`session.playerId` 后切换到该玩家；手动观察者加入只在 ACK 不带玩家 session 时切换到观察者视图：
 
 ```ts
 interface GameSummary {
   id: string;
+  createdAt?: string;
+  updatedAt?: string;
   playerNames: string[];
   playerCount: PlayerCount;
   roundNumber: number;
@@ -983,6 +998,7 @@ interface GameSummary {
   status: "playing" | "ended";
   variant?: GameVariant;
   connectedClientCount?: number;
+  connectedPlayerIds?: string[];
   currentPlayerId?: string;
   pendingDecision?: { type: "negative_income" | "merchant_develop"; playerId: string };
   winners?: string[];
@@ -1115,10 +1131,280 @@ manifest”和“仍待逐面人工核对”的边界只存在于文档里：
 
 以下项目仍需要真人对照官方实体或高清 PDF 逐面确认。完成后应把结果同步到 `staticConfig` 的 manifest 测试，而不是只更新文档：
 
+为避免逐面核对只停留在散文 checklist，`src/common/faceAudit.ts` 提供
+`buildFaceAuditChecklist()`，会从当前 `staticConfig` 派生每个待核对对象的
+机器可读清单；`buildFaceAuditChecklistExport()` 还会按审计 area 输出数量、
+规则书页码、来源、测试覆盖和字段名摘要，并在导出根节点携带 `version`、
+`checklistFingerprint` 和 `checklistItemCount`，方便审计证据精确引用当前
+清单版本。服务端通过
+`GET /api/face-audit-checklist` 暴露同一份只读公共清单。`tests/faceAudit.spec.ts`
+会固定清单覆盖范围、数量和关键字段，`tests/server/createServer.spec.ts`
+会固定 HTTP 响应不会泄露游戏私有状态。前端 `Rules Data Face Audit`
+面板会从该端点加载清单，并把逐项 reviewed 进度保存在浏览器本地存储中；
+该进度也可导出/导入为 JSON 工件，方便跨浏览器或提交审计记录。导出的
+工件包含当前清单指纹，导入时会拒绝与当前 `staticConfig` 清单不匹配的旧
+工件。服务端还通过 `GET /api/face-audit-review-template` 输出同一指纹下的
+可填写 JSON 审计记录模板，包含每个条目的 `reviewStatus`、审阅人、时间、
+证据引用和备注字段，以及按区域/全局汇总的未审阅、匹配、差异和需补参考
+数量。浏览器 Face Audit 面板可加载单个 area 模板，并用审阅人、审阅时间、
+官方组件来源和状态批量填充当前加载的 area artifact，填充时可选择生成
+area 级 `official-component:<source>#<area>` 引用或逐项
+`official-component:<source>#<area>:<item-id>` 引用；也可从完整或分区
+review artifact 中把所有非 `unreviewed` 条目导回本地 reviewed 进度，减少手工
+编辑每个条目的 JSON；status 结果中的每个 area 也会显示 area 级和逐项证据
+覆盖摘要，并可直接请求 compact todo handoff、单区 todo summary 或逐项 review plan 来查看尚未完成的审计 area；
+也可把 handoff JSON 与审阅人返回的分区 artifact 一起提交，直接汇总返回件
+是否属于该 handoff 以及哪些 area 已 ready 或仍缺失。
+浏览器面板中的 status、todo、单区 todo-summary、review plan、TSV、instructions 和 handoff 操作在
+merge-artifact 输入为空时使用这些 public baseline GET；粘贴 review JSON 后则切换为
+带提交工件进度的 POST。
+`GET /api/face-audit-review-template/status` 会在不提交审阅工件时输出当前
+全量未审 baseline 的全局和分区进度摘要。
+`GET /api/face-audit-review-template/todo` 会输出当前 baseline 的 compact
+todo handoff，包含每个未完成 area 的剩余数量、下一步和本地命令模板。
+`GET /api/face-audit-review-template/todo-summary` 会在不提交审阅工件时输出当前
+清单的计数版未完成基线，便于仪表盘或 CI 日志直接显示剩余 area 和 item 数量。
+`GET /api/face-audit-review-template/:area/todo-summary` 会输出指定 area 的
+计数版基线，直接标明该 area 是否 ready、仍未审、存在差异或需要更清晰官方参考。
+`GET /api/face-audit-review-template/review-sheet` 会下载全量未审 baseline 的
+TSV 审阅表，`GET /api/face-audit-review-template/:area/review-sheet` 会下载指定
+area 的未审 baseline TSV 审阅表。
+`GET /api/face-audit-review-template/review-plan` 会输出未提交审阅工件时的逐项
+baseline 派工清单，`GET /api/face-audit-review-template/reviewer-instructions`
+会下载全量 baseline reviewer instructions Markdown，
+`GET /api/face-audit-review-template/:area/reviewer-instructions` 会下载指定
+area 的 baseline 审阅说明 Markdown。
+`GET /api/face-audit-review-template/handoff` 会下载完整 baseline reviewer handoff
+JSON，包含 compact todo 以及每个未完成 area 的可填写分区 review artifact。
+`GET /api/face-audit-review-template/:area` 会输出单个 area 的
+分工审阅模板，`POST /api/face-audit-review-template/merge` 可把多个完整或
+分区审阅工件合并回标准完整 review artifact，`POST /api/face-audit-review-template/status`
+可直接输出这些工件的全局和分区进度摘要，`POST /api/face-audit-review-template/todo`
+则输出只包含未完成 area 和下一步命令的简短人工交接工件，
+`POST /api/face-audit-review-template/todo-summary` 则输出同一进度的计数版
+`face_audit_review_todo_summary`，便于仪表盘或 CI 日志快速显示剩余工作量，
+`POST /api/face-audit-review-template/:area/todo-summary` 则输出指定 area 的
+`face_audit_area_review_todo_summary`，便于只查看某个审阅分工的剩余条目数、
+下一步状态和证据覆盖计数，
+`POST /api/face-audit-review-template/review-plan` 会把同一进度展开成逐项
+派工清单，列出每个未完成条目的 label、expected fields、当前状态、证据引用
+和下一步处理类型，
+`POST /api/face-audit-review-template/review-sheet` 会把同一进度下载为 TSV
+表格，便于导入电子表格做派工或离线追踪，
+`POST /api/face-audit-review-template/:area/review-sheet` 会用同一列结构只下载
+指定 area 的 TSV 表格，便于分区审阅人只编辑自己的行，
+`POST /api/face-audit-review-template/apply-review-sheet` 可把编辑后的 TSV
+按同一批 baseline review artifacts 回灌成完整 review JSON，
+`POST /api/face-audit-review-template/reviewer-instructions` 会用同一批工件
+下载 reviewer instructions Markdown，与 CI 交接包里的审阅说明保持一致，
+`POST /api/face-audit-review-template/:area/reviewer-instructions` 会下载指定
+area 的审阅说明 Markdown，与 CI 交接包里的
+`face-audit-area-<area>-reviewer-instructions.md` 保持一致，
+`POST /api/face-audit-review-template/handoff` 会进一步输出 compact todo
+和每个未完成 area 的当前分区 review artifact，浏览器面板可直接把这些 area
+artifact 加载回编辑框继续填写；`POST /api/face-audit-reviewer-handoff/verify`
+可在接收交接包后重新校验其清单指纹、embedded todo 和每个分区工件仍互相
+一致；`POST /api/face-audit-reviewer-handoff/response` 可把审阅人返回的
+分区 review artifact 对照原 handoff 汇总为已 ready、仍未完成和仍缺失的
+area 数量。填好的工件可提交到
+`POST /api/face-audit-review-template/validate`，
+服务端会按当前清单指纹重新校验条目完整性、重复/缺失项、状态值、审阅人、
+时间戳、证据引用和差异说明，并重新计算 `ready_to_lock`、`has_differences`
+等完成度摘要；`POST /api/face-audit-review-template/ready` 使用同一套严格
+完成度门槛，要求所有条目均匹配官方牌面，适合作为发布或锁定审计状态前的
+服务端检查。工件必须先在 `evidenceSources` 中声明每个官方组件来源的 `id`、
+`label`、`sourceType` 和 `citation`；草稿校验阶段可选填写 `locator` 记录具体审阅
+文件、URL、页码或归档路径，填写 `contentHash` 时必须使用 `sha256:<64 hex>`、
+`sha1:<40 hex>` 或 `md5:<32 hex>`，ready/lock 阶段则要求每个已使用来源至少包含
+`locator` 或 `contentHash` 之一；可先用 `npm run face-audit:hash-source --
+./path/to/official-component-photos.zip ./path/to/board.png` 对本地官方组件照片、
+PDF 或归档文件生成 `face_audit_evidence_source_hashes`，再把输出的
+`locator` 和 `contentHash` 填回 review artifact 的 `evidenceSources`；也可用
+`npm run face-audit:source-template -- official_high_res_component_image
+./path/to/official-component-photos.zip ./path/to/board.png` 直接生成包含稳定
+source id、label、sourceType、citation、locator、contentHash 和空 notes 的完整
+`evidenceSources` 模板；选定 source id 后，可用
+`npm run face-audit:evidence-ref-template -- photo-set regularCards` 生成 area 级
+`evidenceRef`，或用
+`npm run face-audit:evidence-ref-template -- photo-set regularCards items` 为该
+area 的每个清单条目生成逐项 `evidenceRef` 列表；如果审阅仍在进行中，或需要
+记录与官方组件证据的差异，可用
+`npm run face-audit:template-with-sources -- ./path/to/evidence-sources.json`
+或
+`npm run face-audit:area-template-with-sources -- regularCards ./path/to/evidence-sources.json`
+生成已带 `evidenceSources` 但仍全量 `unreviewed` 的空白模板；当真人已经确认某个 area
+全部条目均与官方组件证据匹配后，可用
+`npm run face-audit:area-match-template -- regularCards ./path/to/evidence-sources.json photo-set Ada 2026-07-10T00:00:00.000Z`
+把包含 `evidenceSources` 的 source-template 或 review artifact 转成已填好的
+area review artifact，也可在末尾追加 `items` 为每个条目生成逐项引用；当真人已经完成
+全量清单核对后，也可用
+`npm run face-audit:review-match-template -- ./path/to/evidence-sources.json photo-set Ada 2026-07-10T00:00:00.000Z`
+直接生成完整 review artifact，供 `ready`、`lock-preview` 和 `lock-artifact`
+继续使用；如果不同 area 使用不同官方证据文件，可用
+`npm run face-audit:source-ids-by-area-template -- ./path/to/evidence-sources.json cards-source industryTiles=tiles-source linkLines=board-source locationsAndSlots=board-source`
+先生成覆盖全部 area 的 `source-ids-by-area.json` 映射，再用
+`npm run face-audit:review-match-template-by-area -- ./path/to/evidence-sources.json ./path/to/source-ids-by-area.json Ada 2026-07-10T00:00:00.000Z`
+直接生成完整 review artifact，其中 `source-ids-by-area.json` 是覆盖全部
+`industryTiles`、`linkLines`、`locationsAndSlots`、`merchantTiles`、`regularCards`
+和 `wildCards` 的 area 到 source id 映射，也可在末尾追加 `items` 输出逐项
+证据引用。服务端也提供 `POST /api/face-audit-evidence-ref-template`、
+`POST /api/face-audit-source-ids-by-area-template`、
+`POST /api/face-audit-review-template/:area/match` 和
+`POST /api/face-audit-review-template/match`，浏览器 Face Audit 面板可用同一套
+reviewer/source metadata 生成 evidence refs、可保存并可重新载入的
+`source-ids-by-area.json`、单区匹配 artifact 或完整匹配
+artifact；浏览器面板也可直接选择官方组件文件，用 Web Crypto 计算 `sha256`
+并生成 source artifact，或粘贴 CLI 生成的 source artifact 后把某条来源同步到
+表单字段；生成完整匹配 artifact 时，浏览器面板也可为每个 area 单独选择
+source id 并提交同一 `sourceIdsByArea` 映射；也可把当前审阅进度下载为 TSV
+review sheet，导入编辑后的 TSV 重新生成完整 review JSON，下载 reviewer
+instructions Markdown，下载指定 area 的 reviewer instructions Markdown，
+把 reviewer handoff 生成为可直接交给 CLI 校验的 JSON 文件，
+并把 handoff 内每个未完成 area 的 review artifact 单独下载为 JSON 文件。
+逐项 `evidenceRef` 必须使用
+`official-component:<source>#<area>` 引用覆盖某个审计 area 的已声明官方组件
+证据集，或使用 `official-component:<source>#<area>:<item-id>` 引用单个条目的
+官方组件证据；其中 `<source>`、`<area>` 和可选 `<item-id>` 必须分别匹配已
+声明来源和当前清单条目；仍为 `unreviewed` 的条目必须保持审阅人、时间戳、
+证据引用和备注为空，避免把残留元数据误算为人工核对证据。ready/lock
+检查会拒绝未被任何证据引用使用的已声明来源，最终紧凑 lock evidence 也只保留
+至少被一个 area evidence ref 引用过的来源记录。lock preview 和紧凑 lock evidence
+的每个 area 还会记录 evidence ref 总数、area 级引用数、逐项引用数和逐项覆盖 item 数。
+`POST /api/face-audit-review-template/lock-preview` 在 ready gate
+通过后返回同一份审计状态锁定预览，方便浏览器面板和联机服务端共享发布前
+记录；`POST /api/face-audit-review-template/lock-artifact` 在同一 ready gate
+通过后只返回紧凑 `face_audit_lock_evidence`，不回传 185 个逐项 review
+条目；`POST /api/face-audit-lock-artifact/verify` 可校验该紧凑证据仍绑定
+当前清单或刚锁定后的清单迁移。命令行也提供同一套校验入口：`npm run face-audit:checklist`
+导出当前清单，`npm run face-audit:template` 导出完整可填写模板，
+`npm run face-audit:area-template -- regularCards` 可按单个 area 导出分工审阅模板，
+`npm run face-audit:merge -- ./path/to/regular-cards-review.json ./path/to/industry-tiles-review.json`
+会把多个完整或分区审阅工件合并回标准完整 review artifact，供后续 ready/lock
+命令继续使用。`npm run face-audit:status` 可在尚无任何审阅工件时输出当前
+全量未审基线报告；`npm run face-audit:status -- ./path/to/regular-cards-review.json ./path/to/industry-tiles-review.json`
+则会合并已有完整或分区审阅工件，并在不要求 ready gate 通过的情况下，输出带清单/审阅指纹的版本化
+`face_audit_review_status` artifact，包含每个 area 的已审、匹配、差异、需补参考和
+未审数量、顶层 area 完成状态计数、审阅人/审阅时间范围交接信息、已引用和未使用的
+证据来源 id、area 级和逐项证据引用覆盖摘要，以及仍未审、存在差异、需补参考的逐项 item key，
+方便按分工追踪人工核对进度并在 PR/CI 中归档。`npm run face-audit:todo`
+使用同样的输入，但输出更短的 `face_audit_review_todo` artifact，只保留尚未
+完成的 area、剩余数量、下一批需要检查的 item key，以及生成分区模板或已确认
+匹配分区工件的命令；顶层 `commands` 还会给出完整模板、完整匹配模板和
+按 area source id 映射的完整匹配模板命令，方便一个审阅人完成全量核对后
+直接生成最终 review artifact。追加 `--summary` 时会输出计数版
+`face_audit_review_todo_summary`，不包含命令模板或逐项 item key，适合快速查看
+pending area、pending item 和完成度；同时追加 `--area <area>` 时会输出指定
+area 的 `face_audit_area_review_todo_summary`，便于只检查某个审阅分工是否
+ready、还剩多少条目、下一步是继续审阅、解决差异还是补充官方参考。`npm run face-audit:review-plan`
+也使用同样的输入，但输出 `face_audit_review_plan` artifact，把所有未完成
+条目按 area 分组列全，包含 item key、label、expected fields、当前 review
+状态、现有 evidence ref、备注和逐项 next step，便于多个审阅人不打开完整
+editable handoff JSON 也能分配逐面核对任务。`npm run face-audit:review-sheet`
+也接受同样的可选 review artifact 输入，但输出 TSV 表格，包含每个 checklist
+条目的 area、item id、item key、label、expected fields、当前 review 状态、
+下一步、审阅人、时间戳、evidence ref 和 notes，方便导入电子表格做派工或离线
+跟踪；`npm run face-audit:area-review-sheet -- <area>` 会输出同样列结构但只包含
+指定 area 的 TSV，方便分区审阅人编辑后仍通过同一个 apply-review-sheet 回灌；
+`npm run face-audit:apply-review-sheet -- ./path/to/face-audit-review-sheet.tsv ./path/to/face-audit-review.json`
+可把编辑后的 TSV 按同一批 baseline artifact 回灌成完整 review JSON，继续交给
+`validate`、`ready`、`lock-preview` 或 `lock-artifact`；`npm run face-audit:reviewer-instructions`
+可用同一批可选 review artifact 直接输出 reviewer instructions Markdown，与 CI
+交接包中的 `face-audit-reviewer-instructions.md` 保持一致；`npm run face-audit:area-reviewer-instructions -- <area>`
+会输出单个 area 的审阅说明 Markdown，与 CI 中
+`face-audit-area-<area>-reviewer-instructions.md` 保持一致；如果该 area
+已经 `ready_to_lock`，则输出无需继续审阅的说明。服务端的
+`GET /api/face-audit-review-template/status`、
+`GET /api/face-audit-review-template/todo`、
+`GET /api/face-audit-review-template/review-plan`、
+`GET /api/face-audit-review-template/review-sheet`、
+`GET /api/face-audit-review-template/:area/review-sheet`、
+`GET /api/face-audit-review-template/reviewer-instructions` 和
+`GET /api/face-audit-review-template/:area/reviewer-instructions`、
+`GET /api/face-audit-review-template/handoff` 提供未提交
+审阅工件时的 baseline 状态、todo、派工清单、TSV、Markdown 和 handoff 下载；
+`POST /api/face-audit-review-template/status`、
+`POST /api/face-audit-review-template/todo`、
+`POST /api/face-audit-review-template/review-plan`、
+`POST /api/face-audit-review-template/review-sheet` 提供带
+review artifact 进度的状态、todo、逐项派工清单和 TSV 下载，
+`POST /api/face-audit-review-template/:area/review-sheet` 提供同样的单区 TSV 下载，
+`POST /api/face-audit-review-template/apply-review-sheet` 提供同样的 TSV 回灌，
+`POST /api/face-audit-review-template/reviewer-instructions` 和
+`POST /api/face-audit-review-template/:area/reviewer-instructions` 提供同样的
+Markdown 下载，`POST /api/face-audit-review-template/handoff` 提供同样的
+handoff JSON 下载；
+最终 ready/lock 仍以 JSON review artifact 为准。`npm run face-audit:ci-artifacts -- ./face-audit-artifacts`
+会把 `face-audit-ci-manifest.json`、`face-audit-review-status.json`、
+`face-audit-review.json`、`face-audit-review-todo.json`、
+`face-audit-review-plan.json`、`face-audit-review-sheet.tsv`、
+`face-audit-reviewer-handoff.json` 和 `face-audit-reviewer-instructions.md`
+写入指定目录，
+同时为每个未完成 area 额外写出独立的
+`face-audit-area-<area>-review.json` 和
+`face-audit-area-<area>-review-sheet.tsv`、
+`face-audit-area-<area>-todo-summary.json`，以及可单独分发给该 area 审阅人的
+`face-audit-area-<area>-reviewer-instructions.md`；也可在目录参数后追加一个或多个
+review artifact，让 CI 归档合并后的审计状态、完整 review artifact、未完成清单、逐项派工计划、
+TSV 派工表、总 handoff、人类可读审阅步骤、可直接分发填写的分区模板和每个
+未完成 area 的逐区 TSV、计数版摘要与分区审阅说明。`npm run verify`
+会先用临时目录运行 `face-audit:ci-artifacts-self-check`，确认同一套
+CI artifact 生成和目录自检可以无残留通过。GitHub Actions 在 `npm run verify`
+通过后会运行正式导出命令，并以
+`face-audit-ci-artifacts` artifact 上传该目录，供审阅人直接从对应 CI run 下载
+当前审计状态、完整 review artifact、未完成清单、逐项派工计划、TSV 派工表、落盘 manifest、未完成 area 的独立分区模板、逐区 TSV、逐区 summary 和逐区审阅说明。该命令的
+stdout manifest 也会输出 review 指纹、已审/未审条目数、pending/ready area
+数量、每个未完成 area 的剩余条目数，以及每个归档文件的 sha256 contentHash；
+stdout manifest 会与落盘 manifest 保持一致，便于只看 CI 日志时判断审计工作量并核对下载内容。Actions
+会在上传 artifact 前先运行同一套目录自检，避免缺文件或 handoff/area
+内容不一致的审计包被归档。下载 artifact 目录后也可先运行
+`npm run face-audit:verify-ci-artifacts --
+./face-audit-artifacts`，确认 manifest、核心 JSON、TSV review sheet、审阅说明、handoff 包和每个未完成
+area 的分区 review artifact、逐区 summary 与逐区审阅说明都存在且互相一致；自检还会把 status、todo、
+review-plan、逐区 todo-summary artifact 和逐区审阅说明与 reviewer handoff 反推结果交叉比对，避免被编辑过的
+摘要、说明和实际要分发填写的 area 文件漂移，并用 `face-audit-review.json` 重建
+TSV review sheet，再把 TSV 回灌到同一份 review JSON，避免表格派工文件与
+JSON 工件不同步。
+`npm run face-audit:handoff -- ./path/to/regular-cards-review.json ./path/to/industry-tiles-review.json`
+会在同一进度基础上输出 `face_audit_reviewer_handoff` artifact，内含 compact
+todo 和每个未完成 area 的当前分区 review artifact；这些分区工件会保留已声明
+的 `evidenceSources`、已完成的逐项审阅、差异和需补参考状态，方便新的审阅人
+直接继续填写，而不需要为每个 area 重新运行模板命令。收到别人生成的交接包后，
+可用 `npm run face-audit:verify-handoff -- ./path/to/face-audit-reviewer-handoff.json`
+确认该包仍绑定当前清单，并且顶层 todo、分区 todo 和分区 review artifact 没有
+互相漂移。审阅人返回一个或多个分区工件后，可用
+`npm run face-audit:handoff-response -- ./path/to/face-audit-reviewer-handoff.json ./path/to/returned-area-review.json`
+确认返回的 area 属于该 handoff，并汇总哪些已 `ready_to_lock`、哪些仍未完成、
+哪些 handoff area 尚未返回。
+`npm run face-audit:validate -- ./path/to/face-audit-review.json` 在本地或 CI
+中校验填好的工件结构；`npm run face-audit:ready -- ./path/to/face-audit-review.json`
+则是更严格的发布门槛，要求所有条目均为 `matches_official_face`、无差异且无
+待补参考，才允许后续把 `staticConfig.audit` 的逐面审计状态锁定。
+`npm run face-audit:lock-preview -- ./path/to/face-audit-review.json` 会在同一
+ready gate 通过后输出每个 face-audit area 从
+`manifest_locked_face_audit_pending` 锁到 `manifest_locked` 的机器可读预览、
+审阅人、证据引用和审阅时间范围，供 PR/CI 记录使用。该预览同时包含
+`checklistFingerprint` 和 `reviewFingerprint`：前者锁定当前 `staticConfig`
+待审清单版本，后者锁定已规范化的人工审阅证据本身。
+`npm run face-audit:lock-artifact -- ./path/to/face-audit-review.json` 会在同一
+ready gate 通过后输出更精简的 `face_audit_lock_evidence` JSON，只包含指纹、
+完成度和各 area 的锁定摘要，不包含 185 个逐项 review 条目，适合提交到 PR
+或 CI 产物中作为人工审阅证据索引；该工件会保留规范化 `evidenceSources`
+来源注册表，方便之后只凭紧凑证据追溯官方组件来源。`npm run face-audit:verify-lock-artifact
+-- ./path/to/face-audit-lock-artifact.json` 会反向校验这份紧凑证据是否仍绑定
+当前清单，或绑定刚把逐面审计 area 从
+`manifest_locked_face_audit_pending` 改成 `manifest_locked` 后的同一份清单
+迁移。`npm run face-audit:release-gate -- ./path/to/face-audit-lock-artifact.json`
+用于发布/CI 门槛：当前所有逐面 area 仍为 pending 时可无证据通过；一旦任何
+逐面 area 被锁为 `manifest_locked`，则必须整批锁定并提供可验证的
+`face_audit_lock_evidence`。服务端同样提供 `POST /api/face-audit-release-gate`，
+可提交 `{ "lockArtifact": ... }` 或空对象运行同一门禁；浏览器 Face Audit
+面板可直接生成未完成条目的逐项 review plan，Lock Artifact 区域也可直接检查 release gate。以上命令和接口只是人工核对过程记录，不会直接改变
+`staticConfig.audit` 的审计状态。
+
 1. 全部 `64` 张 Location/Industry 普通牌的实体牌面：地点/产业、人数角标和数量分布。当前 `tests/staticData.spec.ts` 已固定普通牌人数前缀、地点/产业分布、连续 copy 编号和 `cardSpecs` 实体 `id` 展开；仍需人工逐面确认牌面地点/产业与官方实体/高清 PDF 完全一致。
 2. 全部 `8` 张 Wild 牌：`4` 张 Wild Location 与 `4` 张 Wild Industry。当前 `tests/staticData.spec.ts` 已固定 Wild 牌数量和 `wild-location-1..4` / `wild-industry-1..4` 实体 `id` 展开；仍需人工确认牌面类型和数量。
 3. 地图上 `20` 个城市的全部产业槽位图标、混合槽位、地点 banner 颜色和印刷连接图标。
-4. 全部连接线的端点、canal/rail 支持、人数适用性，以及 Cannock 北侧酒厂、Kidderminster-Worcester 南侧酒厂这类特殊连接。当前 `tests/staticData.spec.ts` 已固定连接线端点、canal/rail 支持、特殊 farm brewery 连接和高人数商人端点导致的连接线启用/停用清单；仍需实体或高清 PDF 逐线目视确认端点和印刷线型。
+4. 全部 `39` 条连接线的端点、canal/rail 支持、人数适用性，以及 Cannock 北侧酒厂、Kidderminster-Worcester 南侧酒厂这类特殊连接。当前 `tests/staticData.spec.ts` 已固定连接线端点、canal/rail 支持、特殊 farm brewery 连接和高人数商人端点导致的连接线启用/停用清单；仍需实体或高清 PDF 逐线目视确认端点和印刷线型。
 5. 全部 `45` 张每色产业牌的等级、数量、建造时代、现金/煤/铁成本、出售啤酒需求、翻面收入、VP、连接图标、产出资源和禁止 Develop 标记。当前 `tests/staticData.spec.ts` 已固定每类型数量、每等级 `count`、实体牌 `id` 展开和玩家板顺序；仍需人工逐面确认这些字段与官方实体/高清 PDF 完全一致。
 6. 全部 `9` 张商人牌的产业图标、空白牌、人数角标，以及 Gloucester/Oxford/Shrewsbury/Warrington/Nottingham 的奖励。当前 `tests/staticData.spec.ts` 已固定商人牌数量、空白牌、ID 中的商人地点前缀、产业图标后缀、人数角标和商人奖励 manifest；仍需人工逐面确认牌面与官方实体/高清 PDF 完全一致。
 7. 规则书以外的 UI 坐标、图像裁切和素材映射；这些不应进入规则引擎，可另放渲染配置。

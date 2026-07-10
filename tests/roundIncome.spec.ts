@@ -122,6 +122,56 @@ describe('round income', () => {
     });
   });
 
+  it('allows flipped industries to be liquidated for negative income', () => {
+    const state = testGame();
+    state.players.p1.cash = 1;
+    state.players.p1.victoryPoints = 8;
+    state.players.p1.incomeTrackPosition = retreatIncomeLevels(staticConfig.incomeTrack.startPosition, 5);
+    const cotton = addIndustry(state, {
+      id: 'flipped-cotton-1',
+      ownerPlayerId: 'p1',
+      industryType: 'cotton_mill',
+      specId: 'cotton_mill-1-1',
+      locationId: 'birmingham',
+      slotId: 'birmingham-0',
+      flipped: true,
+    });
+    state.players.p1.industryTileStacks.cotton_mill.builtInstanceIds = [cotton.id];
+
+    finishRoundWithPasses(state);
+
+    expect(state.pendingDecision).toEqual({
+      type: 'negative_income',
+      playerId: 'p1',
+      amountOwed: 5,
+      incomePlayerIndex: 0,
+    });
+
+    const validation = validateCommand(state, {
+      type: 'resolve_negative_income',
+      playerId: 'p1',
+      industryInstanceIds: [cotton.id],
+    });
+    expect(validation.ok).toBe(true);
+
+    applyCommand(state, {type: 'resolve_negative_income', playerId: 'p1', industryInstanceIds: [cotton.id]});
+
+    expect(state.pendingDecision).toBeUndefined();
+    expect(state.board.industryInstances[cotton.id].removedFromGame).toBe(true);
+    expect(state.players.p1.industryTileStacks.cotton_mill.builtInstanceIds).not.toContain(cotton.id);
+    expect(state.players.p1.cash).toBe(2);
+    expect(state.players.p1.victoryPoints).toBe(8);
+    expect(state.eventLog).toContainEqual({type: 'industry_removed', industryInstanceId: cotton.id, reason: 'negative_income'});
+    expect(state.eventLog).toContainEqual({
+      type: 'negative_income_resolved',
+      playerId: 'p1',
+      amountOwed: 5,
+      paid: 5,
+      victoryPointLoss: 0,
+      industryInstanceIds: [cotton.id],
+    });
+  });
+
   it('continues income settlement into another negative-income decision after resolving the first one', () => {
     const state = testGame();
     state.players.p1.cash = 1;

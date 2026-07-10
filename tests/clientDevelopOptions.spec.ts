@@ -19,6 +19,15 @@ describe('client develop options', () => {
     expect(normalizeDevelopSelections(state.players.p1, ['coal_mine'], 1)).toEqual(['cotton_mill']);
   });
 
+  it('treats missing dirty industry stack data as no develop options', () => {
+    const state = testGame();
+    delete (state.players.p1 as Partial<typeof state.players.p1>).industryTileStacks;
+
+    expect(() => developOptionsForSelect(state.players.p1, [], 0)).not.toThrow();
+    expect(developOptionsForSelect(state.players.p1, [], 0)).toEqual([]);
+    expect(normalizeDevelopSelections(state.players.p1, ['coal_mine'], 1)).toEqual([]);
+  });
+
   it('allows developing the same industry twice when the next stack head is developable', () => {
     const state = testGame();
 

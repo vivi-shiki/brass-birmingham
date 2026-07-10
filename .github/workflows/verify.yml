@@ -1,0 +1,41 @@
+name: Verify
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build, test, release gate, and artifact self-check
+        run: npm run verify
+
+      - name: Export face-audit CI artifacts
+        run: npm run face-audit:ci-artifacts -- face-audit-artifacts
+
+      - name: Verify face-audit CI artifacts
+        run: npm run face-audit:verify-ci-artifacts -- face-audit-artifacts
+
+      - name: Upload face-audit CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: face-audit-ci-artifacts
+          path: face-audit-artifacts
+          if-no-files-found: error
+          retention-days: 14

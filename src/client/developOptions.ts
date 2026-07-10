@@ -12,6 +12,15 @@ export const developIndustryTypes: IndustryType[] = [
   'brewery',
 ];
 
+function stackSpecIdForDevelop(player: PlayerState, industryType: IndustryType, offset: number): string | undefined {
+  const stacks = (player as unknown as {
+    industryTileStacks?: Partial<Record<IndustryType, {availableSpecIdsInOrder?: unknown}>>;
+  }).industryTileStacks;
+  const specIds = stacks?.[industryType]?.availableSpecIdsInOrder;
+  const specId = Array.isArray(specIds) ? specIds[offset] : undefined;
+  return typeof specId === 'string' ? specId : undefined;
+}
+
 export function developOptionsForSelect(
   player: PlayerState,
   selectedTypes: Array<IndustryType | undefined>,
@@ -27,7 +36,7 @@ export function developOptionsForSelect(
 
   return developIndustryTypes.filter((industryType) => {
     const offset = simulatedStackHeads.get(industryType) ?? 0;
-    const specId = player.industryTileStacks[industryType]?.availableSpecIdsInOrder[offset];
+    const specId = stackSpecIdForDevelop(player, industryType, offset);
     return Boolean(specId && staticConfig.industryTileSpecs[specId]?.canDevelop);
   });
 }

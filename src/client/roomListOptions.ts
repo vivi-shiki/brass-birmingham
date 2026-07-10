@@ -6,7 +6,10 @@ export type GameSummary = {
   era: 'canal' | 'rail';
   status: 'playing' | 'ended';
   variant?: 'introductory_canal_only';
+  createdAt?: string;
+  updatedAt?: string;
   connectedClientCount?: number;
+  connectedPlayerIds?: string[];
   currentPlayerId?: string;
   winners?: string[];
   victoryPointsByPlayer?: Record<string, number>;
@@ -35,6 +38,12 @@ function pendingDecisionLabel(type: NonNullable<GameSummary['pendingDecision']>[
   }
 }
 
+function normalizedPendingDecisionType(
+  value: unknown,
+): NonNullable<GameSummary['pendingDecision']>['type'] | undefined {
+  return value === 'negative_income' || value === 'merchant_develop' ? value : undefined;
+}
+
 function nonEmptyString(value: unknown): string | undefined {
   const trimmed = typeof value === 'string' ? value.trim() : '';
   return trimmed || undefined;
@@ -59,6 +68,15 @@ function normalizedPlayerIds(value: unknown, playerCount: number): string[] | un
     }
   }
   return playerIds.length > 0 ? playerIds : undefined;
+}
+
+function normalizedConnectedPlayerIds(value: unknown, playerCount: number): string[] | undefined {
+  const playerIds = normalizedPlayerIds(value, playerCount);
+  if (!playerIds) {
+    return undefined;
+  }
+  return Array.from({length: playerCount}, (_, index) => `p${index + 1}`)
+    .filter((playerId) => playerIds.includes(playerId));
 }
 
 function normalizedVictoryPointsByPlayer(value: unknown, playerCount: number): Record<string, number> | undefined {
@@ -87,6 +105,37 @@ function normalizedConnectedClientCount(value: unknown): number | undefined {
     : undefined;
 }
 
+function normalizedIsoTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.trim() !== value || value.length === 0) {
+    return undefined;
+  }
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value ? value : undefined;
+}
+
+function timestampTime(value: string | undefined): number | undefined {
+  const time = Date.parse(value ?? '');
+  return Number.isFinite(time) ? time : undefined;
+}
+
+function compareTimestampsDesc(left: string | undefined, right: string | undefined): number {
+  const leftTime = timestampTime(left);
+  const rightTime = timestampTime(right);
+  if (leftTime !== undefined && rightTime !== undefined && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  if ((leftTime !== undefined) !== (rightTime !== undefined)) {
+    return rightTime !== undefined ? 1 : -1;
+  }
+  return 0;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
 function savedSessionsForGame(game: GameSummary, sessions: SavedPlayerSession[]): SavedPlayerSession[] {
   const byPlayerId = new Map<string, string>();
   for (const session of sessions) {
@@ -100,9 +149,24 @@ function savedSessionsForGame(game: GameSummary, sessions: SavedPlayerSession[])
     }
   }
 
+  const seenTokens = new Set<string>();
   return Array.from(byPlayerId.entries())
-    .map(([playerId, token]) => ({playerId, token}))
-    .sort((a, b) => a.playerId.localeCompare(b.playerId, undefined, {numeric: true}));
+    .sort(([a], [b]) => a.localeCompare(b, undefined, {numeric: true}))
+    .flatMap(([playerId, token]) => {
+      if (seenTokens.has(token)) {
+        return [];
+      }
+      seenTokens.add(token);
+      return [{playerId, token}];
+    });
+}
+
+function playerNameForSession(game: GameSummary, playerId: string): string | undefined {
+  const match = /^p([1-4])$/.exec(playerId);
+  if (!match) {
+    return undefined;
+  }
+  return nonEmptyString(game.playerNames[Number(match[1]) - 1]);
 }
 
 function toGameSummary(value: unknown): GameSummary | undefined {
@@ -115,9 +179,17 @@ function toGameSummary(value: unknown): GameSummary | undefined {
     ? record.playerNames.map(nonEmptyString)
     : undefined;
   const playerCount = record.playerCount;
-  const pendingDecision = record.pendingDecision;
+  const pendingDecision = objectRecord(record.pendingDecision);
+  const pendingDecisionType = normalizedPendingDecisionType(pendingDecision?.type);
   const currentPlayerId = nonEmptyString(record.currentPlayerId);
   const connectedClientCount = normalizedConnectedClientCount(record.connectedClientCount);
+  const normalizedOnlineSeats = normalizedConnectedPlayerIds(record.connectedPlayerIds, typeof playerCount === 'number' ? playerCount : 0);
+  const connectedPlayerIds = normalizedOnlineSeats !== undefined &&
+    (connectedClientCount === undefined || normalizedOnlineSeats.length <= connectedClientCount)
+    ? normalizedOnlineSeats
+    : undefined;
+  const createdAt = normalizedIsoTimestamp(record.createdAt);
+  const updatedAt = normalizedIsoTimestamp(record.updatedAt);
   const shouldKeepCurrentPlayerId = record.status === 'playing' && record.currentPlayerId !== undefined;
   const shouldKeepEndedResults = record.status === 'ended';
   const winners = shouldKeepEndedResults
@@ -129,11 +201,10 @@ function toGameSummary(value: unknown): GameSummary | undefined {
   const pendingPlayerId = pendingDecision === undefined
     ? undefined
     : nonEmptyString(pendingDecision.playerId);
-  const shouldKeepPendingDecision = record.status === 'playing' && pendingDecision !== undefined;
+  const shouldKeepPendingDecision = record.status === 'playing' && record.pendingDecision !== undefined;
   const validPendingDecision = !shouldKeepPendingDecision || (
-      typeof pendingDecision === 'object' &&
-      pendingDecision !== null &&
-      (pendingDecision.type === 'negative_income' || pendingDecision.type === 'merchant_develop') &&
+      pendingDecision !== undefined &&
+      (pendingDecisionType === 'negative_income' || pendingDecisionType === 'merchant_develop') &&
       typeof playerCount === 'number' &&
       playerIdIsInSeatRange(pendingPlayerId, playerCount)
   );
@@ -158,6 +229,10 @@ function toGameSummary(value: unknown): GameSummary | undefined {
     return undefined;
   }
 
+  const publicPendingDecision = pendingDecisionType !== undefined && pendingPlayerId !== undefined
+    ? {type: pendingDecisionType, playerId: pendingPlayerId}
+    : undefined;
+
   return {
     id,
     playerNames: playerNames as string[],
@@ -165,21 +240,28 @@ function toGameSummary(value: unknown): GameSummary | undefined {
     roundNumber: record.roundNumber,
     era: record.era,
     status: record.status,
-    ...(record.variant === 'introductory_canal_only' ? {variant: record.variant} : {}),
+    ...(record.variant === 'introductory_canal_only' && record.era === 'canal' ? {variant: record.variant} : {}),
+    ...(createdAt !== undefined ? {createdAt} : {}),
+    ...(updatedAt !== undefined ? {updatedAt} : {}),
     ...(connectedClientCount !== undefined ? {connectedClientCount} : {}),
+    ...(connectedPlayerIds !== undefined ? {connectedPlayerIds} : {}),
     ...(!shouldKeepCurrentPlayerId ? {} : {currentPlayerId: currentPlayerId as string}),
     ...(winners ? {winners} : {}),
     ...(victoryPointsByPlayer ? {victoryPointsByPlayer} : {}),
-    ...(!shouldKeepPendingDecision
+    ...(publicPendingDecision === undefined
       ? {}
-      : {pendingDecision: {type: pendingDecision.type, playerId: pendingPlayerId as string}}),
+      : {pendingDecision: publicPendingDecision}),
   };
 }
 
 export function gameSummaryLabel(game: GameSummary): string {
   const stateLabel = game.status === 'ended' ? 'ended' : `${game.era} round ${game.roundNumber}`;
   const variantLabel = game.variant === 'introductory_canal_only' ? ' intro' : '';
+  const updatedLabel = game.updatedAt === undefined ? '' : ` - updated ${game.updatedAt}`;
   const connectedLabel = game.connectedClientCount === undefined ? '' : ` - ${game.connectedClientCount} connected`;
+  const connectedPlayersLabel = game.connectedPlayerIds && game.connectedPlayerIds.length > 0
+    ? ` - online ${game.connectedPlayerIds.join(', ')}`
+    : '';
   const resultParts: string[] = [];
   if (game.status === 'ended' && game.winners && game.winners.length > 0) {
     resultParts.push(`${game.winners.length === 1 ? 'winner' : 'winners'} ${game.winners.join(', ')}`);
@@ -198,7 +280,14 @@ export function gameSummaryLabel(game: GameSummary): string {
       : game.currentPlayerId
         ? ` - turn ${game.currentPlayerId}`
         : '';
-  return `${game.id}: ${game.playerNames.join(', ')} (${game.playerCount}p${variantLabel}) - ${stateLabel}${connectedLabel}${actionLabel}`;
+  return `${game.id}: ${game.playerNames.join(', ')} (${game.playerCount}p${variantLabel}) - ${stateLabel}${updatedLabel}${connectedLabel}${connectedPlayersLabel}${actionLabel}`;
+}
+
+export function savedSessionLabel(game: GameSummary, session: SavedPlayerSession): string {
+  const playerId = nonEmptyString(session.playerId) ?? session.playerId;
+  const playerName = playerNameForSession(game, playerId);
+  const playerLabel = playerName ? `${playerName} (${playerId})` : playerId;
+  return `Join ${game.id} as ${playerLabel}`;
 }
 
 export function gameSummariesFromPayload(payload: unknown): GameSummary[] {
@@ -218,5 +307,9 @@ export function listedGames(
     ...game,
     label: gameSummaryLabel(game),
     savedSessions: savedSessionsForGame(game, sessionsForGame(game.id)),
-  }));
+  })).sort((left, right) => {
+    return compareTimestampsDesc(left.updatedAt, right.updatedAt) ||
+      compareTimestampsDesc(left.createdAt, right.createdAt) ||
+      left.id.localeCompare(right.id);
+  });
 }

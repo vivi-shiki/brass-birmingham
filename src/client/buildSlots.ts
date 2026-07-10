@@ -6,11 +6,18 @@ import {validationOk} from './validation';
 
 const buildIndustryTypes: IndustryType[] = ['cotton_mill', 'coal_mine', 'iron_works', 'manufacturer', 'pottery', 'brewery'];
 
+function isMarketExplicitlyEmpty(game: GameState, marketName: 'coal' | 'iron'): boolean {
+  const market = (game as unknown as {
+    markets?: Partial<Record<'coal' | 'iron', {occupiedCount?: unknown} | null>>;
+  }).markets?.[marketName];
+  return market?.occupiedCount === 0;
+}
+
 function isResourceGloballyDepleted(game: GameState, industryType: IndustryType): boolean {
-  if (industryType === 'coal_mine' && game.markets.coal.occupiedCount > 0) {
+  if (industryType === 'coal_mine' && !isMarketExplicitlyEmpty(game, 'coal')) {
     return false;
   }
-  if (industryType === 'iron_works' && game.markets.iron.occupiedCount > 0) {
+  if (industryType === 'iron_works' && !isMarketExplicitlyEmpty(game, 'iron')) {
     return false;
   }
   if (industryType !== 'coal_mine' && industryType !== 'iron_works') {
