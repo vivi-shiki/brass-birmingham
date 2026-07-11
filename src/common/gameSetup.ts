@@ -5,6 +5,7 @@ import type {
   GameState,
   IndustryType,
   LinkType,
+  PlayerColor,
   PlayerCount,
   PlayerState,
 } from './types';
@@ -27,6 +28,25 @@ export const INDUSTRY_TYPES: IndustryType[] = [
 ];
 
 export const LINK_TYPES: LinkType[] = ['canal', 'rail'];
+
+export const PLAYER_COLORS: PlayerColor[] = ['orange', 'yellow', 'purple', 'teal'];
+
+export function isPlayerColor(value: unknown): value is PlayerColor {
+  return typeof value === 'string' && PLAYER_COLORS.includes(value as PlayerColor);
+}
+
+export function playerColorForSeatIndex(index: number): PlayerColor {
+  return PLAYER_COLORS[index] ?? PLAYER_COLORS[0];
+}
+
+export function playerColorForId(playerId: string): PlayerColor {
+  const seatIndex = Number.parseInt(playerId.replace(/^p/, ''), 10) - 1;
+  return Number.isInteger(seatIndex) ? playerColorForSeatIndex(seatIndex) : PLAYER_COLORS[0];
+}
+
+export function normalizePlayerColor(value: unknown, playerId: string): PlayerColor {
+  return isPlayerColor(value) ? value : playerColorForId(playerId);
+}
 
 export function coercePlayerCount(count: number): PlayerCount {
   if (count === 2 || count === 3 || count === 4) {
@@ -60,10 +80,11 @@ function createIndustryStacks() {
   return stacks;
 }
 
-function createPlayer(id: string, name: string): PlayerState {
+function createPlayer(id: string, name: string, color: PlayerColor): PlayerState {
   return {
     id,
     name,
+    color,
     cash: staticConfig.rules.initialCash,
     victoryPoints: 0,
     incomeTrackPosition: staticConfig.incomeTrack.startPosition,
@@ -147,7 +168,7 @@ export function createGame(options: CreateGameOptions): GameState {
   const playerIds = options.playerNames.map((_, index) => `p${index + 1}`);
   const players = Object.fromEntries(playerIds.map((id, index) => {
     const name = options.playerNames[index].trim() || `Player ${index + 1}`;
-    return [id, createPlayer(id, name)];
+    return [id, createPlayer(id, name, playerColorForSeatIndex(index))];
   }));
   const turnOrder = createInitialTurnOrder(playerIds, options.initialTurnOrder, random);
 

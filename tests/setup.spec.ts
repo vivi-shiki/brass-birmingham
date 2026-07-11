@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {createGame} from '../src/common/gameSetup';
+import {createGame, PLAYER_COLORS} from '../src/common/gameSetup';
 import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../src/common/staticData';
 import {getIncomeLevel} from '../src/common/income';
 import type {GameState, IndustryType, MerchantSpec, PlayerCount} from '../src/common/types';
@@ -191,7 +191,9 @@ describe('game setup', () => {
     const state = createGame({id: 'g1', playerNames: ['Ada', 'Ben', 'Cara', 'Dev'], seed: 42});
 
     for (const [playerId, player] of Object.entries(state.players)) {
+      const seatIndex = Number(playerId.slice(1)) - 1;
       expect(player.id).toBe(playerId);
+      expect(player.color).toBe(PLAYER_COLORS[seatIndex]);
       expect(player.cash).toBe(staticConfig.rules.initialCash);
       expect(player.victoryPoints).toBe(0);
       expect(player.incomeTrackPosition).toBe(staticConfig.incomeTrack.startPosition);
@@ -388,6 +390,10 @@ describe('game setup', () => {
 
     expect(state.turnOrder).toEqual(['p4', 'p2', 'p1', 'p3']);
     expect(repeated.turnOrder).toEqual(state.turnOrder);
+    expect(state.players.p1.color).toBe('orange');
+    expect(state.players.p2.color).toBe('yellow');
+    expect(state.players.p3.color).toBe('purple');
+    expect(state.players.p4.color).toBe('teal');
   });
 
   it('rejects fractional setup seeds instead of truncating them implicitly', () => {

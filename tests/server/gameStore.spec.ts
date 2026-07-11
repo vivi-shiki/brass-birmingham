@@ -2269,8 +2269,10 @@ describe('GameStore', () => {
     game.playerCount = 4;
     game.players.p1.id = 'wrong-id';
     game.players.p1.name = '  Ada  ';
+    game.players.p1.color = 'not-a-player-color' as GameState['players'][string]['color'];
     game.players.p1.handCardIds = 'not-an-array' as unknown as string[];
     game.players.p2.name = '';
+    delete (game.players.p2 as Partial<GameState['players'][string]>).color;
     game.players.p2.discardCardIds = null as unknown as string[];
     (game.players as unknown as Record<string, unknown>).ghost = {
       ...structuredClone(game.players.p1),
@@ -2313,9 +2315,11 @@ describe('GameStore', () => {
     expect(Object.keys(restoredGame?.players ?? {})).toEqual(['p1', 'p2']);
     expect(restoredGame?.players.p1.id).toBe('p1');
     expect(restoredGame?.players.p1.name).toBe('Ada');
+    expect(restoredGame?.players.p1.color).toBe('orange');
     expect(restoredGame?.players.p1.handCardIds).toEqual([]);
     expect(restoredGame?.players.p2.id).toBe('p2');
     expect(restoredGame?.players.p2.name).toBe('Player 2');
+    expect(restoredGame?.players.p2.color).toBe('yellow');
     expect(restoredGame?.players.p2.discardCardIds).toEqual([]);
     expect(Object.keys(restoredGame?.board.merchantSpaces ?? {}).sort()).toEqual(expectedMerchantSpaceIds(2));
     expect(restored.getPlayerSessions(game.id).map((session) => session.playerId).sort()).toEqual(['p1', 'p2']);

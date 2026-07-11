@@ -1,4 +1,5 @@
 export type PlayerCount = 2 | 3 | 4;
+export type PlayerColor = 'orange' | 'yellow' | 'purple' | 'teal';
 export type Era = 'canal' | 'rail';
 
 export type IndustryType =
@@ -225,6 +226,7 @@ export interface PlayerIndustryStack {
 export interface PlayerState {
   id: string;
   name: string;
+  color: PlayerColor;
   cash: number;
   victoryPoints: number;
   incomeTrackPosition: number;

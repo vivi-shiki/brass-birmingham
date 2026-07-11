@@ -9,7 +9,7 @@ import {
   victoryPointReasonMatchesDelta,
 } from '../common/eventLogValidation';
 import {applyCommand, determineWinners, validateCommand} from '../common/gameEngine';
-import {createGame, INDUSTRY_TYPES, LINK_TYPES, validateGameSeed} from '../common/gameSetup';
+import {createGame, INDUSTRY_TYPES, LINK_TYPES, normalizePlayerColor, validateGameSeed} from '../common/gameSetup';
 import {advanceIncomeSpaces, retreatIncomeLevels} from '../common/income';
 import {isLinkLineActiveForPlayerCount} from '../common/selectors';
 import {getCardIdsForPlayerCount, getWildIndustryCardIds, getWildLocationCardIds, staticConfig} from '../common/staticData';
@@ -2053,6 +2053,7 @@ function normalizePlayersAndCount(game: GameState): void {
     player.name = typeof player.name === 'string' && player.name.trim().length > 0
       ? player.name.trim()
       : `Player ${Number(playerId.slice(1))}`;
+    player.color = normalizePlayerColor(player.color, playerId);
     player.handCardIds = Array.isArray(player.handCardIds) ? player.handCardIds : [];
     player.discardCardIds = Array.isArray(player.discardCardIds) ? player.discardCardIds : [];
     normalizedPlayers[playerId] = player;

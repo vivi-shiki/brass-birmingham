@@ -50,7 +50,7 @@ import {
   type FaceAuditEvidenceRefMode,
 } from '../common/faceAudit';
 import {determineWinners} from '../common/gameEngine';
-import {INDUSTRY_TYPES, LINK_TYPES, validateGameSeed} from '../common/gameSetup';
+import {INDUSTRY_TYPES, LINK_TYPES, normalizePlayerColor, validateGameSeed} from '../common/gameSetup';
 import {advanceIncomeSpaces, getIncomeLevel, retreatIncomeLevels} from '../common/income';
 import {staticConfig} from '../common/staticData';
 import type {
@@ -670,6 +670,7 @@ function projectPlayerState(
   return {
     id: playerId,
     name: publicPlayerName(playerId, player),
+    color: normalizePlayerColor(player.color, playerId),
     cash: nonNegativeInteger(player.cash, staticConfig.rules.initialCash),
     victoryPoints: nonNegativeInteger(player.victoryPoints, 0),
     incomeTrackPosition: integerInRange(

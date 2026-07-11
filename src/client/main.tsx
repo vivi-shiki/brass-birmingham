@@ -11,7 +11,7 @@ import {
 import { FACE_AUDIT_AREAS, type FaceAuditArea } from '../common/faceAudit';
 import { getActiveIndustries, getActiveLinks } from '../common/selectors';
 import { staticConfig } from '../common/staticData';
-import type { GameCommand, GameState, IndustryType, SellStep } from '../common/types';
+import type { GameCommand, GameState, IndustryType, PlayerColor, SellStep } from '../common/types';
 import { canScout, normalizeScoutCardSelection, scoutCardOptionsForSelect } from './actionOptions';
 import {
   buildIndustryOptionsForLocationAndCard,
@@ -255,6 +255,7 @@ type OfficialImageManifestEntry = {
   kind: string;
   id: string;
   label?: string;
+  playerColor?: PlayerColor;
   output: string;
   side?: string;
   faceName?: string;
@@ -276,8 +277,10 @@ function isHiddenCardId(cardId: string): boolean {
   return cardId.startsWith('hidden-card-');
 }
 
-function officialAssetKey(kind: string, id: string): string {
-  return `${kind}${assetKeySeparator}${id}`;
+function officialAssetKey(kind: string, id: string, playerColor?: PlayerColor): string {
+  return playerColor
+    ? `${kind}${assetKeySeparator}${id}${assetKeySeparator}${playerColor}`
+    : `${kind}${assetKeySeparator}${id}`;
 }
 
 function officialOutputPath(output: string): string {
@@ -290,8 +293,10 @@ function officialOutputUrl(output: string): string {
   return `${officialImagesBaseUrl}/${officialOutputPath(output)}`;
 }
 
-function officialAssetUrl(assets: OfficialAssets, kind: string, id: string): string | undefined {
-  const entry = assets.entriesByKey.get(officialAssetKey(kind, id));
+function officialAssetUrl(assets: OfficialAssets, kind: string, id: string, playerColor?: PlayerColor): string | undefined {
+  const entry = playerColor
+    ? assets.entriesByKey.get(officialAssetKey(kind, id, playerColor)) ?? assets.entriesByKey.get(officialAssetKey(kind, id))
+    : assets.entriesByKey.get(officialAssetKey(kind, id));
   return entry ? officialOutputUrl(entry.output) : undefined;
 }
 
@@ -311,8 +316,8 @@ function officialCardUrl(assets: OfficialAssets, cardId: string): string | undef
     ?? officialAssetUrl(assets, 'card.regularAuditItem', officialRegularCardId(cardId));
 }
 
-function officialIndustryTileUrl(assets: OfficialAssets, specId: string, flipped: boolean): string | undefined {
-  return officialAssetUrl(assets, flipped ? 'industry.auditItemBack' : 'industry.auditItemFront', specId);
+function officialIndustryTileUrl(assets: OfficialAssets, specId: string, flipped: boolean, playerColor?: PlayerColor): string | undefined {
+  return officialAssetUrl(assets, flipped ? 'industry.auditItemBack' : 'industry.auditItemFront', specId, playerColor);
 }
 
 function officialMerchantTileUrl(assets: OfficialAssets, merchantTileInstanceId?: string): string | undefined {
@@ -354,7 +359,7 @@ function useOfficialAssets(): OfficialAssets {
   }, []);
 
   const entriesByKey = useMemo(() => {
-    return new Map(entries.map((entry) => [officialAssetKey(entry.kind, entry.id), entry]));
+    return new Map(entries.map((entry) => [officialAssetKey(entry.kind, entry.id, entry.playerColor), entry]));
   }, [entries]);
 
   return { status, entriesByKey, error };
@@ -3828,7 +3833,7 @@ function PlayersTable({ game, assets }: { game: GameState; assets: OfficialAsset
           const builtIndustries = builtIndustriesForPlayer(game, playerId);
           const builtCounts = builtIndustryCounts(builtIndustries);
           return (
-            <div className="player-card" key={row.id} style={{ '--player-accent': playerAccent(index) } as React.CSSProperties}>
+            <div className="player-card" key={row.id} style={{ '--player-accent': playerAccent(index, player.color) } as React.CSSProperties}>
               <div>
                 <strong>{row.name}</strong>
                 <ShortId id={row.id} className="muted-text" />
@@ -3859,8 +3864,15 @@ function PlayersTable({ game, assets }: { game: GameState; assets: OfficialAsset
   );
 }
 
-function playerAccent(index: number): string {
-  return ['#0f766e', '#9f1239', '#1d4ed8', '#a16207'][index % 4];
+const playerColorAccents: Record<PlayerColor, string> = {
+  orange: '#c2410c',
+  yellow: '#ca8a04',
+  purple: '#7e22ce',
+  teal: '#0f766e',
+};
+
+function playerAccent(index: number, color?: PlayerColor): string {
+  return color ? playerColorAccents[color] : ['#c2410c', '#ca8a04', '#7e22ce', '#0f766e'][index % 4];
 }
 
 function industryLabel(industryType: IndustryType): string {
@@ -3960,7 +3972,7 @@ function PlayerIndustryTileStock({
       </div>
       <div className="industry-stock-grid">
         {stockGroups.map((group) => {
-          const imageUrl = officialIndustryTileUrl(assets, group.representativeSpecId, false);
+          const imageUrl = officialIndustryTileUrl(assets, group.representativeSpecId, false, player.color);
           return (
             <div className="industry-stock-item" key={`${group.industryType}-${group.level}`}>
               {imageUrl
@@ -3987,10 +3999,11 @@ function IndustryTileCard({
   industry: GameState['board']['industryInstances'][string];
   assets: OfficialAssets;
 }) {
-  const imageUrl = officialIndustryTileUrl(assets, industry.specId, industry.flipped);
+  const ownerColor = game.players[industry.ownerPlayerId]?.color;
+  const imageUrl = officialIndustryTileUrl(assets, industry.specId, industry.flipped, ownerColor);
   const playerIndex = game.turnOrder.indexOf(industry.ownerPlayerId);
   return (
-    <div className="tile-card" style={{ '--player-accent': playerAccent(playerIndex) } as React.CSSProperties}>
+    <div className="tile-card" style={{ '--player-accent': playerAccent(playerIndex, ownerColor) } as React.CSSProperties}>
       {imageUrl
         ? <img src={imageUrl} alt={`${industry.industryType} level ${industry.level}`} />
         : <div className="tile-fallback">L{industry.level}</div>}
@@ -4014,7 +4027,7 @@ function PlayerIndustryStatus({ game, assets }: { game: GameState; assets: Offic
         {game.turnOrder.map((playerId, index) => {
           const industries = builtIndustriesForPlayer(game, playerId);
           return (
-            <div className="player-industry-card" key={playerId} style={{ '--player-accent': playerAccent(index) } as React.CSSProperties}>
+            <div className="player-industry-card" key={playerId} style={{ '--player-accent': playerAccent(index, game.players[playerId]?.color) } as React.CSSProperties}>
               <div className="section-heading-row">
                 <strong>{playerLabelForView(game, playerId)}</strong>
                 <span className="muted-text">{industries.length} built</span>

@@ -398,12 +398,15 @@ describe('createBrassServer', () => {
     const game = testGame();
     game.players.p1.name = ' Ada\n';
     game.players.p2.name = '   ';
+    game.players.p2.color = 'not-a-player-color' as GameState['players'][string]['color'];
     (game.players.p2 as unknown as {privateNote?: string}).privateNote = 'secret-token';
 
     const view = gameStateForPlayer(game, 'p1');
 
     expect(view.players.p1.name).toBe('Ada');
+    expect(view.players.p1.color).toBe('orange');
     expect(view.players.p2.name).toBe('Player 2');
+    expect(view.players.p2.color).toBe('yellow');
     expect(JSON.stringify(view)).not.toContain('secret-token');
   });
 
