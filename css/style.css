@@ -1062,11 +1062,15 @@ h1, h2, h3 {
 }
 
 #action-buttons {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
+    display: flex;
+    flex-wrap: wrap;
     gap: 5px;
     flex: 1;
     align-items: stretch;
+}
+
+#action-buttons .action-btn {
+    flex: 1 1 calc(25% - 4px);
 }
 
 .action-btn {
@@ -1147,7 +1151,7 @@ h1, h2, h3 {
 .action-pass.active    { border-left-color: #7f8c8d; background: #2a2a2a; color: #95a5a6; }
 
 .pass-btn {
-    grid-column: span 1;
+    flex: 1 1 calc(25% - 4px);
 }
 
 /* Player Mat */

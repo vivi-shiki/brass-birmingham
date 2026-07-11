@@ -1,6 +1,6 @@
-import React, {FormEvent, useEffect, useMemo, useState} from 'react';
-import {createRoot, type Root} from 'react-dom/client';
-import {io, Socket} from 'socket.io-client';
+import React, { FormEvent, useEffect, useMemo, useState } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { io, Socket } from 'socket.io-client';
 import {
   legalBeerSourcesForNetwork,
   legalBeerSourcesForSaleSelect,
@@ -8,11 +8,11 @@ import {
   legalResourceSourcesForSelect,
   type SaleBeerSourceSelection,
 } from '../common/gameEngine';
-import {FACE_AUDIT_AREAS, type FaceAuditArea} from '../common/faceAudit';
-import {getActiveIndustries, getActiveLinks} from '../common/selectors';
-import {staticConfig} from '../common/staticData';
-import type {GameCommand, GameState, IndustryType, SellStep} from '../common/types';
-import {canScout, normalizeScoutCardSelection, scoutCardOptionsForSelect} from './actionOptions';
+import { FACE_AUDIT_AREAS, type FaceAuditArea } from '../common/faceAudit';
+import { getActiveIndustries, getActiveLinks } from '../common/selectors';
+import { staticConfig } from '../common/staticData';
+import type { GameCommand, GameState, IndustryType, SellStep } from '../common/types';
+import { canScout, normalizeScoutCardSelection, scoutCardOptionsForSelect } from './actionOptions';
 import {
   buildIndustryOptionsForLocationAndCard,
   buildLocationOptionsForCard,
@@ -25,8 +25,8 @@ import {
   resolveMerchantDevelopDecisionReason,
   resolveNegativeIncomeDecisionReason,
 } from './decisionOptions';
-import {developOptionsForSelect, normalizeDevelopSelections} from './developOptions';
-import {doubleRailBeerSourceForSubmit, networkLinkOptionsForSelect} from './networkOptions';
+import { developOptionsForSelect, normalizeDevelopSelections } from './developOptions';
+import { doubleRailBeerSourceForSubmit, networkLinkOptionsForSelect } from './networkOptions';
 import {
   marketOccupiedCount,
   normalizeResourceSelection,
@@ -45,10 +45,10 @@ import {
   scoutActionReason,
   sellActionReason,
 } from './actionValidation';
-import {gameSummariesFromPayload, listedGames, savedSessionLabel, type GameSummary, type ListedGame} from './roomListOptions';
-import {hashForGameState, parseGameJoinHash, playerSessionHash, playerSessionUrl} from './sessionLinks';
-import {joinGamePayload} from './joinGameOptions';
-import {acknowledgedCommandPlayerId, commandGamePayload} from './commandGameOptions';
+import { gameSummariesFromPayload, listedGames, savedSessionLabel, type GameSummary, type ListedGame } from './roomListOptions';
+import { hashForGameState, parseGameJoinHash, playerSessionHash, playerSessionUrl } from './sessionLinks';
+import { joinGamePayload } from './joinGameOptions';
+import { acknowledgedCommandPlayerId, commandGamePayload } from './commandGameOptions';
 import {
   faceAuditAreaSummaryLabel,
   faceAuditChecklistIdentityLabel,
@@ -186,7 +186,7 @@ import {
   updateFaceAuditReviewedKeys,
   writeFaceAuditReviewedKeys,
 } from './faceAuditProgressStore';
-import {viewerUpdateFromReply} from './replyViewOptions';
+import { viewerUpdateFromReply } from './replyViewOptions';
 import {
   activePlayerIdForView,
   canSubmitForActivePlayerView,
@@ -197,13 +197,13 @@ import {
   sessionForPlayer,
   sessionNeededForActivePlayerView,
 } from './sessionOptions';
-import {rememberSessions, sessionsForGame, type PlayerSession} from './playerSessionStore';
+import { rememberSessions, sessionsForGame, type PlayerSession } from './playerSessionStore';
 import {
   playerHandCardIdsForView,
   playerLabelForView,
   playerTableRowForView,
 } from './playerView';
-import {createGamePayload, playerNamesForCount} from './createGameOptions';
+import { createGamePayload, playerNamesForCount } from './createGameOptions';
 import {
   addSellStepDraft,
   createSellStepDraft,
@@ -214,9 +214,9 @@ import {
   sellableIndustriesForSellStep,
   type SellStepDraft,
 } from './sellOptions';
-import {gameStatePushOptions} from './gameStatePushOptions';
-import {manualJoinViewerUpdate} from './manualJoinViewOptions';
-import {serverUrlFromOptions} from './serverUrlOptions';
+import { gameStatePushOptions } from './gameStatePushOptions';
+import { manualJoinViewerUpdate } from './manualJoinViewOptions';
+import { serverUrlFromOptions } from './serverUrlOptions';
 import './styles.css';
 
 type SocketReply = {
@@ -357,7 +357,7 @@ function useOfficialAssets(): OfficialAssets {
     return new Map(entries.map((entry) => [officialAssetKey(entry.kind, entry.id), entry]));
   }, [entries]);
 
-  return {status, entriesByKey, error};
+  return { status, entriesByKey, error };
 }
 
 function assetStatusLabel(assets: OfficialAssets): string {
@@ -368,6 +368,32 @@ function assetStatusLabel(assets: OfficialAssets): string {
     return '公式画像 読み込み中';
   }
   return `公式画像 未接続${assets.error ? ` (${assets.error})` : ''}`;
+}
+
+const visibleIdMaxLength = 18;
+
+function abbreviatedId(id: string, maxLength = visibleIdMaxLength): string {
+  if (id.length <= maxLength) {
+    return id;
+  }
+  const visibleLength = Math.max(4, maxLength - 3);
+  const headLength = Math.ceil(visibleLength / 2);
+  const tailLength = visibleLength - headLength;
+  return `${id.slice(0, headLength)}...${id.slice(-tailLength)}`;
+}
+
+function labelWithAbbreviatedId(label: string, id: string): string {
+  const abbreviated = abbreviatedId(id);
+  return abbreviated === id ? label : label.replace(id, abbreviated);
+}
+
+function ShortId({ id, className }: { id: string; className?: string }) {
+  const abbreviated = abbreviatedId(id);
+  return (
+    <abbr className={className ? `${className} short-id` : 'short-id'} title={abbreviated === id ? undefined : id}>
+      {abbreviated}
+    </abbr>
+  );
 }
 
 function ResourceSourceSelect({
@@ -402,7 +428,7 @@ function ResourceSourceSelect({
 }
 
 function App() {
-  const socket = useMemo<Socket>(() => io(serverUrl, {autoConnect: true}), []);
+  const socket = useMemo<Socket>(() => io(serverUrl, { autoConnect: true }), []);
   const officialAssets = useOfficialAssets();
   const [game, setGame] = useState<GameState | undefined>();
   const [errors, setErrors] = useState<string[]>([]);
@@ -424,7 +450,7 @@ function App() {
     const hashJoin = parseGameJoinHash(window.location.hash);
     if (hashJoin) {
       const hashSession = hashJoin.playerId && hashJoin.sessionToken
-        ? {playerId: hashJoin.playerId, token: hashJoin.sessionToken}
+        ? { playerId: hashJoin.playerId, token: hashJoin.sessionToken }
         : undefined;
       const storedSessions = hashSession
         ? rememberSessions(hashJoin.gameId, [hashSession])
@@ -478,7 +504,7 @@ function App() {
     if (!game) {
       return;
     }
-    const session = sessionNeededForActivePlayerView(game, knownSessions, {autoFollowActivePlayer});
+    const session = sessionNeededForActivePlayerView(game, knownSessions, { autoFollowActivePlayer });
     if (!session) {
       return;
     }
@@ -488,7 +514,7 @@ function App() {
       return;
     }
     socket.emit('game:join', result.payload, (reply: SocketReply) => {
-      handleReply(reply, {preserveViewerWithoutSession: true});
+      handleReply(reply, { preserveViewerWithoutSession: true });
     });
   }, [autoFollowActivePlayer, game, knownSessions, socket]);
 
@@ -512,7 +538,7 @@ function App() {
         setAutoFollowActivePlayer(true);
         setViewerPlayerId(nextViewerPlayerId);
       }
-      handleReply(reply, {preserveViewerWithoutSession: true});
+      handleReply(reply, { preserveViewerWithoutSession: true });
     });
   }
 
@@ -567,8 +593,8 @@ function App() {
           <h1>Brass: Birmingham</h1>
         </div>
         <div className="header-pills" aria-label="table status">
-          <span>{game ? `Game ${game.id}` : 'Lobby'}</span>
-          <span>{assetStatusLabel(officialAssets)}</span>
+          <span>{game ? <>Game <ShortId id={game.id} /></> : 'Lobby'}</span>
+          {/* <span>{assetStatusLabel(officialAssets)}</span> */}
         </div>
       </header>
       {errors.length > 0 && (
@@ -585,24 +611,24 @@ function App() {
       )}
       {game
         ? (
-            <GameView
-              game={game}
-              knownSessions={knownSessions}
-              viewerPlayerId={viewerPlayerId}
-              sendCommand={sendCommand}
-              joinSession={joinSession}
-              leaveRoom={leaveRoom}
-              assets={officialAssets}
-            />
-          )
+          <GameView
+            game={game}
+            knownSessions={knownSessions}
+            viewerPlayerId={viewerPlayerId}
+            sendCommand={sendCommand}
+            joinSession={joinSession}
+            leaveRoom={leaveRoom}
+            assets={officialAssets}
+          />
+        )
         : (
-            <ConnectionPanel
-              socket={socket}
-              onReply={handleReply}
-              onManualJoin={selectManualViewer}
-              assets={officialAssets}
-            />
-          )}
+          <ConnectionPanel
+            socket={socket}
+            onReply={handleReply}
+            onManualJoin={selectManualViewer}
+            assets={officialAssets}
+          />
+        )}
     </main>
   );
 }
@@ -615,15 +641,15 @@ function reviewArtifactsFromPayload(value: unknown): unknown[] | undefined {
     typeof value === 'object' &&
     value !== null &&
     !Array.isArray(value) &&
-    Array.isArray((value as {artifacts?: unknown}).artifacts)
+    Array.isArray((value as { artifacts?: unknown }).artifacts)
   ) {
-    return (value as {artifacts: unknown[]}).artifacts;
+    return (value as { artifacts: unknown[] }).artifacts;
   }
   return undefined;
 }
 
 function downloadTextArtifact(fileName: string, text: string, contentType: string): void {
-  const blob = new Blob([text], {type: contentType});
+  const blob = new Blob([text], { type: contentType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -638,7 +664,7 @@ function downloadTextArtifact(fileName: string, text: string, contentType: strin
 }
 
 function FaceAuditPanel() {
-  const [checklist, setChecklist] = useState<FaceAuditChecklistView>({areas: [], items: []});
+  const [checklist, setChecklist] = useState<FaceAuditChecklistView>({ areas: [], items: [] });
   const [reviewedItemKeys, setReviewedItemKeys] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -980,7 +1006,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditReviewMergePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(artifactPayload),
       });
       const payload = await response.json();
@@ -1413,7 +1439,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditReviewSheetImportPath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           artifacts: artifactPayload,
           reviewSheetTsv: reviewSheetImportText,
@@ -1591,7 +1617,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditReviewerHandoffVerifyPath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(artifactPayload),
       });
       const validation = faceAuditReviewerHandoffValidationFromPayload(await response.json());
@@ -1640,7 +1666,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditReviewerHandoffResponsePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           handoff: handoffPayload,
           artifacts: returnedArtifacts,
@@ -1741,7 +1767,7 @@ function FaceAuditPanel() {
       if (evidenceSources === undefined || evidenceSources.length === 0) {
         throw new Error('Evidence source artifact must include at least one valid evidence source');
       }
-      return {evidenceSources};
+      return { evidenceSources };
     }
     const evidenceSource: Record<string, unknown> = {
       id: reviewFillEvidenceSourceId,
@@ -1756,7 +1782,7 @@ function FaceAuditPanel() {
     if (reviewFillEvidenceSourceContentHash.trim().length > 0) {
       evidenceSource.contentHash = reviewFillEvidenceSourceContentHash;
     }
-    return {evidenceSources: [evidenceSource]};
+    return { evidenceSources: [evidenceSource] };
   }
 
   function reviewFillEvidenceRefMode() {
@@ -1798,7 +1824,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditSourceIdsByAreaTemplatePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sourceArtifact,
           defaultSourceId,
@@ -1848,7 +1874,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditSourceIdsByAreaTemplatePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sourceArtifact,
           defaultSourceId,
@@ -1995,7 +2021,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditEvidenceRefTemplatePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sourceId: faceAuditSourceIdFromInputs(),
           area,
@@ -2035,7 +2061,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditEvidenceRefTemplatePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sourceId: faceAuditSourceIdFromInputs(),
           area,
@@ -2100,11 +2126,11 @@ function FaceAuditPanel() {
         : undefined;
       const response = await fetch(`${serverUrl}${faceAuditReviewMatchPath(area)}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           sourceArtifact,
           sourceId,
-          ...(sourceIdsByArea === undefined ? {} : {sourceIdsByArea}),
+          ...(sourceIdsByArea === undefined ? {} : { sourceIdsByArea }),
           reviewer: reviewFillReviewer,
           reviewedAt: reviewFillReviewedAt,
           mode: reviewFillEvidenceRefMode(),
@@ -2112,7 +2138,7 @@ function FaceAuditPanel() {
       });
       const payload = await response.json();
       const validationPayload = isRecord(payload) && isRecord(payload.faceAuditAreaReviewValidation)
-        ? {faceAuditReviewValidation: payload.faceAuditAreaReviewValidation}
+        ? { faceAuditReviewValidation: payload.faceAuditAreaReviewValidation }
         : payload;
       const validation = faceAuditReviewValidationFromPayload(validationPayload);
       setReviewValidation(validation);
@@ -2162,7 +2188,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditReviewSubmissionPath(type)}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(artifact),
       });
       const payload = await response.json();
@@ -2202,7 +2228,7 @@ function FaceAuditPanel() {
       }
       const response = await fetch(`${serverUrl}${faceAuditLockArtifactVerifyPath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(artifact),
       });
       const validation = faceAuditLockArtifactValidationFromPayload(await response.json());
@@ -2229,11 +2255,11 @@ function FaceAuditPanel() {
         } catch {
           throw new Error('Lock artifact must be valid JSON');
         }
-        requestBody = {lockArtifact: artifact};
+        requestBody = { lockArtifact: artifact };
       }
       const response = await fetch(`${serverUrl}${faceAuditReleaseGatePath()}`, {
         method: 'POST',
-        headers: {'content-type': 'application/json'},
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify(requestBody),
       });
       const gate = faceAuditStaticLockGateFromPayload(await response.json());
@@ -2817,28 +2843,28 @@ function FaceAuditPanel() {
                       area.reviewers.length > 0 ||
                       area.firstReviewedAt.length > 0
                     ) && (
-                      <details>
-                        <summary>Open audit details</summary>
-                        {area.reviewers.length > 0 && (
-                          <div>Reviewers: {area.reviewers.join(', ')}</div>
-                        )}
-                        {area.firstReviewedAt.length > 0 && (
-                          <div>Reviewed: {area.firstReviewedAt} - {area.lastReviewedAt}</div>
-                        )}
-                        {area.evidenceRefs.length > 0 && (
-                          <div>Evidence refs: {area.evidenceRefs.join(', ')}</div>
-                        )}
-                        {area.differenceItemKeys.length > 0 && (
-                          <div>Differences: {area.differenceItemKeys.join(', ')}</div>
-                        )}
-                        {area.needsReferenceItemKeys.length > 0 && (
-                          <div>Need reference: {area.needsReferenceItemKeys.join(', ')}</div>
-                        )}
-                        {area.unreviewedItemKeys.length > 0 && (
-                          <div>Unreviewed: {area.unreviewedItemKeys.join(', ')}</div>
-                        )}
-                      </details>
-                    )}
+                        <details>
+                          <summary>Open audit details</summary>
+                          {area.reviewers.length > 0 && (
+                            <div>Reviewers: {area.reviewers.join(', ')}</div>
+                          )}
+                          {area.firstReviewedAt.length > 0 && (
+                            <div>Reviewed: {area.firstReviewedAt} - {area.lastReviewedAt}</div>
+                          )}
+                          {area.evidenceRefs.length > 0 && (
+                            <div>Evidence refs: {area.evidenceRefs.join(', ')}</div>
+                          )}
+                          {area.differenceItemKeys.length > 0 && (
+                            <div>Differences: {area.differenceItemKeys.join(', ')}</div>
+                          )}
+                          {area.needsReferenceItemKeys.length > 0 && (
+                            <div>Need reference: {area.needsReferenceItemKeys.join(', ')}</div>
+                          )}
+                          {area.unreviewedItemKeys.length > 0 && (
+                            <div>Unreviewed: {area.unreviewedItemKeys.join(', ')}</div>
+                          )}
+                        </details>
+                      )}
                   </li>
                 ))}
               </ul>
@@ -3320,7 +3346,7 @@ function FaceAuditPanel() {
                         />
                         Reviewed
                       </label>
-                      <div>{item.id}: {item.label}</div>
+                      <div><ShortId id={item.id} />: {item.label}</div>
                       <div>{faceAuditFieldSummary(item.expectedFields)}</div>
                     </li>
                   ))}
@@ -3405,7 +3431,7 @@ function ConnectionPanel({
     event.preventDefault();
     const result = createGamePayload(playerNames, introductoryCanalOnly, createSeed);
     if (!result.ok) {
-      onReply({ok: false, errors: [result.error]});
+      onReply({ ok: false, errors: [result.error] });
       return;
     }
     socket.emit('game:create', result.payload, onReply);
@@ -3415,7 +3441,7 @@ function ConnectionPanel({
     event.preventDefault();
     const result = joinGamePayload(joinGameId, joinPlayerId, joinSessionToken);
     if (!result.ok) {
-      onReply({ok: false, errors: [result.error]});
+      onReply({ ok: false, errors: [result.error] });
       return;
     }
     socket.emit('game:join', result.payload, (reply: SocketReply) => {
@@ -3430,7 +3456,7 @@ function ConnectionPanel({
   function observeGame(gameId: string) {
     const result = joinGamePayload(gameId);
     if (!result.ok) {
-      onReply({ok: false, errors: [result.error]});
+      onReply({ ok: false, errors: [result.error] });
       return;
     }
     setJoinGameId(gameId);
@@ -3448,7 +3474,7 @@ function ConnectionPanel({
   function joinSavedGameSession(gameId: string, session: PlayerSession) {
     const result = joinGamePayload(gameId, session.playerId, session.token);
     if (!result.ok) {
-      onReply({ok: false, errors: [result.error]});
+      onReply({ ok: false, errors: [result.error] });
       return;
     }
     setJoinGameId(gameId);
@@ -3535,14 +3561,14 @@ function ConnectionPanel({
           </div>
           <button type="submit">Join Game</button>
         </form>
-      <RoomList
-        games={roomList}
-        loading={gameListLoading}
-        error={gameListError}
-        onRefresh={() => void loadGames()}
-        onObserve={observeGame}
-        onJoinSession={joinSavedGameSession}
-      />
+        <RoomList
+          games={roomList}
+          loading={gameListLoading}
+          error={gameListError}
+          onRefresh={() => void loadGames()}
+          onObserve={observeGame}
+          onJoinSession={joinSavedGameSession}
+        />
       </div>
     </section>
   );
@@ -3570,22 +3596,34 @@ function RoomList({
         <button type="button" onClick={onRefresh} disabled={loading}>{loading ? 'Loading games' : 'Refresh games'}</button>
       </div>
       {error && <div className="inline-error">{error}</div>}
-      {games.length === 0 ? <div className="empty-state">No games listed.</div> : games.map((game) => (
-        <div className="room-card" key={game.id}>
-          <div>
-            <strong>{game.label}</strong>
-            <div className="muted-text">{game.id}</div>
+      {games.length === 0 ? <div className="empty-state">No games listed.</div> : games.map((game) => {
+        const roomLabel = labelWithAbbreviatedId(game.label, game.id);
+        return (
+          <div className="room-card" key={game.id}>
+            <div>
+              <strong title={roomLabel === game.label ? undefined : game.label}>{roomLabel}</strong>
+              <div className="muted-text"><ShortId id={game.id} /></div>
+            </div>
+            <div className="button-row">
+              <button type="button" onClick={() => onObserve(game.id)}>Observe</button>
+              {game.savedSessions.map((session) => {
+                const sessionLabel = savedSessionLabel(game, session);
+                const visibleSessionLabel = labelWithAbbreviatedId(sessionLabel, game.id);
+                return (
+                  <button
+                    key={session.playerId}
+                    type="button"
+                    onClick={() => onJoinSession(game.id, session)}
+                    title={visibleSessionLabel === sessionLabel ? undefined : sessionLabel}
+                  >
+                    {visibleSessionLabel}
+                  </button>
+                );
+              })}
+            </div>
           </div>
-          <div className="button-row">
-            <button type="button" onClick={() => onObserve(game.id)}>Observe</button>
-            {game.savedSessions.map((session) => (
-              <button key={session.playerId} type="button" onClick={() => onJoinSession(game.id, session)}>
-                {savedSessionLabel(game, session)}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </section>
   );
 }
@@ -3617,7 +3655,7 @@ function GameView({
     <section className="game-table">
       <div className="game-topbar">
         <div>
-          <p className="eyebrow">Game {game.id}</p>
+          <p className="eyebrow">Game <ShortId id={game.id} /></p>
           <h2>{game.era === 'canal' ? 'Canal Era' : 'Rail Era'} · Round {game.roundNumber}</h2>
         </div>
         <div className="turn-summary">
@@ -3633,7 +3671,7 @@ function GameView({
       </div>
       <div className="game-workspace">
         <aside className="left-rail">
-          <PlayersTable game={game} />
+          <PlayersTable game={game} assets={assets} />
           <SessionSummary game={game} knownSessions={knownSessions} viewerPlayerId={handPlayerId} joinSession={joinSession} />
           <LastEraScore game={game} />
         </aside>
@@ -3649,8 +3687,8 @@ function GameView({
               <HandPanel game={game} playerId={handPlayerId} assets={assets} />
               {canSubmitForActivePlayer
                 ? (pendingDecisionPlayerId
-                    ? <PendingDecisionPanel game={game} sendCommand={sendCommand} />
-                    : <ActionForms game={game} playerId={activePlayerId} sendCommand={sendCommand} assets={assets} />)
+                  ? <PendingDecisionPanel game={game} sendCommand={sendCommand} />
+                  : <ActionForms game={game} playerId={activePlayerId} sendCommand={sendCommand} assets={assets} />)
                 : <div className="notice-panel">Join with the saved session for {activePlayerId} to submit actions.</div>}
             </>
           )}
@@ -3660,7 +3698,7 @@ function GameView({
   );
 }
 
-function GameOverSummary({game}: {game: GameState}) {
+function GameOverSummary({ game }: { game: GameState }) {
   const gameEndedEvent = [...game.eventLog].reverse().find((event) => event.type === 'game_ended');
   const winners = gameEndedEvent?.type === 'game_ended' ? gameEndedEvent.winners : [];
 
@@ -3701,7 +3739,7 @@ function GameOverSummary({game}: {game: GameState}) {
   );
 }
 
-function LastEraScore({game}: {game: GameState}) {
+function LastEraScore({ game }: { game: GameState }) {
   const score = game.lastEraScore;
   return (
     <section className="control-card compact-panel">
@@ -3756,12 +3794,12 @@ function SessionSummary({
         return (
           <div className="session-row" key={playerId}>
             <div>
-              <strong>{playerId}</strong>: {session ? 'token saved' : 'no token saved'}
+              <strong><ShortId id={playerId} /></strong>: {session ? 'token saved' : 'no token saved'}
               {viewerPlayerId === playerId && <span className="muted-text"> (viewing)</span>}
             </div>
             {session && (
               <button type="button" onClick={() => joinSession(session)}>
-                Use {playerId} session
+                Use <ShortId id={playerId} /> session
               </button>
             )}
             {session && (
@@ -3777,7 +3815,9 @@ function SessionSummary({
   );
 }
 
-function PlayersTable({game}: {game: GameState}) {
+function PlayersTable({ game, assets }: { game: GameState; assets: OfficialAssets }) {
+  const activeLinkType = game.era === 'canal' ? 'canal' : 'rail';
+  const activeLinkLabel = game.era === 'canal' ? 'canal links left' : 'rail links left';
   return (
     <section className="scoreboard">
       <h3>Players</h3>
@@ -3788,10 +3828,10 @@ function PlayersTable({game}: {game: GameState}) {
           const builtIndustries = builtIndustriesForPlayer(game, playerId);
           const builtCounts = builtIndustryCounts(builtIndustries);
           return (
-            <div className="player-card" key={row.id} style={{'--player-accent': playerAccent(index)} as React.CSSProperties}>
+            <div className="player-card" key={row.id} style={{ '--player-accent': playerAccent(index) } as React.CSSProperties}>
               <div>
                 <strong>{row.name}</strong>
-                <span className="muted-text">{row.id}</span>
+                <ShortId id={row.id} className="muted-text" />
               </div>
               <div className="metric-grid">
                 <span><b>{row.cash}</b> cash</span>
@@ -3800,8 +3840,7 @@ function PlayersTable({game}: {game: GameState}) {
                 <span><b>{row.handCount}</b> hand</span>
               </div>
               <div className="link-stock-grid" aria-label={`${row.name} remaining links`}>
-                <span><b>{player.remainingLinks.canal}</b> canal left</span>
-                <span><b>{player.remainingLinks.rail}</b> rail left</span>
+                <span><b>{player.remainingLinks[activeLinkType]}</b> {activeLinkLabel}</span>
               </div>
               <div className="industry-counts" aria-label={`${row.name} built industries`}>
                 {industryTypeOrder.map((industryType) => (
@@ -3810,6 +3849,7 @@ function PlayersTable({game}: {game: GameState}) {
                   </span>
                 ))}
               </div>
+              <PlayerIndustryTileStock player={player} assets={assets} />
               <div className="spent-chip">spent {row.spentThisRound}</div>
             </div>
           );
@@ -3861,6 +3901,83 @@ function builtIndustryCounts(
   }, {});
 }
 
+type IndustryTileStockGroup = {
+  industryType: IndustryType;
+  level: number;
+  representativeSpecId: string;
+  remainingCount: number;
+  totalCount: number;
+};
+
+function industryTileStockGroupsForPlayer(player: GameState['players'][string]): IndustryTileStockGroup[] {
+  const remainingCounts = new Map<string, number>();
+
+  for (const stack of Object.values(player.industryTileStacks)) {
+    for (const specId of stack.availableSpecIdsInOrder) {
+      const spec = staticConfig.industryTileSpecs[specId];
+      if (!spec) {
+        continue;
+      }
+      const key = `${spec.industryType}:${spec.level}`;
+      remainingCounts.set(key, (remainingCounts.get(key) ?? 0) + 1);
+    }
+  }
+
+  return industryTypeOrder.flatMap((industryType) => {
+    const specIdsByLevel = new Map<number, string[]>();
+    for (const specId of staticConfig.industryStackSpecIds[industryType] ?? []) {
+      const spec = staticConfig.industryTileSpecs[specId];
+      if (!spec) {
+        continue;
+      }
+      specIdsByLevel.set(spec.level, [...(specIdsByLevel.get(spec.level) ?? []), specId]);
+    }
+    return [...specIdsByLevel.entries()]
+      .sort(([levelA], [levelB]) => levelA - levelB)
+      .map(([level, specIds]) => ({
+        industryType,
+        level,
+        representativeSpecId: specIds[0],
+        remainingCount: remainingCounts.get(`${industryType}:${level}`) ?? 0,
+        totalCount: specIds.length,
+      }));
+  });
+}
+
+function PlayerIndustryTileStock({
+  player,
+  assets,
+}: {
+  player: GameState['players'][string];
+  assets: OfficialAssets;
+}) {
+  const stockGroups = industryTileStockGroupsForPlayer(player);
+  return (
+    <div className="industry-stock-panel">
+      <div className="section-heading-row">
+        <strong>Industry tiles left</strong>
+        <span className="muted-text">left / total</span>
+      </div>
+      <div className="industry-stock-grid">
+        {stockGroups.map((group) => {
+          const imageUrl = officialIndustryTileUrl(assets, group.representativeSpecId, false);
+          return (
+            <div className="industry-stock-item" key={`${group.industryType}-${group.level}`}>
+              {imageUrl
+                ? <img src={imageUrl} alt={`${group.industryType} level ${group.level}`} />
+                : <div className="tile-fallback">L{group.level}</div>}
+              <div>
+                <strong>{shortIndustryLabel(group.industryType)} L{group.level}</strong>
+                <span><b>{group.remainingCount}</b> / {group.totalCount}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function IndustryTileCard({
   game,
   industry,
@@ -3873,20 +3990,20 @@ function IndustryTileCard({
   const imageUrl = officialIndustryTileUrl(assets, industry.specId, industry.flipped);
   const playerIndex = game.turnOrder.indexOf(industry.ownerPlayerId);
   return (
-    <div className="tile-card" style={{'--player-accent': playerAccent(playerIndex)} as React.CSSProperties}>
+    <div className="tile-card" style={{ '--player-accent': playerAccent(playerIndex) } as React.CSSProperties}>
       {imageUrl
         ? <img src={imageUrl} alt={`${industry.industryType} level ${industry.level}`} />
         : <div className="tile-fallback">L{industry.level}</div>}
       <div>
         <strong>{industryLabel(industry.industryType)}</strong>
-        <span>{industry.locationId}</span>
+        <ShortId id={industry.locationId} />
         <span>{industry.flipped ? 'flipped' : `resource ${industry.remainingResource}`}</span>
       </div>
     </div>
   );
 }
 
-function PlayerIndustryStatus({game, assets}: {game: GameState; assets: OfficialAssets}) {
+function PlayerIndustryStatus({ game, assets }: { game: GameState; assets: OfficialAssets }) {
   return (
     <div className="player-industry-status">
       <div className="section-heading-row">
@@ -3897,7 +4014,7 @@ function PlayerIndustryStatus({game, assets}: {game: GameState; assets: Official
         {game.turnOrder.map((playerId, index) => {
           const industries = builtIndustriesForPlayer(game, playerId);
           return (
-            <div className="player-industry-card" key={playerId} style={{'--player-accent': playerAccent(index)} as React.CSSProperties}>
+            <div className="player-industry-card" key={playerId} style={{ '--player-accent': playerAccent(index) } as React.CSSProperties}>
               <div className="section-heading-row">
                 <strong>{playerLabelForView(game, playerId)}</strong>
                 <span className="muted-text">{industries.length} built</span>
@@ -3919,7 +4036,7 @@ function PlayerIndustryStatus({game, assets}: {game: GameState; assets: Official
   );
 }
 
-function MerchantTilesPanel({game, assets}: {game: GameState; assets: OfficialAssets}) {
+function MerchantTilesPanel({ game, assets }: { game: GameState; assets: OfficialAssets }) {
   const merchantSpaces = Object.values(game.board.merchantSpaces)
     .filter((space) => space.merchantTileInstanceId);
   return (
@@ -3936,7 +4053,7 @@ function MerchantTilesPanel({game, assets}: {game: GameState; assets: OfficialAs
               <div className="merchant-card" key={space.id}>
                 {imageUrl && <img src={imageUrl} alt={space.merchantTileInstanceId} />}
                 <div>
-                  <strong>{space.id}</strong>
+                  <strong><ShortId id={space.id} /></strong>
                   <span>{space.beerPresent ? 'beer' : 'no beer'}</span>
                 </div>
               </div>
@@ -3948,7 +4065,7 @@ function MerchantTilesPanel({game, assets}: {game: GameState; assets: OfficialAs
   );
 }
 
-function BoardSummary({game, assets}: {game: GameState; assets: OfficialAssets}) {
+function BoardSummary({ game, assets }: { game: GameState; assets: OfficialAssets }) {
   const industries = getActiveIndustries(game);
   const links = getActiveLinks(game);
   const coalMarketCubes = marketOccupiedCount(game, 'coal');
@@ -3988,9 +4105,9 @@ function BoardSummary({game, assets}: {game: GameState; assets: OfficialAssets})
           <div className="link-list">
             {links.map((link) => (
               <div className="link-card" key={link.id}>
-                <span>{link.ownerPlayerId}</span>
+                <ShortId id={link.ownerPlayerId} />
                 <strong>{link.linkType}</strong>
-                <span>{link.linkLineId}</span>
+                <ShortId id={link.linkLineId} />
               </div>
             ))}
           </div>
@@ -4035,7 +4152,7 @@ function CardThumb({
   return <div className={className}>{content}</div>;
 }
 
-function HandPanel({game, playerId, assets}: {game: GameState; playerId: string; assets: OfficialAssets}) {
+function HandPanel({ game, playerId, assets }: { game: GameState; playerId: string; assets: OfficialAssets }) {
   const handCardIds = playerHandCardIdsForView(game, playerId);
   return (
     <section className="hand-panel">
@@ -4051,7 +4168,7 @@ function HandPanel({game, playerId, assets}: {game: GameState; playerId: string;
   );
 }
 
-function PendingDecisionPanel({game, sendCommand}: {game: GameState; sendCommand: (command: GameCommand) => void}) {
+function PendingDecisionPanel({ game, sendCommand }: { game: GameState; sendCommand: (command: GameCommand) => void }) {
   const decision = game.pendingDecision;
   const [selectedIndustryIds, setSelectedIndustryIds] = useState<string[]>([]);
   const [selectedDevelopTypes, setSelectedDevelopTypes] = useState<IndustryType[]>([]);
@@ -4166,7 +4283,7 @@ function PendingDecisionPanel({game, sendCommand}: {game: GameState; sendCommand
               onChange={(event) => toggleIndustry(industry.id, event.target.checked)}
             />
             <span>
-              {industry.id}: {industry.industryType} L{industry.level} at {industry.locationId}, value {industryLiquidationValue(industry)}
+              <ShortId id={industry.id} />: {industry.industryType} L{industry.level} at <ShortId id={industry.locationId} />, value {industryLiquidationValue(industry)}
               {selectedIndustryIds.includes(industry.id) ? `, order ${selectedIndustryIds.indexOf(industry.id) + 1}` : ''}
             </span>
           </label>
@@ -4181,7 +4298,7 @@ function PendingDecisionPanel({game, sendCommand}: {game: GameState; sendCommand
   );
 }
 
-function ActionReason({reason}: {reason?: string}) {
+function ActionReason({ reason }: { reason?: string }) {
   return reason ? <div className="action-reason">{reason}</div> : null;
 }
 
@@ -4506,20 +4623,20 @@ function ActionForms({
   function submitScout(event: FormEvent) {
     event.preventDefault();
     if (scoutCanSubmit) {
-      sendCommand({type: 'scout', playerId, cardIds: scoutCards as [string, string, string]});
+      sendCommand({ type: 'scout', playerId, cardIds: scoutCards as [string, string, string] });
     }
   }
 
   function updateSellStep(index: number, patch: Partial<SellStepDraft>) {
-    setSellSteps((current) => current.map((step, stepIndex) => stepIndex === index ? {...step, ...patch} : step));
+    setSellSteps((current) => current.map((step, stepIndex) => stepIndex === index ? { ...step, ...patch } : step));
   }
 
   function changeSellStepIndustry(index: number, industryId: string) {
-    updateSellStep(index, {industryId, beerOne: '', beerTwo: ''});
+    updateSellStep(index, { industryId, beerOne: '', beerTwo: '' });
   }
 
   function changeSellStepMerchant(index: number, merchantSpaceId: string) {
-    updateSellStep(index, {merchantSpaceId, beerOne: '', beerTwo: ''});
+    updateSellStep(index, { merchantSpaceId, beerOne: '', beerTwo: '' });
   }
 
   function addSellStep() {
@@ -4551,15 +4668,15 @@ function ActionForms({
     });
   }
 
-  function merchantSpaceLabel(space: {id: string; merchantTileInstanceId?: string; beerPresent: boolean}) {
+  function merchantSpaceLabel(space: { id: string; merchantTileInstanceId?: string; beerPresent: boolean }) {
     const specId = space.merchantTileInstanceId?.replace(/-\d+$/, '') ?? 'empty';
     const tile = staticConfig.merchantTileSpecs[specId];
     const accepts = tile ? (tile.blank ? 'blank' : tile.acceptedIndustryTypes.join(', ')) : 'unknown';
-    return `${space.id}: ${accepts}, beer ${space.beerPresent ? 'yes' : 'no'}`;
+    return `${abbreviatedId(space.id)}: ${accepts}, beer ${space.beerPresent ? 'yes' : 'no'}`;
   }
 
   function cardLabel(id: string): string {
-    return staticConfig.cardSpecs[id]?.name ?? id;
+    return staticConfig.cardSpecs[id]?.name ?? abbreviatedId(id);
   }
 
   const passReason = passActionReason(game, playerId, cardId);
@@ -4568,14 +4685,14 @@ function ActionForms({
   const passCanSubmit = !passReason;
   const loanCanSubmit = !loanReason;
   const scoutCanSubmit = !scoutReason;
-  const actionTabs: Array<{id: ActionTab; label: string; canSubmit: boolean; reason?: string}> = [
-    {id: 'build', label: 'Build', canSubmit: buildCanSubmit, reason: buildReason},
-    {id: 'network', label: 'Network', canSubmit: networkCanSubmit, reason: networkReason},
-    {id: 'develop', label: 'Develop', canSubmit: developCanSubmit, reason: developReason},
-    {id: 'sell', label: 'Sell', canSubmit: sellCanSubmit, reason: sellReason},
-    {id: 'loan', label: 'Loan', canSubmit: loanCanSubmit, reason: loanReason},
-    {id: 'scout', label: 'Scout', canSubmit: scoutCanSubmit, reason: scoutReason},
-    {id: 'pass', label: 'Pass', canSubmit: passCanSubmit, reason: passReason},
+  const actionTabs: Array<{ id: ActionTab; label: string; canSubmit: boolean; reason?: string }> = [
+    { id: 'build', label: 'Build', canSubmit: buildCanSubmit, reason: buildReason },
+    { id: 'network', label: 'Network', canSubmit: networkCanSubmit, reason: networkReason },
+    { id: 'develop', label: 'Develop', canSubmit: developCanSubmit, reason: developReason },
+    { id: 'sell', label: 'Sell', canSubmit: sellCanSubmit, reason: sellReason },
+    { id: 'loan', label: 'Loan', canSubmit: loanCanSubmit, reason: loanReason },
+    { id: 'scout', label: 'Scout', canSubmit: scoutCanSubmit, reason: scoutReason },
+    { id: 'pass', label: 'Pass', canSubmit: passCanSubmit, reason: passReason },
   ];
   const selectedActionMeta = actionTabs.find((action) => action.id === selectedAction);
 
@@ -4615,7 +4732,7 @@ function ActionForms({
         <form className="action-card" onSubmit={(event) => {
           event.preventDefault();
           if (passCanSubmit) {
-            sendCommand({type: 'pass', playerId, cardId});
+            sendCommand({ type: 'pass', playerId, cardId });
           }
         }}>
           <h4>Pass</h4>
@@ -4629,7 +4746,7 @@ function ActionForms({
         <form className="action-card" onSubmit={(event) => {
           event.preventDefault();
           if (loanCanSubmit) {
-            sendCommand({type: 'loan', playerId, cardId});
+            sendCommand({ type: 'loan', playerId, cardId });
           }
         }}>
           <h4>Loan</h4>
@@ -4690,7 +4807,7 @@ function ActionForms({
             Slot
             <select value={slotId} onChange={(event) => setSlotId(event.target.value)}>
               {slots.length === 0 && <option value="">No valid slots</option>}
-              {slots.map((slot) => <option key={slot.id} value={slot.id}>{slot.id}: {slot.allowedIndustryTypes.join(', ')}</option>)}
+              {slots.map((slot) => <option key={slot.id} value={slot.id}>{abbreviatedId(slot.id)}: {slot.allowedIndustryTypes.join(', ')}</option>)}
             </select>
           </label>
           <label>
@@ -4745,7 +4862,7 @@ function ActionForms({
             }}>
               {networkFirstLinkOptions.length === 0 && <option value="">No valid links</option>}
               {networkFirstLinkOptions.map((line) => (
-                <option key={line.id} value={line.id}>{line.id}</option>
+                <option key={line.id} value={line.id}>{abbreviatedId(line.id)}</option>
               ))}
             </select>
           </label>
@@ -4754,7 +4871,7 @@ function ActionForms({
             <select value={secondLinkLineId} onChange={(event) => setSecondLinkLineId(event.target.value)}>
               <option value="">None</option>
               {networkSecondLinkOptions.map((line) => (
-                <option key={line.id} value={line.id}>{line.id}</option>
+                <option key={line.id} value={line.id}>{abbreviatedId(line.id)}</option>
               ))}
             </select>
           </label>
@@ -4830,19 +4947,19 @@ function ActionForms({
             const sellBeerValues = [step.beerOne, step.beerTwo];
             const sellBeerOptionsOne = selectedSellIndustry
               ? resourceOptionsFromSources(
-                  game,
-                  legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 0),
-                  sellBeerValues,
-                  0,
-                )
+                game,
+                legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 0),
+                sellBeerValues,
+                0,
+              )
               : [];
             const sellBeerOptionsTwo = selectedSellIndustry
               ? resourceOptionsFromSources(
-                  game,
-                  legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 1),
-                  sellBeerValues,
-                  1,
-                )
+                game,
+                legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 1),
+                sellBeerValues,
+                1,
+              )
               : [];
             const merchantOptions = merchantSpacesForIndustry(step.industryId);
 
@@ -4857,7 +4974,7 @@ function ActionForms({
                   <select value={step.industryId} onChange={(event) => changeSellStepIndustry(index, event.target.value)}>
                     {sellableOptions.length === 0 && <option value="">No sellable industries</option>}
                     {sellableOptions.map((industry) => (
-                      <option key={industry.id} value={industry.id}>{industry.id}: {industry.industryType} at {industry.locationId}</option>
+                      <option key={industry.id} value={industry.id}>{abbreviatedId(industry.id)}: {industry.industryType} at {abbreviatedId(industry.locationId)}</option>
                     ))}
                   </select>
                 </label>
@@ -4875,7 +4992,7 @@ function ActionForms({
                     label={`Sale ${index + 1} beer source 1`}
                     options={sellBeerOptionsOne}
                     value={step.beerOne}
-                    onChange={(value) => updateSellStep(index, {beerOne: value})}
+                    onChange={(value) => updateSellStep(index, { beerOne: value })}
                   />
                 )}
                 {sellBeerRequired >= 2 && (
@@ -4883,7 +5000,7 @@ function ActionForms({
                     label={`Sale ${index + 1} beer source 2`}
                     options={sellBeerOptionsTwo}
                     value={step.beerTwo}
-                    onChange={(value) => updateSellStep(index, {beerTwo: value})}
+                    onChange={(value) => updateSellStep(index, { beerTwo: value })}
                   />
                 )}
               </div>
@@ -4917,31 +5034,31 @@ function eventSummary(game: GameState, event: GameState['eventLog'][number]): st
     case 'game_created':
       return `Game created for ${event.playerIds.map((playerId) => playerLabelForView(game, playerId)).join(', ')}`;
     case 'card_discarded':
-      return `${playerLabelForView(game, event.playerId)} discarded ${staticConfig.cardSpecs[event.cardId]?.name ?? event.cardId}`;
+      return `${playerLabelForView(game, event.playerId)} discarded ${staticConfig.cardSpecs[event.cardId]?.name ?? abbreviatedId(event.cardId)}`;
     case 'cash_changed':
       return `${playerLabelForView(game, event.playerId)} cash ${event.delta > 0 ? '+' : ''}${event.delta} (${event.reason})`;
     case 'income_position_changed':
       return `${playerLabelForView(game, event.playerId)} income position ${event.from} to ${event.to}`;
     case 'industry_built':
-      return `${playerLabelForView(game, event.instance.ownerPlayerId)} built ${industryLabel(event.instance.industryType)} at ${event.instance.locationId}`;
+      return `${playerLabelForView(game, event.instance.ownerPlayerId)} built ${industryLabel(event.instance.industryType)} at ${abbreviatedId(event.instance.locationId)}`;
     case 'industry_removed':
-      return `Industry ${event.industryInstanceId} removed (${event.reason})`;
+      return `Industry ${abbreviatedId(event.industryInstanceId)} removed (${event.reason})`;
     case 'industry_flipped':
-      return `${playerLabelForView(game, event.ownerPlayerId)} flipped ${event.industryInstanceId}`;
+      return `${playerLabelForView(game, event.ownerPlayerId)} flipped ${abbreviatedId(event.industryInstanceId)}`;
     case 'industry_sold':
-      return `${playerLabelForView(game, event.ownerPlayerId)} sold ${event.industryInstanceId} to ${event.merchantSpaceId}`;
+      return `${playerLabelForView(game, event.ownerPlayerId)} sold ${abbreviatedId(event.industryInstanceId)} to ${abbreviatedId(event.merchantSpaceId)}`;
     case 'resource_consumed':
       return `${playerLabelForView(game, event.byPlayerId)} consumed ${event.source.kind.replace(/_/g, ' ')} (${event.reason})`;
     case 'resource_sold_to_market':
-      return `${event.industryInstanceId} sold ${event.market} for ${event.cashReceived}`;
+      return `${abbreviatedId(event.industryInstanceId)} sold ${event.market} for ${event.cashReceived}`;
     case 'link_built':
-      return `${playerLabelForView(game, event.instance.ownerPlayerId)} built ${event.instance.linkType} on ${event.instance.linkLineId}`;
+      return `${playerLabelForView(game, event.instance.ownerPlayerId)} built ${event.instance.linkType} on ${abbreviatedId(event.instance.linkLineId)}`;
     case 'link_scored':
-      return `${playerLabelForView(game, event.ownerPlayerId)} scored ${event.points} from ${event.linkInstanceId}`;
+      return `${playerLabelForView(game, event.ownerPlayerId)} scored ${event.points} from ${abbreviatedId(event.linkInstanceId)}`;
     case 'industry_scored':
-      return `${playerLabelForView(game, event.ownerPlayerId)} scored ${event.points} from ${event.industryInstanceId}`;
+      return `${playerLabelForView(game, event.ownerPlayerId)} scored ${event.points} from ${abbreviatedId(event.industryInstanceId)}`;
     case 'merchant_bonus_claimed':
-      return `${playerLabelForView(game, event.playerId)} claimed merchant bonus at ${event.merchantSpaceId}`;
+      return `${playerLabelForView(game, event.playerId)} claimed merchant bonus at ${abbreviatedId(event.merchantSpaceId)}`;
     case 'merchant_develop_resolved':
       return `${playerLabelForView(game, event.playerId)} resolved merchant develop`;
     case 'turn_advanced':
@@ -4967,7 +5084,7 @@ function eventSummary(game: GameState, event: GameState['eventLog'][number]): st
   }
 }
 
-function EventLog({game}: {game: GameState}) {
+function EventLog({ game }: { game: GameState }) {
   return (
     <section className="event-log">
       <div className="section-heading-row">
