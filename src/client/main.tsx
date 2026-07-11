@@ -1,5 +1,5 @@
 import React, {FormEvent, useEffect, useMemo, useState} from 'react';
-import {createRoot} from 'react-dom/client';
+import {createRoot, type Root} from 'react-dom/client';
 import {io, Socket} from 'socket.io-client';
 import {
   legalBeerSourcesForNetwork,
@@ -246,6 +246,7 @@ const serverUrl = serverUrlFromOptions({
   location: window.location,
   configuredServerUrl: import.meta.env.VITE_BRASS_SERVER_URL,
 });
+const showRulesDataFaceAudit = import.meta.env.VITE_SHOW_RULES_DATA_FACE_AUDIT === 'true';
 const ironSourceAnchorLocationId = 'birmingham';
 
 function isHiddenCardId(cardId: string): boolean {
@@ -444,7 +445,7 @@ function App() {
     <main>
       <h1>Brass: Birmingham Online</h1>
       <ConnectionPanel socket={socket} onReply={handleReply} onManualJoin={selectManualViewer} />
-      <FaceAuditPanel />
+      {showRulesDataFaceAudit && <FaceAuditPanel />}
       {errors.length > 0 && (
         <div>
           <h2>Errors</h2>
@@ -4479,4 +4480,15 @@ function EventLog({game}: {game: GameState}) {
   );
 }
 
-createRoot(document.getElementById('root') as HTMLElement).render(<App />);
+type BrassRootElement = HTMLElement & {
+  __brassReactRoot?: Root;
+};
+
+const rootElement = document.getElementById('root') as BrassRootElement | null;
+if (!rootElement) {
+  throw new Error('Root element not found.');
+}
+
+const reactRoot = rootElement.__brassReactRoot ?? createRoot(rootElement);
+rootElement.__brassReactRoot = reactRoot;
+reactRoot.render(<App />);
