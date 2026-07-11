@@ -248,9 +248,126 @@ const serverUrl = serverUrlFromOptions({
 });
 const showRulesDataFaceAudit = import.meta.env.VITE_SHOW_RULES_DATA_FACE_AUDIT === 'true';
 const ironSourceAnchorLocationId = 'birmingham';
+const officialImagesBaseUrl = `${serverUrl}/official-game-images`;
+const assetKeySeparator = '\u001f';
+
+type OfficialImageManifestEntry = {
+  kind: string;
+  id: string;
+  label?: string;
+  output: string;
+  side?: string;
+  faceName?: string;
+};
+
+type OfficialImageManifest = {
+  entries?: OfficialImageManifestEntry[];
+};
+
+type OfficialAssetStatus = 'loading' | 'ready' | 'unavailable';
+
+type OfficialAssets = {
+  status: OfficialAssetStatus;
+  entriesByKey: Map<string, OfficialImageManifestEntry>;
+  error?: string;
+};
 
 function isHiddenCardId(cardId: string): boolean {
   return cardId.startsWith('hidden-card-');
+}
+
+function officialAssetKey(kind: string, id: string): string {
+  return `${kind}${assetKeySeparator}${id}`;
+}
+
+function officialOutputPath(output: string): string {
+  return output
+    .replace(/\\/g, '/')
+    .replace(/^mods\/OfficialGameImages\//, '');
+}
+
+function officialOutputUrl(output: string): string {
+  return `${officialImagesBaseUrl}/${officialOutputPath(output)}`;
+}
+
+function officialAssetUrl(assets: OfficialAssets, kind: string, id: string): string | undefined {
+  const entry = assets.entriesByKey.get(officialAssetKey(kind, id));
+  return entry ? officialOutputUrl(entry.output) : undefined;
+}
+
+function officialRegularCardId(cardId: string): string {
+  return cardId.replace(/^p[234]-/, 'p4-');
+}
+
+function officialCardUrl(assets: OfficialAssets, cardId: string): string | undefined {
+  if (isHiddenCardId(cardId)) {
+    return officialAssetUrl(assets, 'source.cardBack', 'regular-card-back');
+  }
+  const card = staticConfig.cardSpecs[cardId];
+  if (card?.type === 'wild_location' || card?.type === 'wild_industry') {
+    return officialAssetUrl(assets, 'card.wildAuditItem', cardId);
+  }
+  return officialAssetUrl(assets, 'card.regularAuditItem', cardId)
+    ?? officialAssetUrl(assets, 'card.regularAuditItem', officialRegularCardId(cardId));
+}
+
+function officialIndustryTileUrl(assets: OfficialAssets, specId: string, flipped: boolean): string | undefined {
+  return officialAssetUrl(assets, flipped ? 'industry.auditItemBack' : 'industry.auditItemFront', specId);
+}
+
+function officialMerchantTileUrl(assets: OfficialAssets, merchantTileInstanceId?: string): string | undefined {
+  const specId = merchantTileInstanceId?.replace(/-\d+$/, '');
+  return specId ? officialAssetUrl(assets, 'merchant.auditItem', specId) : undefined;
+}
+
+function useOfficialAssets(): OfficialAssets {
+  const [entries, setEntries] = useState<OfficialImageManifestEntry[]>([]);
+  const [status, setStatus] = useState<OfficialAssetStatus>('loading');
+  const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadManifest() {
+      try {
+        const response = await fetch(`${officialImagesBaseUrl}/manifest.json`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const manifest = await response.json() as OfficialImageManifest;
+        if (!cancelled) {
+          setEntries(Array.isArray(manifest.entries) ? manifest.entries : []);
+          setStatus('ready');
+          setError(undefined);
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setEntries([]);
+          setStatus('unavailable');
+          setError(loadError instanceof Error ? loadError.message : String(loadError));
+        }
+      }
+    }
+    void loadManifest();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const entriesByKey = useMemo(() => {
+    return new Map(entries.map((entry) => [officialAssetKey(entry.kind, entry.id), entry]));
+  }, [entries]);
+
+  return {status, entriesByKey, error};
+}
+
+function assetStatusLabel(assets: OfficialAssets): string {
+  if (assets.status === 'ready') {
+    return '公式画像 読み込み済み';
+  }
+  if (assets.status === 'loading') {
+    return '公式画像 読み込み中';
+  }
+  return `公式画像 未接続${assets.error ? ` (${assets.error})` : ''}`;
 }
 
 function ResourceSourceSelect({
@@ -286,6 +403,7 @@ function ResourceSourceSelect({
 
 function App() {
   const socket = useMemo<Socket>(() => io(serverUrl, {autoConnect: true}), []);
+  const officialAssets = useOfficialAssets();
   const [game, setGame] = useState<GameState | undefined>();
   const [errors, setErrors] = useState<string[]>([]);
   const [knownSessions, setKnownSessions] = useState<PlayerSession[]>([]);
@@ -442,15 +560,28 @@ function App() {
   }
 
   return (
-    <main>
-      <h1>Brass: Birmingham Online</h1>
-      <ConnectionPanel socket={socket} onReply={handleReply} onManualJoin={selectManualViewer} />
-      {showRulesDataFaceAudit && <FaceAuditPanel />}
-      {errors.length > 0 && (
+    <main className="game-shell">
+      <header className="app-header">
         <div>
+          <p className="eyebrow">Online table</p>
+          <h1>Brass: Birmingham</h1>
+        </div>
+        <div className="header-pills" aria-label="table status">
+          <span>{game ? `Game ${game.id}` : 'Lobby'}</span>
+          <span>{assetStatusLabel(officialAssets)}</span>
+        </div>
+      </header>
+      {errors.length > 0 && (
+        <div className="error-panel" role="alert">
           <h2>Errors</h2>
           {errors.map((error) => <div key={error}>{error}</div>)}
         </div>
+      )}
+      {showRulesDataFaceAudit && (
+        <details className="audit-drawer">
+          <summary>Rules Data Face Audit</summary>
+          <FaceAuditPanel />
+        </details>
       )}
       {game
         ? (
@@ -461,9 +592,17 @@ function App() {
               sendCommand={sendCommand}
               joinSession={joinSession}
               leaveRoom={leaveRoom}
+              assets={officialAssets}
             />
           )
-        : <div>No game loaded.</div>}
+        : (
+            <ConnectionPanel
+              socket={socket}
+              onReply={handleReply}
+              onManualJoin={selectManualViewer}
+              assets={officialAssets}
+            />
+          )}
     </main>
   );
 }
@@ -3199,10 +3338,12 @@ function ConnectionPanel({
   socket,
   onReply,
   onManualJoin,
+  assets,
 }: {
   socket: Socket;
   onReply: (reply: SocketReply) => void;
   onManualJoin: (playerId?: string) => void;
+  assets: OfficialAssets;
 }) {
   const [playerCount, setPlayerCount] = useState(2);
   const [playerNames, setPlayerNames] = useState(['Alice', 'Bob']);
@@ -3322,60 +3463,78 @@ function ConnectionPanel({
     });
   }
 
+  const boardUrl = officialAssetUrl(assets, 'source.board', 'game-board');
+
   return (
-    <section>
-      <h2>Room</h2>
-      <form onSubmit={create}>
-        <label>
-          Players
-          <select value={playerCount} onChange={(event) => updatePlayerCount(Number(event.target.value))}>
-            <option value={2}>2</option>
-            <option value={3}>3</option>
-            <option value={4}>4</option>
-          </select>
-        </label>
-        {playerNames.map((name, index) => (
-          <label key={index}>
-            Player {index + 1}
+    <section className="lobby-shell">
+      <div className="lobby-board">
+        {boardUrl
+          ? <img src={boardUrl} alt="Brass Birmingham board" />
+          : <div className="image-placeholder">Official board image unavailable</div>}
+      </div>
+      <div className="lobby-controls">
+        <div className="panel-heading">
+          <p className="eyebrow">Start</p>
+          <h2>Room</h2>
+        </div>
+        <form className="control-card" onSubmit={create}>
+          <div className="form-grid form-grid-compact">
+            <label>
+              Players
+              <select value={playerCount} onChange={(event) => updatePlayerCount(Number(event.target.value))}>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+                <option value={4}>4</option>
+              </select>
+            </label>
+            <label>
+              Seed
+              <input
+                value={createSeed}
+                onChange={(event) => setCreateSeed(event.target.value)}
+                placeholder="optional integer"
+              />
+            </label>
+          </div>
+          <div className="form-grid">
+            {playerNames.map((name, index) => (
+              <label key={index}>
+                Player {index + 1}
+                <input
+                  value={name}
+                  onChange={(event) => setPlayerNames((names) => names.map((current, nameIndex) => nameIndex === index ? event.target.value : current))}
+                />
+              </label>
+            ))}
+          </div>
+          <label className="checkbox-row toggle-row">
             <input
-              value={name}
-              onChange={(event) => setPlayerNames((names) => names.map((current, nameIndex) => nameIndex === index ? event.target.value : current))}
+              type="checkbox"
+              checked={introductoryCanalOnly}
+              onChange={(event) => setIntroductoryCanalOnly(event.target.checked)}
             />
+            <span>Introductory Canal-only game</span>
           </label>
-        ))}
-        <label>
-          <input
-            type="checkbox"
-            checked={introductoryCanalOnly}
-            onChange={(event) => setIntroductoryCanalOnly(event.target.checked)}
-          />
-          Introductory Canal-only game
-        </label>
-        <label>
-          Seed
-          <input
-            value={createSeed}
-            onChange={(event) => setCreateSeed(event.target.value)}
-            placeholder="optional integer"
-          />
-        </label>
-        <button type="submit">Create Game</button>
-      </form>
-      <form onSubmit={join}>
-        <label>
-          Game ID
-          <input value={joinGameId} onChange={(event) => setJoinGameId(event.target.value)} />
-        </label>
-        <label>
-          Player ID
-          <input value={joinPlayerId} onChange={(event) => setJoinPlayerId(event.target.value)} placeholder="p1" />
-        </label>
-        <label>
-          Session token
-          <input value={joinSessionToken} onChange={(event) => setJoinSessionToken(event.target.value)} />
-        </label>
-        <button type="submit">Join Game</button>
-      </form>
+          <button className="primary-button" type="submit">Create Game</button>
+        </form>
+        <form className="control-card" onSubmit={join}>
+          <h3>Join by ID</h3>
+          <div className="form-grid">
+            <label>
+              Game ID
+              <input value={joinGameId} onChange={(event) => setJoinGameId(event.target.value)} />
+            </label>
+            <label>
+              Player ID
+              <input value={joinPlayerId} onChange={(event) => setJoinPlayerId(event.target.value)} placeholder="p1" />
+            </label>
+            <label>
+              Session token
+              <input value={joinSessionToken} onChange={(event) => setJoinSessionToken(event.target.value)} />
+            </label>
+          </div>
+          <button type="submit">Join Game</button>
+        </form>
       <RoomList
         games={roomList}
         loading={gameListLoading}
@@ -3384,6 +3543,7 @@ function ConnectionPanel({
         onObserve={observeGame}
         onJoinSession={joinSavedGameSession}
       />
+      </div>
     </section>
   );
 }
@@ -3404,19 +3564,26 @@ function RoomList({
   onJoinSession: (gameId: string, session: PlayerSession) => void;
 }) {
   return (
-    <section>
-      <h3>Existing Games</h3>
-      <button type="button" onClick={onRefresh} disabled={loading}>{loading ? 'Loading games' : 'Refresh games'}</button>
-      {error && <div>{error}</div>}
-      {games.length === 0 ? <div>No games listed.</div> : games.map((game) => (
-        <div key={game.id}>
-          <div>{game.label}</div>
-          <button type="button" onClick={() => onObserve(game.id)}>Observe {game.id}</button>
-          {game.savedSessions.map((session) => (
-            <button key={session.playerId} type="button" onClick={() => onJoinSession(game.id, session)}>
-              {savedSessionLabel(game, session)}
-            </button>
-          ))}
+    <section className="room-list">
+      <div className="section-heading-row">
+        <h3>Existing Games</h3>
+        <button type="button" onClick={onRefresh} disabled={loading}>{loading ? 'Loading games' : 'Refresh games'}</button>
+      </div>
+      {error && <div className="inline-error">{error}</div>}
+      {games.length === 0 ? <div className="empty-state">No games listed.</div> : games.map((game) => (
+        <div className="room-card" key={game.id}>
+          <div>
+            <strong>{game.label}</strong>
+            <div className="muted-text">{game.id}</div>
+          </div>
+          <div className="button-row">
+            <button type="button" onClick={() => onObserve(game.id)}>Observe</button>
+            {game.savedSessions.map((session) => (
+              <button key={session.playerId} type="button" onClick={() => onJoinSession(game.id, session)}>
+                {savedSessionLabel(game, session)}
+              </button>
+            ))}
+          </div>
         </div>
       ))}
     </section>
@@ -3430,6 +3597,7 @@ function GameView({
   sendCommand,
   joinSession,
   leaveRoom,
+  assets,
 }: {
   game: GameState;
   knownSessions: PlayerSession[];
@@ -3437,6 +3605,7 @@ function GameView({
   sendCommand: (command: GameCommand) => void;
   joinSession: (session: PlayerSession) => void;
   leaveRoom: () => void;
+  assets: OfficialAssets;
 }) {
   const pendingDecisionPlayerId = pendingDecisionPlayerIdForView(game);
   const activePlayerId = activePlayerIdForView(game);
@@ -3445,36 +3614,48 @@ function GameView({
   const gameEnded = game.status === 'ended';
 
   return (
-    <section>
-      <h2>Game {game.id}</h2>
-      <button type="button" onClick={leaveRoom}>Leave room</button>
-      <div>Status: {game.status}</div>
-      <div>Era: {game.era}</div>
-      <div>Round: {game.roundNumber}</div>
-      {!gameEnded && (
-        <>
-          <div>{pendingDecisionPlayerId ? 'Pending player' : 'Current player'}: {playerLabelForView(game, activePlayerId)}</div>
-          <div>Viewing player: {playerLabelForView(game, handPlayerId)}</div>
-          <div>Action {game.actionIndexInTurn + 1} / {game.actionsAllowedThisTurn}</div>
-        </>
-      )}
-      <PlayersTable game={game} />
-      <SessionSummary game={game} knownSessions={knownSessions} viewerPlayerId={handPlayerId} joinSession={joinSession} />
-      <BoardSummary game={game} />
-      <LastEraScore game={game} />
-      {gameEnded ? (
-        <GameOverSummary game={game} />
-      ) : (
-        <>
-          <HandPanel game={game} playerId={handPlayerId} />
-          {canSubmitForActivePlayer
-            ? (pendingDecisionPlayerId
-                ? <PendingDecisionPanel game={game} sendCommand={sendCommand} />
-                : <ActionForms game={game} playerId={activePlayerId} sendCommand={sendCommand} />)
-            : <div>Join with the saved session for {activePlayerId} to submit actions.</div>}
-        </>
-      )}
-      <EventLog game={game} />
+    <section className="game-table">
+      <div className="game-topbar">
+        <div>
+          <p className="eyebrow">Game {game.id}</p>
+          <h2>{game.era === 'canal' ? 'Canal Era' : 'Rail Era'} · Round {game.roundNumber}</h2>
+        </div>
+        <div className="turn-summary">
+          {!gameEnded && (
+            <>
+              <span>{pendingDecisionPlayerId ? 'Pending' : 'Current'}: {playerLabelForView(game, activePlayerId)}</span>
+              <span>Viewing: {playerLabelForView(game, handPlayerId)}</span>
+              <span>Action {game.actionIndexInTurn + 1} / {game.actionsAllowedThisTurn}</span>
+            </>
+          )}
+          <button type="button" onClick={leaveRoom}>Leave room</button>
+        </div>
+      </div>
+      <div className="game-workspace">
+        <aside className="left-rail">
+          <PlayersTable game={game} />
+          <SessionSummary game={game} knownSessions={knownSessions} viewerPlayerId={handPlayerId} joinSession={joinSession} />
+          <LastEraScore game={game} />
+        </aside>
+        <div className="board-column">
+          <BoardSummary game={game} assets={assets} />
+          <EventLog game={game} />
+        </div>
+        <aside className="action-rail">
+          {gameEnded ? (
+            <GameOverSummary game={game} />
+          ) : (
+            <>
+              <HandPanel game={game} playerId={handPlayerId} assets={assets} />
+              {canSubmitForActivePlayer
+                ? (pendingDecisionPlayerId
+                    ? <PendingDecisionPanel game={game} sendCommand={sendCommand} />
+                    : <ActionForms game={game} playerId={activePlayerId} sendCommand={sendCommand} assets={assets} />)
+                : <div className="notice-panel">Join with the saved session for {activePlayerId} to submit actions.</div>}
+            </>
+          )}
+        </aside>
+      </div>
     </section>
   );
 }
@@ -3484,7 +3665,7 @@ function GameOverSummary({game}: {game: GameState}) {
   const winners = gameEndedEvent?.type === 'game_ended' ? gameEndedEvent.winners : [];
 
   return (
-    <section>
+    <section className="control-card">
       <h3>Game Over</h3>
       <div>
         Winner{winners.length === 1 ? '' : 's'}: {winners.length > 0
@@ -3523,7 +3704,7 @@ function GameOverSummary({game}: {game: GameState}) {
 function LastEraScore({game}: {game: GameState}) {
   const score = game.lastEraScore;
   return (
-    <section>
+    <section className="control-card compact-panel">
       <h3>Last Era Score</h3>
       {!score ? <div>No era has been scored yet.</div> : (
         <div className="table-scroll">
@@ -3568,14 +3749,16 @@ function SessionSummary({
   const sessionByPlayer = new Map(normalizedSessionsForView(knownSessions).map((session) => [session.playerId, session]));
   const baseUrl = window.location.href;
   return (
-    <section>
-      <h3>Saved Sessions</h3>
+    <details className="control-card compact-panel">
+      <summary>Saved Sessions</summary>
       {game.turnOrder.map((playerId) => {
         const session = sessionByPlayer.get(playerId);
         return (
-          <div key={playerId}>
-            {playerId}: {session ? session.token : 'no token saved'}
-            {viewerPlayerId === playerId && ' (viewing)'}
+          <div className="session-row" key={playerId}>
+            <div>
+              <strong>{playerId}</strong>: {session ? 'token saved' : 'no token saved'}
+              {viewerPlayerId === playerId && <span className="muted-text"> (viewing)</span>}
+            </div>
             {session && (
               <button type="button" onClick={() => joinSession(session)}>
                 Use {playerId} session
@@ -3590,86 +3773,280 @@ function SessionSummary({
           </div>
         );
       })}
-    </section>
+    </details>
   );
 }
 
 function PlayersTable({game}: {game: GameState}) {
   return (
-    <section>
+    <section className="scoreboard">
       <h3>Players</h3>
-      <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Name</th>
-              <th>Cash</th>
-              <th>Income</th>
-              <th>VP</th>
-              <th>Hand</th>
-              <th>Spent</th>
-            </tr>
-          </thead>
-          <tbody>
-            {game.turnOrder.map((playerId) => {
-              const row = playerTableRowForView(game, playerId);
-              return (
-                <tr key={row.id}>
-                  <td>{row.id}</td>
-                  <td>{row.name}</td>
-                  <td>{row.cash}</td>
-                  <td>{row.incomeLevel}</td>
-                  <td>{row.victoryPoints}</td>
-                  <td>{row.handCount}</td>
-                  <td>{row.spentThisRound}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="player-stack">
+        {game.turnOrder.map((playerId, index) => {
+          const row = playerTableRowForView(game, playerId);
+          const player = game.players[playerId];
+          const builtIndustries = builtIndustriesForPlayer(game, playerId);
+          const builtCounts = builtIndustryCounts(builtIndustries);
+          return (
+            <div className="player-card" key={row.id} style={{'--player-accent': playerAccent(index)} as React.CSSProperties}>
+              <div>
+                <strong>{row.name}</strong>
+                <span className="muted-text">{row.id}</span>
+              </div>
+              <div className="metric-grid">
+                <span><b>{row.cash}</b> cash</span>
+                <span><b>{row.incomeLevel}</b> income</span>
+                <span><b>{row.victoryPoints}</b> VP</span>
+                <span><b>{row.handCount}</b> hand</span>
+              </div>
+              <div className="link-stock-grid" aria-label={`${row.name} remaining links`}>
+                <span><b>{player.remainingLinks.canal}</b> canal left</span>
+                <span><b>{player.remainingLinks.rail}</b> rail left</span>
+              </div>
+              <div className="industry-counts" aria-label={`${row.name} built industries`}>
+                {industryTypeOrder.map((industryType) => (
+                  <span key={industryType}>
+                    {shortIndustryLabel(industryType)} <b>{builtCounts[industryType] ?? 0}</b>
+                  </span>
+                ))}
+              </div>
+              <div className="spent-chip">spent {row.spentThisRound}</div>
+            </div>
+          );
+        })}
       </div>
     </section>
   );
 }
 
-function BoardSummary({game}: {game: GameState}) {
+function playerAccent(index: number): string {
+  return ['#0f766e', '#9f1239', '#1d4ed8', '#a16207'][index % 4];
+}
+
+function industryLabel(industryType: IndustryType): string {
+  return industryType.replace(/_/g, ' ');
+}
+
+const industryTypeOrder: IndustryType[] = [
+  'cotton_mill',
+  'coal_mine',
+  'iron_works',
+  'manufacturer',
+  'pottery',
+  'brewery',
+];
+
+function shortIndustryLabel(industryType: IndustryType): string {
+  const labels: Record<IndustryType, string> = {
+    cotton_mill: 'cotton',
+    coal_mine: 'coal',
+    iron_works: 'iron',
+    manufacturer: 'goods',
+    pottery: 'pottery',
+    brewery: 'beer',
+  };
+  return labels[industryType];
+}
+
+function builtIndustriesForPlayer(game: GameState, playerId: string): GameState['board']['industryInstances'][string][] {
+  return getActiveIndustries(game).filter((industry) => industry.ownerPlayerId === playerId);
+}
+
+function builtIndustryCounts(
+  industries: GameState['board']['industryInstances'][string][],
+): Partial<Record<IndustryType, number>> {
+  return industries.reduce<Partial<Record<IndustryType, number>>>((counts, industry) => {
+    counts[industry.industryType] = (counts[industry.industryType] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function IndustryTileCard({
+  game,
+  industry,
+  assets,
+}: {
+  game: GameState;
+  industry: GameState['board']['industryInstances'][string];
+  assets: OfficialAssets;
+}) {
+  const imageUrl = officialIndustryTileUrl(assets, industry.specId, industry.flipped);
+  const playerIndex = game.turnOrder.indexOf(industry.ownerPlayerId);
+  return (
+    <div className="tile-card" style={{'--player-accent': playerAccent(playerIndex)} as React.CSSProperties}>
+      {imageUrl
+        ? <img src={imageUrl} alt={`${industry.industryType} level ${industry.level}`} />
+        : <div className="tile-fallback">L{industry.level}</div>}
+      <div>
+        <strong>{industryLabel(industry.industryType)}</strong>
+        <span>{industry.locationId}</span>
+        <span>{industry.flipped ? 'flipped' : `resource ${industry.remainingResource}`}</span>
+      </div>
+    </div>
+  );
+}
+
+function PlayerIndustryStatus({game, assets}: {game: GameState; assets: OfficialAssets}) {
+  return (
+    <div className="player-industry-status">
+      <div className="section-heading-row">
+        <h3>Player Industry Status</h3>
+        <span className="muted-text">by player</span>
+      </div>
+      <div className="player-industry-grid">
+        {game.turnOrder.map((playerId, index) => {
+          const industries = builtIndustriesForPlayer(game, playerId);
+          return (
+            <div className="player-industry-card" key={playerId} style={{'--player-accent': playerAccent(index)} as React.CSSProperties}>
+              <div className="section-heading-row">
+                <strong>{playerLabelForView(game, playerId)}</strong>
+                <span className="muted-text">{industries.length} built</span>
+              </div>
+              {industries.length === 0 ? (
+                <div className="empty-state compact-empty">No industries built.</div>
+              ) : (
+                <div className="mini-tile-list">
+                  {industries.map((industry) => (
+                    <IndustryTileCard key={industry.id} game={game} industry={industry} assets={assets} />
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MerchantTilesPanel({game, assets}: {game: GameState; assets: OfficialAssets}) {
+  const merchantSpaces = Object.values(game.board.merchantSpaces)
+    .filter((space) => space.merchantTileInstanceId);
+  return (
+    <div className="merchant-panel">
+      <div className="section-heading-row">
+        <h3>Merchants</h3>
+        <span className="muted-text">{merchantSpaces.length}</span>
+      </div>
+      {merchantSpaces.length === 0 ? <div className="empty-state">No merchant tiles.</div> : (
+        <div className="merchant-grid">
+          {merchantSpaces.map((space) => {
+            const imageUrl = officialMerchantTileUrl(assets, space.merchantTileInstanceId);
+            return (
+              <div className="merchant-card" key={space.id}>
+                {imageUrl && <img src={imageUrl} alt={space.merchantTileInstanceId} />}
+                <div>
+                  <strong>{space.id}</strong>
+                  <span>{space.beerPresent ? 'beer' : 'no beer'}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BoardSummary({game, assets}: {game: GameState; assets: OfficialAssets}) {
   const industries = getActiveIndustries(game);
   const links = getActiveLinks(game);
   const coalMarketCubes = marketOccupiedCount(game, 'coal');
   const ironMarketCubes = marketOccupiedCount(game, 'iron');
+  const boardUrl = officialAssetUrl(assets, 'source.board', 'game-board');
   return (
-    <section>
-      <h3>Board</h3>
-      <div>Coal market cubes: {coalMarketCubes}</div>
-      <div>Iron market cubes: {ironMarketCubes}</div>
-      <h4>Industries</h4>
-      {industries.length === 0 ? <div>No industries built.</div> : industries.map((industry) => (
-        <div key={industry.id}>
-          {industry.id}: {industry.ownerPlayerId} {industry.industryType} L{industry.level} at {industry.locationId}, resource {industry.remainingResource}, flipped {String(industry.flipped)}
+    <section className="board-panel">
+      <div className="board-stage">
+        {boardUrl
+          ? <img src={boardUrl} alt="Official Brass Birmingham board" />
+          : <div className="image-placeholder">Official board image unavailable</div>}
+        <div className="market-strip">
+          <span>Coal market {coalMarketCubes}</span>
+          <span>Iron market {ironMarketCubes}</span>
+          <span>{industries.length} industries</span>
+          <span>{links.length} links</span>
         </div>
-      ))}
-      <h4>Links</h4>
-      {links.length === 0 ? <div>No links built.</div> : links.map((link) => (
-        <div key={link.id}>{link.id}: {link.ownerPlayerId} {link.linkType} on {link.linkLineId}</div>
-      ))}
+      </div>
+      <div className="board-details">
+        <div className="section-heading-row">
+          <h3>Built Industries</h3>
+          <span className="muted-text">{industries.length}</span>
+        </div>
+        {industries.length === 0 ? <div className="empty-state">No industries built.</div> : (
+          <div className="tile-grid">
+            {industries.map((industry) => (
+              <IndustryTileCard key={industry.id} game={game} industry={industry} assets={assets} />
+            ))}
+          </div>
+        )}
+        <PlayerIndustryStatus game={game} assets={assets} />
+        <div className="section-heading-row">
+          <h3>Links</h3>
+          <span className="muted-text">{links.length}</span>
+        </div>
+        {links.length === 0 ? <div className="empty-state">No links built.</div> : (
+          <div className="link-list">
+            {links.map((link) => (
+              <div className="link-card" key={link.id}>
+                <span>{link.ownerPlayerId}</span>
+                <strong>{link.linkType}</strong>
+                <span>{link.linkLineId}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <MerchantTilesPanel game={game} assets={assets} />
+      </div>
     </section>
   );
 }
 
-function HandPanel({game, playerId}: {game: GameState; playerId: string}) {
+function CardThumb({
+  assets,
+  cardId,
+  selected = false,
+  onClick,
+}: {
+  assets: OfficialAssets;
+  cardId: string;
+  selected?: boolean;
+  onClick?: () => void;
+}) {
+  const card = staticConfig.cardSpecs[cardId];
+  const imageUrl = officialCardUrl(assets, cardId);
+  const className = `card-thumb${selected ? ' is-selected' : ''}${onClick ? ' is-clickable' : ''}`;
+  const content = (
+    <>
+      {imageUrl
+        ? <img src={imageUrl} alt={card?.name ?? cardId} />
+        : <div className="card-fallback">{isHiddenCardId(cardId) ? 'Hidden card' : (card?.name ?? cardId)}</div>}
+      <span>{isHiddenCardId(cardId) ? 'Hidden' : (card?.name ?? cardId)}</span>
+    </>
+  );
+
+  if (onClick) {
+    return (
+      <button type="button" className={className} onClick={onClick}>
+        {content}
+      </button>
+    );
+  }
+
+  return <div className={className}>{content}</div>;
+}
+
+function HandPanel({game, playerId, assets}: {game: GameState; playerId: string; assets: OfficialAssets}) {
   const handCardIds = playerHandCardIdsForView(game, playerId);
   return (
-    <section>
-      <h3>{playerLabelForView(game, playerId)} Hand</h3>
-      {handCardIds.length === 0 && <div>No visible hand cards.</div>}
-      {handCardIds.map((cardId) => {
-        if (isHiddenCardId(cardId)) {
-          return <div key={cardId}>{cardId}: hidden card</div>;
-        }
-        const card = staticConfig.cardSpecs[cardId];
-        return <div key={cardId}>{cardId}: {card?.name ?? 'Unknown card'}</div>;
-      })}
+    <section className="hand-panel">
+      <div className="section-heading-row">
+        <h3>{playerLabelForView(game, playerId)} Hand</h3>
+        <span className="muted-text">{handCardIds.length} cards</span>
+      </div>
+      {handCardIds.length === 0 && <div className="empty-state">No visible hand cards.</div>}
+      <div className="hand-strip">
+        {handCardIds.map((cardId) => <CardThumb key={cardId} assets={assets} cardId={cardId} />)}
+      </div>
     </section>
   );
 }
@@ -3805,14 +4182,27 @@ function PendingDecisionPanel({game, sendCommand}: {game: GameState; sendCommand
 }
 
 function ActionReason({reason}: {reason?: string}) {
-  return reason ? <div>{reason}</div> : null;
+  return reason ? <div className="action-reason">{reason}</div> : null;
 }
 
-function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: string; sendCommand: (command: GameCommand) => void}) {
+type ActionTab = 'build' | 'network' | 'develop' | 'sell' | 'loan' | 'scout' | 'pass';
+
+function ActionForms({
+  game,
+  playerId,
+  sendCommand,
+  assets,
+}: {
+  game: GameState;
+  playerId: string;
+  sendCommand: (command: GameCommand) => void;
+  assets: OfficialAssets;
+}) {
   const player = game.players[playerId];
   const handCardIds = useMemo(() => playerHandCardIdsForView(game, playerId), [game, playerId]);
   const firstCard = handCardIds[0] ?? '';
   const [cardId, setCardId] = useState(firstCard);
+  const [selectedAction, setSelectedAction] = useState<ActionTab>('build');
   const [scoutCardOne, setScoutCardOne] = useState(handCardIds[0] ?? '');
   const [scoutCardTwo, setScoutCardTwo] = useState(handCardIds[1] ?? '');
   const [scoutCardThree, setScoutCardThree] = useState(handCardIds[2] ?? '');
@@ -4178,304 +4568,425 @@ function ActionForms({game, playerId, sendCommand}: {game: GameState; playerId: 
   const passCanSubmit = !passReason;
   const loanCanSubmit = !loanReason;
   const scoutCanSubmit = !scoutReason;
+  const actionTabs: Array<{id: ActionTab; label: string; canSubmit: boolean; reason?: string}> = [
+    {id: 'build', label: 'Build', canSubmit: buildCanSubmit, reason: buildReason},
+    {id: 'network', label: 'Network', canSubmit: networkCanSubmit, reason: networkReason},
+    {id: 'develop', label: 'Develop', canSubmit: developCanSubmit, reason: developReason},
+    {id: 'sell', label: 'Sell', canSubmit: sellCanSubmit, reason: sellReason},
+    {id: 'loan', label: 'Loan', canSubmit: loanCanSubmit, reason: loanReason},
+    {id: 'scout', label: 'Scout', canSubmit: scoutCanSubmit, reason: scoutReason},
+    {id: 'pass', label: 'Pass', canSubmit: passCanSubmit, reason: passReason},
+  ];
+  const selectedActionMeta = actionTabs.find((action) => action.id === selectedAction);
 
   return (
-    <section>
-      <h3>Actions</h3>
-      <label>
-        Action card
-        <select value={cardId} onChange={(event) => setCardId(event.target.value)}>
-          {handCardIds.length === 0 && <option value="">No hand cards</option>}
-          {handCardIds.map((id) => <option key={id} value={id}>{staticConfig.cardSpecs[id]?.name ?? id}</option>)}
-        </select>
-      </label>
+    <section className="action-panel">
+      <div className="section-heading-row">
+        <h3>Turn Actions</h3>
+        <span className="muted-text">{playerLabelForView(game, playerId)}</span>
+      </div>
+      <div className="selected-card-panel">
+        <CardThumb assets={assets} cardId={cardId} selected />
+        <label>
+          Action card
+          <select value={cardId} onChange={(event) => setCardId(event.target.value)}>
+            {handCardIds.length === 0 && <option value="">No hand cards</option>}
+            {handCardIds.map((id) => <option key={id} value={id}>{staticConfig.cardSpecs[id]?.name ?? id}</option>)}
+          </select>
+        </label>
+      </div>
+      <div className="action-tabs" role="tablist" aria-label="Actions">
+        {actionTabs.map((action) => (
+          <button
+            key={action.id}
+            type="button"
+            className={selectedAction === action.id ? 'is-active' : ''}
+            onClick={() => setSelectedAction(action.id)}
+            title={action.reason}
+          >
+            {action.label}
+            <span>{action.canSubmit ? 'ready' : 'blocked'}</span>
+          </button>
+        ))}
+      </div>
+      {selectedActionMeta?.reason && <div className="action-reason">{selectedActionMeta.reason}</div>}
 
-      <form onSubmit={(event) => {
-        event.preventDefault();
-        if (passCanSubmit) {
-          sendCommand({type: 'pass', playerId, cardId});
-        }
-      }}>
-        <button type="submit" disabled={!passCanSubmit} title={passReason}>Pass</button>
-        <ActionReason reason={passReason} />
-      </form>
+      {selectedAction === 'pass' && (
+        <form className="action-card" onSubmit={(event) => {
+          event.preventDefault();
+          if (passCanSubmit) {
+            sendCommand({type: 'pass', playerId, cardId});
+          }
+        }}>
+          <h4>Pass</h4>
+          <p className="muted-text">Discard the selected card and take no board action.</p>
+          <button type="submit" disabled={!passCanSubmit} title={passReason}>Pass</button>
+          <ActionReason reason={passReason} />
+        </form>
+      )}
 
-      <form onSubmit={(event) => {
-        event.preventDefault();
-        if (loanCanSubmit) {
-          sendCommand({type: 'loan', playerId, cardId});
-        }
-      }}>
-        <button type="submit" disabled={!loanCanSubmit} title={loanReason}>Loan</button>
-        <ActionReason reason={loanReason} />
-      </form>
+      {selectedAction === 'loan' && (
+        <form className="action-card" onSubmit={(event) => {
+          event.preventDefault();
+          if (loanCanSubmit) {
+            sendCommand({type: 'loan', playerId, cardId});
+          }
+        }}>
+          <h4>Loan</h4>
+          <p className="muted-text">Take cash, reduce income, and discard the selected card.</p>
+          <button type="submit" disabled={!loanCanSubmit} title={loanReason}>Loan</button>
+          <ActionReason reason={loanReason} />
+        </form>
+      )}
 
-      <form onSubmit={submitScout}>
-        <h4>Scout</h4>
-        <label>
-          Scout card 1
-          <select value={scoutCardOne} onChange={(event) => setScoutCardOne(event.target.value)}>
-            {!scoutAllowed && <option value="">Scout unavailable</option>}
-            {scoutCardOptions[0].map((id) => <option key={id} value={id}>{cardLabel(id)}</option>)}
-          </select>
-        </label>
-        <label>
-          Scout card 2
-          <select value={scoutCardTwo} onChange={(event) => setScoutCardTwo(event.target.value)}>
-            {!scoutAllowed && <option value="">Scout unavailable</option>}
-            {scoutCardOptions[1].map((id) => <option key={id} value={id}>{cardLabel(id)}</option>)}
-          </select>
-        </label>
-        <label>
-          Scout card 3
-          <select value={scoutCardThree} onChange={(event) => setScoutCardThree(event.target.value)}>
-            {!scoutAllowed && <option value="">Scout unavailable</option>}
-            {scoutCardOptions[2].map((id) => <option key={id} value={id}>{cardLabel(id)}</option>)}
-          </select>
-        </label>
-        <button type="submit" disabled={!scoutCanSubmit} title={scoutReason}>Scout</button>
-        <ActionReason reason={scoutReason} />
-      </form>
+      {selectedAction === 'scout' && (
+        <form className="action-card" onSubmit={submitScout}>
+          <h4>Scout</h4>
+          <label>
+            Scout card 1
+            <select value={scoutCardOne} onChange={(event) => setScoutCardOne(event.target.value)}>
+              {!scoutAllowed && <option value="">Scout unavailable</option>}
+              {scoutCardOptions[0].map((id) => <option key={id} value={id}>{cardLabel(id)}</option>)}
+            </select>
+          </label>
+          <label>
+            Scout card 2
+            <select value={scoutCardTwo} onChange={(event) => setScoutCardTwo(event.target.value)}>
+              {!scoutAllowed && <option value="">Scout unavailable</option>}
+              {scoutCardOptions[1].map((id) => <option key={id} value={id}>{cardLabel(id)}</option>)}
+            </select>
+          </label>
+          <label>
+            Scout card 3
+            <select value={scoutCardThree} onChange={(event) => setScoutCardThree(event.target.value)}>
+              {!scoutAllowed && <option value="">Scout unavailable</option>}
+              {scoutCardOptions[2].map((id) => <option key={id} value={id}>{cardLabel(id)}</option>)}
+            </select>
+          </label>
+          <button type="submit" disabled={!scoutCanSubmit} title={scoutReason}>Scout</button>
+          <ActionReason reason={scoutReason} />
+        </form>
+      )}
 
-      <form onSubmit={submitBuild}>
-        <h4>Build</h4>
-        <label>
-          Location
-          <select value={locationId} onChange={(event) => {
-            setLocationId(event.target.value);
-            setBuildCoalOne('');
-            setBuildCoalTwo('');
-            setBuildIronOne('');
-            setBuildIronTwo('');
-          }}>
-            {buildLocationOptions.length === 0 && <option value="">No valid locations</option>}
-            {buildLocationOptions.map((location) => (
-              <option key={location.id} value={location.id}>{location.name}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Slot
-          <select value={slotId} onChange={(event) => setSlotId(event.target.value)}>
-            {slots.length === 0 && <option value="">No valid slots</option>}
-            {slots.map((slot) => <option key={slot.id} value={slot.id}>{slot.id}: {slot.allowedIndustryTypes.join(', ')}</option>)}
-          </select>
-        </label>
-        <label>
-          Industry
-          <select value={industryType} onChange={(event) => setIndustryType(event.target.value as IndustryType | '')}>
-            {buildIndustryOptions.length === 0 && <option value="">No buildable industries</option>}
-            {buildIndustryOptions.map((type) => (
-              <option key={type} value={type}>{type}</option>
-            ))}
-          </select>
-        </label>
-        {buildCoalRequired >= 1 && (
-          <ResourceSourceSelect
-            label="Coal source 1"
-            options={buildCoalOptions[0]}
-            value={buildCoalOne}
-            onChange={(value) => {
-              setBuildCoalOne(value);
+      {selectedAction === 'build' && (
+        <form className="action-card" onSubmit={submitBuild}>
+          <h4>Build</h4>
+          <label>
+            Location
+            <select value={locationId} onChange={(event) => {
+              setLocationId(event.target.value);
+              setBuildCoalOne('');
               setBuildCoalTwo('');
-            }}
-          />
-        )}
-        {buildCoalRequired >= 2 && <ResourceSourceSelect label="Coal source 2" options={buildCoalOptions[1]} value={buildCoalTwo} onChange={setBuildCoalTwo} />}
-        {buildIronRequired >= 1 && (
-          <ResourceSourceSelect
-            label="Iron source 1"
-            options={buildIronOptions[0]}
-            value={buildIronOne}
-            onChange={(value) => {
-              setBuildIronOne(value);
+              setBuildIronOne('');
               setBuildIronTwo('');
-            }}
-          />
-        )}
-        {buildIronRequired >= 2 && <ResourceSourceSelect label="Iron source 2" options={buildIronOptions[1]} value={buildIronTwo} onChange={setBuildIronTwo} />}
-        <button type="submit" disabled={!buildCanSubmit} title={buildReason}>Build</button>
-        <ActionReason reason={buildReason} />
-      </form>
+            }}>
+              {buildLocationOptions.length === 0 && <option value="">No valid locations</option>}
+              {buildLocationOptions.map((location) => (
+                <option key={location.id} value={location.id}>{location.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Slot
+            <select value={slotId} onChange={(event) => setSlotId(event.target.value)}>
+              {slots.length === 0 && <option value="">No valid slots</option>}
+              {slots.map((slot) => <option key={slot.id} value={slot.id}>{slot.id}: {slot.allowedIndustryTypes.join(', ')}</option>)}
+            </select>
+          </label>
+          <label>
+            Industry
+            <select value={industryType} onChange={(event) => setIndustryType(event.target.value as IndustryType | '')}>
+              {buildIndustryOptions.length === 0 && <option value="">No buildable industries</option>}
+              {buildIndustryOptions.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </label>
+          {buildCoalRequired >= 1 && (
+            <ResourceSourceSelect
+              label="Coal source 1"
+              options={buildCoalOptions[0]}
+              value={buildCoalOne}
+              onChange={(value) => {
+                setBuildCoalOne(value);
+                setBuildCoalTwo('');
+              }}
+            />
+          )}
+          {buildCoalRequired >= 2 && <ResourceSourceSelect label="Coal source 2" options={buildCoalOptions[1]} value={buildCoalTwo} onChange={setBuildCoalTwo} />}
+          {buildIronRequired >= 1 && (
+            <ResourceSourceSelect
+              label="Iron source 1"
+              options={buildIronOptions[0]}
+              value={buildIronOne}
+              onChange={(value) => {
+                setBuildIronOne(value);
+                setBuildIronTwo('');
+              }}
+            />
+          )}
+          {buildIronRequired >= 2 && <ResourceSourceSelect label="Iron source 2" options={buildIronOptions[1]} value={buildIronTwo} onChange={setBuildIronTwo} />}
+          <button type="submit" disabled={!buildCanSubmit} title={buildReason}>Build</button>
+          <ActionReason reason={buildReason} />
+        </form>
+      )}
 
-      <form onSubmit={submitNetwork}>
-        <h4>Network</h4>
-        <label>
-          Link
-          <select value={linkLineId} onChange={(event) => {
-            setLinkLineId(event.target.value);
-            setSecondLinkLineId('');
-            setNetworkCoalOne('');
-            setNetworkCoalTwo('');
-            setNetworkBeerSource('');
-          }}>
-            {networkFirstLinkOptions.length === 0 && <option value="">No valid links</option>}
-            {networkFirstLinkOptions.map((line) => (
-              <option key={line.id} value={line.id}>{line.id}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Second link
-          <select value={secondLinkLineId} onChange={(event) => setSecondLinkLineId(event.target.value)}>
-            <option value="">None</option>
-            {networkSecondLinkOptions.map((line) => (
-              <option key={line.id} value={line.id}>{line.id}</option>
-            ))}
-          </select>
-        </label>
-        {networkCoalRequired >= 1 && (
-          <ResourceSourceSelect
-            label="Rail coal source 1"
-            options={networkCoalOptions[0]}
-            value={networkCoalOne}
-            onChange={(value) => {
-              setNetworkCoalOne(value);
+      {selectedAction === 'network' && (
+        <form className="action-card" onSubmit={submitNetwork}>
+          <h4>Network</h4>
+          <label>
+            Link
+            <select value={linkLineId} onChange={(event) => {
+              setLinkLineId(event.target.value);
+              setSecondLinkLineId('');
+              setNetworkCoalOne('');
               setNetworkCoalTwo('');
-            }}
-          />
-        )}
-        {networkCoalRequired >= 2 && <ResourceSourceSelect label="Rail coal source 2" options={networkCoalOptions[1]} value={networkCoalTwo} onChange={setNetworkCoalTwo} />}
-        {game.era === 'rail' && networkLinkLineIds.length === 2 && (
-          <ResourceSourceSelect label="Double rail beer source" options={networkBeerOptions} value={networkBeerSource} onChange={setNetworkBeerSource} />
-        )}
-        <button type="submit" disabled={!networkCanSubmit} title={networkReason}>Network</button>
-        <ActionReason reason={networkReason} />
-      </form>
+              setNetworkBeerSource('');
+            }}>
+              {networkFirstLinkOptions.length === 0 && <option value="">No valid links</option>}
+              {networkFirstLinkOptions.map((line) => (
+                <option key={line.id} value={line.id}>{line.id}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Second link
+            <select value={secondLinkLineId} onChange={(event) => setSecondLinkLineId(event.target.value)}>
+              <option value="">None</option>
+              {networkSecondLinkOptions.map((line) => (
+                <option key={line.id} value={line.id}>{line.id}</option>
+              ))}
+            </select>
+          </label>
+          {networkCoalRequired >= 1 && (
+            <ResourceSourceSelect
+              label="Rail coal source 1"
+              options={networkCoalOptions[0]}
+              value={networkCoalOne}
+              onChange={(value) => {
+                setNetworkCoalOne(value);
+                setNetworkCoalTwo('');
+              }}
+            />
+          )}
+          {networkCoalRequired >= 2 && <ResourceSourceSelect label="Rail coal source 2" options={networkCoalOptions[1]} value={networkCoalTwo} onChange={setNetworkCoalTwo} />}
+          {game.era === 'rail' && networkLinkLineIds.length === 2 && (
+            <ResourceSourceSelect label="Double rail beer source" options={networkBeerOptions} value={networkBeerSource} onChange={setNetworkBeerSource} />
+          )}
+          <button type="submit" disabled={!networkCanSubmit} title={networkReason}>Network</button>
+          <ActionReason reason={networkReason} />
+        </form>
+      )}
 
-      <form onSubmit={submitDevelop}>
-        <h4>Develop</h4>
-        <label>
-          First
-          <select value={developOne} onChange={(event) => {
-            setDevelopOne(event.target.value as IndustryType | '');
-            setDevelopTwo('');
-          }}>
-            {developOneOptions.length === 0 && <option value="">No developable tiles</option>}
-            {developOneOptions.map((type) => (
-              <option key={type} value={type}>{type}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Second
-          <select value={developTwo} onChange={(event) => setDevelopTwo(event.target.value as IndustryType | '')}>
-            <option value="">None</option>
-            {developTwoOptions.map((type) => (
-              <option key={type} value={type}>{type}</option>
-            ))}
-          </select>
-        </label>
-        {developIronRequired >= 1 && (
-          <ResourceSourceSelect
-            label="Develop iron source 1"
-            options={developIronOptions[0]}
-            value={developIronOne}
-            onChange={(value) => {
-              setDevelopIronOne(value);
-              setDevelopIronTwo('');
-            }}
-          />
-        )}
-        {developIronRequired >= 2 && <ResourceSourceSelect label="Develop iron source 2" options={developIronOptions[1]} value={developIronTwo} onChange={setDevelopIronTwo} />}
-        <button type="submit" disabled={!developCanSubmit} title={developReason}>Develop</button>
-        <ActionReason reason={developReason} />
-      </form>
+      {selectedAction === 'develop' && (
+        <form className="action-card" onSubmit={submitDevelop}>
+          <h4>Develop</h4>
+          <label>
+            First
+            <select value={developOne} onChange={(event) => {
+              setDevelopOne(event.target.value as IndustryType | '');
+              setDevelopTwo('');
+            }}>
+              {developOneOptions.length === 0 && <option value="">No developable tiles</option>}
+              {developOneOptions.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Second
+            <select value={developTwo} onChange={(event) => setDevelopTwo(event.target.value as IndustryType | '')}>
+              <option value="">None</option>
+              {developTwoOptions.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </label>
+          {developIronRequired >= 1 && (
+            <ResourceSourceSelect
+              label="Develop iron source 1"
+              options={developIronOptions[0]}
+              value={developIronOne}
+              onChange={(value) => {
+                setDevelopIronOne(value);
+                setDevelopIronTwo('');
+              }}
+            />
+          )}
+          {developIronRequired >= 2 && <ResourceSourceSelect label="Develop iron source 2" options={developIronOptions[1]} value={developIronTwo} onChange={setDevelopIronTwo} />}
+          <button type="submit" disabled={!developCanSubmit} title={developReason}>Develop</button>
+          <ActionReason reason={developReason} />
+        </form>
+      )}
 
-      <form onSubmit={submitSell}>
-        <h4>Sell</h4>
-        {sellSteps.map((step, index) => {
-          const sellableOptions = sellableIndustriesForStep(index);
-          const selectedSellIndustry = step.industryId ? game.board.industryInstances[step.industryId] : undefined;
-          const selectedSellSpec = selectedSellIndustry ? staticConfig.industryTileSpecs[selectedSellIndustry.specId] : undefined;
-          const sellBeerRequired = selectedSellSpec?.beerRequiredToSell ?? 0;
-          const sellBeerValues = [step.beerOne, step.beerTwo];
-          const sellBeerOptionsOne = selectedSellIndustry
-            ? resourceOptionsFromSources(
-                game,
-                legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 0),
-                sellBeerValues,
-                0,
-              )
-            : [];
-          const sellBeerOptionsTwo = selectedSellIndustry
-            ? resourceOptionsFromSources(
-                game,
-                legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 1),
-                sellBeerValues,
-                1,
-              )
-            : [];
-          const merchantOptions = merchantSpacesForIndustry(step.industryId);
+      {selectedAction === 'sell' && (
+        <form className="action-card" onSubmit={submitSell}>
+          <h4>Sell</h4>
+          {sellSteps.map((step, index) => {
+            const sellableOptions = sellableIndustriesForStep(index);
+            const selectedSellIndustry = step.industryId ? game.board.industryInstances[step.industryId] : undefined;
+            const selectedSellSpec = selectedSellIndustry ? staticConfig.industryTileSpecs[selectedSellIndustry.specId] : undefined;
+            const sellBeerRequired = selectedSellSpec?.beerRequiredToSell ?? 0;
+            const sellBeerValues = [step.beerOne, step.beerTwo];
+            const sellBeerOptionsOne = selectedSellIndustry
+              ? resourceOptionsFromSources(
+                  game,
+                  legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 0),
+                  sellBeerValues,
+                  0,
+                )
+              : [];
+            const sellBeerOptionsTwo = selectedSellIndustry
+              ? resourceOptionsFromSources(
+                  game,
+                  legalBeerSourcesForSaleSelect(game, saleBeerSelections, index, 1),
+                  sellBeerValues,
+                  1,
+                )
+              : [];
+            const merchantOptions = merchantSpacesForIndustry(step.industryId);
 
-          return (
-            <div key={index}>
-              <h5>Sale {index + 1}</h5>
-              {sellSteps.length > 1 && <button type="button" onClick={() => removeSellStep(index)}>Remove sale</button>}
-            <label>
-              Industry
-              <select value={step.industryId} onChange={(event) => changeSellStepIndustry(index, event.target.value)}>
-                {sellableOptions.length === 0 && <option value="">No sellable industries</option>}
-                {sellableOptions.map((industry) => (
-                  <option key={industry.id} value={industry.id}>{industry.id}: {industry.industryType} at {industry.locationId}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Merchant
-              <select value={step.merchantSpaceId} onChange={(event) => changeSellStepMerchant(index, event.target.value)}>
-                {merchantOptions.length === 0 && <option value="">No valid merchants</option>}
-                {merchantOptions.map((space) => (
-                  <option key={space.id} value={space.id}>{merchantSpaceLabel(space)}</option>
-                ))}
-              </select>
-            </label>
-              {sellBeerRequired >= 1 && (
-                <ResourceSourceSelect
-                  label={`Sale ${index + 1} beer source 1`}
-                  options={sellBeerOptionsOne}
-                  value={step.beerOne}
-                  onChange={(value) => updateSellStep(index, {beerOne: value})}
-                />
-              )}
-              {sellBeerRequired >= 2 && (
-                <ResourceSourceSelect
-                  label={`Sale ${index + 1} beer source 2`}
-                  options={sellBeerOptionsTwo}
-                  value={step.beerTwo}
-                  onChange={(value) => updateSellStep(index, {beerTwo: value})}
-                />
-              )}
-            </div>
-          );
-        })}
-        <button
-          type="button"
-          onClick={addSellStep}
-          disabled={sellSteps.length >= sellableIndustries.length || sellableIndustries.length === 0 || merchantSpaces.length === 0}
-        >
-          Add sale
-        </button>
-        <button
-          type="submit"
-          disabled={!sellCanSubmit}
-          title={sellReason}
-        >
-          Sell
-        </button>
-        <ActionReason reason={sellReason} />
-      </form>
+            return (
+              <div className="sale-step" key={index}>
+                <div className="section-heading-row">
+                  <h5>Sale {index + 1}</h5>
+                  {sellSteps.length > 1 && <button type="button" onClick={() => removeSellStep(index)}>Remove sale</button>}
+                </div>
+                <label>
+                  Industry
+                  <select value={step.industryId} onChange={(event) => changeSellStepIndustry(index, event.target.value)}>
+                    {sellableOptions.length === 0 && <option value="">No sellable industries</option>}
+                    {sellableOptions.map((industry) => (
+                      <option key={industry.id} value={industry.id}>{industry.id}: {industry.industryType} at {industry.locationId}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Merchant
+                  <select value={step.merchantSpaceId} onChange={(event) => changeSellStepMerchant(index, event.target.value)}>
+                    {merchantOptions.length === 0 && <option value="">No valid merchants</option>}
+                    {merchantOptions.map((space) => (
+                      <option key={space.id} value={space.id}>{merchantSpaceLabel(space)}</option>
+                    ))}
+                  </select>
+                </label>
+                {sellBeerRequired >= 1 && (
+                  <ResourceSourceSelect
+                    label={`Sale ${index + 1} beer source 1`}
+                    options={sellBeerOptionsOne}
+                    value={step.beerOne}
+                    onChange={(value) => updateSellStep(index, {beerOne: value})}
+                  />
+                )}
+                {sellBeerRequired >= 2 && (
+                  <ResourceSourceSelect
+                    label={`Sale ${index + 1} beer source 2`}
+                    options={sellBeerOptionsTwo}
+                    value={step.beerTwo}
+                    onChange={(value) => updateSellStep(index, {beerTwo: value})}
+                  />
+                )}
+              </div>
+            );
+          })}
+          <div className="button-row">
+            <button
+              type="button"
+              onClick={addSellStep}
+              disabled={sellSteps.length >= sellableIndustries.length || sellableIndustries.length === 0 || merchantSpaces.length === 0}
+            >
+              Add sale
+            </button>
+            <button
+              type="submit"
+              disabled={!sellCanSubmit}
+              title={sellReason}
+            >
+              Sell
+            </button>
+          </div>
+          <ActionReason reason={sellReason} />
+        </form>
+      )}
     </section>
   );
 }
 
+function eventSummary(game: GameState, event: GameState['eventLog'][number]): string {
+  switch (event.type) {
+    case 'game_created':
+      return `Game created for ${event.playerIds.map((playerId) => playerLabelForView(game, playerId)).join(', ')}`;
+    case 'card_discarded':
+      return `${playerLabelForView(game, event.playerId)} discarded ${staticConfig.cardSpecs[event.cardId]?.name ?? event.cardId}`;
+    case 'cash_changed':
+      return `${playerLabelForView(game, event.playerId)} cash ${event.delta > 0 ? '+' : ''}${event.delta} (${event.reason})`;
+    case 'income_position_changed':
+      return `${playerLabelForView(game, event.playerId)} income position ${event.from} to ${event.to}`;
+    case 'industry_built':
+      return `${playerLabelForView(game, event.instance.ownerPlayerId)} built ${industryLabel(event.instance.industryType)} at ${event.instance.locationId}`;
+    case 'industry_removed':
+      return `Industry ${event.industryInstanceId} removed (${event.reason})`;
+    case 'industry_flipped':
+      return `${playerLabelForView(game, event.ownerPlayerId)} flipped ${event.industryInstanceId}`;
+    case 'industry_sold':
+      return `${playerLabelForView(game, event.ownerPlayerId)} sold ${event.industryInstanceId} to ${event.merchantSpaceId}`;
+    case 'resource_consumed':
+      return `${playerLabelForView(game, event.byPlayerId)} consumed ${event.source.kind.replace(/_/g, ' ')} (${event.reason})`;
+    case 'resource_sold_to_market':
+      return `${event.industryInstanceId} sold ${event.market} for ${event.cashReceived}`;
+    case 'link_built':
+      return `${playerLabelForView(game, event.instance.ownerPlayerId)} built ${event.instance.linkType} on ${event.instance.linkLineId}`;
+    case 'link_scored':
+      return `${playerLabelForView(game, event.ownerPlayerId)} scored ${event.points} from ${event.linkInstanceId}`;
+    case 'industry_scored':
+      return `${playerLabelForView(game, event.ownerPlayerId)} scored ${event.points} from ${event.industryInstanceId}`;
+    case 'merchant_bonus_claimed':
+      return `${playerLabelForView(game, event.playerId)} claimed merchant bonus at ${event.merchantSpaceId}`;
+    case 'merchant_develop_resolved':
+      return `${playerLabelForView(game, event.playerId)} resolved merchant develop`;
+    case 'turn_advanced':
+      return `Turn advanced to ${playerLabelForView(game, event.currentPlayerId)} in round ${event.roundNumber}`;
+    case 'turn_order_updated':
+      return `Turn order: ${event.order.map((playerId) => playerLabelForView(game, playerId)).join(', ')}`;
+    case 'negative_income_started':
+      return `${playerLabelForView(game, event.playerId)} must cover ${event.amountOwed}`;
+    case 'negative_income_resolved':
+      return `${playerLabelForView(game, event.playerId)} resolved negative income`;
+    case 'victory_points_changed':
+      return `${playerLabelForView(game, event.playerId)} VP ${event.delta > 0 ? '+' : ''}${event.delta}`;
+    case 'era_ended':
+      return `${event.era} era ended`;
+    case 'game_ended':
+      return `Game ended. Winner: ${event.winners.map((playerId) => playerLabelForView(game, playerId)).join(', ')}`;
+    case 'loan_taken':
+      return `${playerLabelForView(game, event.playerId)} took a loan`;
+    case 'scouted':
+      return `${playerLabelForView(game, event.playerId)} scouted`;
+    default:
+      return JSON.stringify(event);
+  }
+}
+
 function EventLog({game}: {game: GameState}) {
   return (
-    <section>
-      <h3>Event Log</h3>
-      {game.eventLog.slice(-20).map((event, index) => (
-        <pre key={index}>{JSON.stringify(event)}</pre>
-      ))}
+    <section className="event-log">
+      <div className="section-heading-row">
+        <h3>Event Log</h3>
+        <span className="muted-text">last 20</span>
+      </div>
+      {game.eventLog.length === 0 ? <div className="empty-state">No events yet.</div> : (
+        <ol>
+          {game.eventLog.slice(-20).map((event, index) => (
+            <li key={index}>
+              <span>{eventSummary(game, event)}</span>
+              <details>
+                <summary>details</summary>
+                <pre>{JSON.stringify(event, null, 2)}</pre>
+              </details>
+            </li>
+          ))}
+        </ol>
+      )}
     </section>
   );
 }

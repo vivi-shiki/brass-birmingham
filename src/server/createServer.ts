@@ -4989,6 +4989,11 @@ export function createBrassServer(options: BrassServerOptions): BrassServer {
     res.status(400).json({errors: ['Malformed JSON body']});
   });
 
+  const officialGameImagesDir = path.join(process.cwd(), 'mods', 'OfficialGameImages');
+  if (fs.existsSync(officialGameImagesDir)) {
+    app.use('/official-game-images', express.static(officialGameImagesDir));
+  }
+
   app.get('/api/health', (_req, res) => {
     res.json({ok: true});
   });
