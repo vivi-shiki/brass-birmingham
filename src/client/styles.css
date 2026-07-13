@@ -203,7 +203,7 @@ label select {
 }
 
 .lobby-board img,
-.board-stage img {
+.board-stage > .board-image {
   display: block;
   width: 100%;
   height: auto;
@@ -508,6 +508,7 @@ label select {
 
 .market-strip {
   position: absolute;
+  z-index: 5;
   right: 10px;
   bottom: 10px;
   left: 10px;
@@ -524,6 +525,95 @@ label select {
   color: #fffaf2;
   font-size: 0.82rem;
   font-weight: 750;
+}
+
+.board-built-layer,
+.board-build-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.board-built-layer {
+  z-index: 2;
+}
+
+.board-build-layer {
+  z-index: 4;
+}
+
+.board-built-industry,
+.board-build-region {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 4px;
+}
+
+.board-built-industry {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  pointer-events: none;
+}
+
+.board-built-industry img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 3px rgba(20, 17, 13, 0.32));
+}
+
+.board-built-industry span {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(32, 27, 20, 0.45);
+  background: #f4e3c1;
+  color: #281f17;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.board-build-region {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid rgba(20, 107, 100, 0.95);
+  background: rgba(38, 166, 154, 0.24);
+  color: #f8fffd;
+  cursor: pointer;
+  pointer-events: auto;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.62), 0 0 14px rgba(20, 107, 100, 0.62);
+}
+
+.board-build-region:hover,
+.board-build-region:focus-visible {
+  border-color: #f8fffd;
+  background: rgba(20, 107, 100, 0.42);
+  outline: none;
+}
+
+.board-build-region.is-selected {
+  border-color: #f6c85f;
+  background: rgba(246, 200, 95, 0.34);
+  box-shadow: 0 0 0 1px rgba(255, 250, 242, 0.85), 0 0 18px rgba(246, 200, 95, 0.86);
+}
+
+.board-build-region span {
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  padding: 2px 4px;
+  background: rgba(24, 23, 20, 0.74);
+  font-size: 0.56rem;
+  font-weight: 850;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .board-details {
@@ -657,6 +747,7 @@ label select {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: flex-start;
 }
 
 .card-thumb {
@@ -671,6 +762,15 @@ label select {
   background: #fffaf2;
   color: #302a24;
   text-align: left;
+}
+
+.hand-panel .card-thumb {
+  flex: 0 0 calc((100% - 24px) / 4);
+}
+
+.hand-panel .card-thumb span {
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 button.card-thumb {

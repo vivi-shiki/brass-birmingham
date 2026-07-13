@@ -1,4 +1,4 @@
-import React, { FormEvent, useEffect, useMemo, useState } from 'react';
+import React, { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { io, Socket } from 'socket.io-client';
 import {
@@ -9,6 +9,7 @@ import {
   type SaleBeerSourceSelection,
 } from '../common/gameEngine';
 import { FACE_AUDIT_AREAS, type FaceAuditArea } from '../common/faceAudit';
+import { BOARD_SLOT_REGIONS, type BoardSlotRegion } from '../common/boardSpaces';
 import { getActiveIndustries, getActiveLinks } from '../common/selectors';
 import { staticConfig } from '../common/staticData';
 import type { GameCommand, GameState, IndustryType, PlayerColor, SellStep } from '../common/types';
@@ -3655,6 +3656,28 @@ function GameView({
   const handPlayerId = handPlayerIdForView(game, viewerPlayerId);
   const canSubmitForActivePlayer = canSubmitForActivePlayerView(game, knownSessions);
   const gameEnded = game.status === 'ended';
+  const [boardBuildOverlay, setBoardBuildOverlay] = useState<BoardBuildOverlayState>(emptyBoardBuildOverlayState);
+  const [boardBuildSelectionRequest, setBoardBuildSelectionRequest] = useState<BoardBuildSelectionRequest>();
+  const handleBoardBuildOverlayChange = useCallback((overlay: BoardBuildOverlayState) => {
+    setBoardBuildOverlay(overlay);
+  }, []);
+  const handleBoardBuildRegionSelect = useCallback((option: BoardBuildRegionOption) => {
+    const selectedIndustryType = boardBuildOverlay.selectedIndustryType;
+    const industryType = selectedIndustryType && option.industryTypes.includes(selectedIndustryType)
+      ? selectedIndustryType
+      : option.industryTypes[0];
+    if (!industryType || !boardBuildOverlay.playerId || !boardBuildOverlay.cardId) {
+      return;
+    }
+    setBoardBuildSelectionRequest((current) => ({
+      requestId: (current?.requestId ?? 0) + 1,
+      playerId: boardBuildOverlay.playerId,
+      cardId: boardBuildOverlay.cardId,
+      locationId: option.locationId,
+      slotId: option.slotId,
+      industryType,
+    }));
+  }, [boardBuildOverlay.cardId, boardBuildOverlay.playerId, boardBuildOverlay.selectedIndustryType]);
 
   return (
     <section className="game-table">
@@ -3681,7 +3704,12 @@ function GameView({
           <LastEraScore game={game} />
         </aside>
         <div className="board-column">
-          <BoardSummary game={game} assets={assets} />
+          <BoardSummary
+            game={game}
+            assets={assets}
+            buildOverlay={boardBuildOverlay}
+            onBuildRegionSelect={handleBoardBuildRegionSelect}
+          />
           <EventLog game={game} />
         </div>
         <aside className="action-rail">
@@ -3693,7 +3721,16 @@ function GameView({
               {canSubmitForActivePlayer
                 ? (pendingDecisionPlayerId
                   ? <PendingDecisionPanel game={game} sendCommand={sendCommand} />
-                  : <ActionForms game={game} playerId={activePlayerId} sendCommand={sendCommand} assets={assets} />)
+                  : (
+                    <ActionForms
+                      game={game}
+                      playerId={activePlayerId}
+                      sendCommand={sendCommand}
+                      assets={assets}
+                      boardBuildSelectionRequest={boardBuildSelectionRequest}
+                      onBoardBuildOverlayChange={handleBoardBuildOverlayChange}
+                    />
+                  ))
                 : <div className="notice-panel">Join with the saved session for {activePlayerId} to submit actions.</div>}
             </>
           )}
@@ -3702,6 +3739,39 @@ function GameView({
     </section>
   );
 }
+
+interface BoardBuildRegionOption {
+  slotId: string;
+  locationId: string;
+  industryTypes: IndustryType[];
+}
+
+interface BoardBuildOverlayState {
+  active: boolean;
+  playerId: string;
+  cardId: string;
+  selectedSlotId: string;
+  selectedIndustryType: IndustryType | '';
+  options: BoardBuildRegionOption[];
+}
+
+interface BoardBuildSelectionRequest {
+  requestId: number;
+  playerId: string;
+  cardId: string;
+  locationId: string;
+  slotId: string;
+  industryType: IndustryType;
+}
+
+const emptyBoardBuildOverlayState: BoardBuildOverlayState = {
+  active: false,
+  playerId: '',
+  cardId: '',
+  selectedSlotId: '',
+  selectedIndustryType: '',
+  options: [],
+};
 
 function GameOverSummary({ game }: { game: GameState }) {
   const gameEndedEvent = [...game.eventLog].reverse().find((event) => event.type === 'game_ended');
@@ -4078,18 +4148,94 @@ function MerchantTilesPanel({ game, assets }: { game: GameState; assets: Officia
   );
 }
 
-function BoardSummary({ game, assets }: { game: GameState; assets: OfficialAssets }) {
+function boardRegionStyle(region: BoardSlotRegion): React.CSSProperties {
+  return {
+    left: `${region.left}%`,
+    top: `${region.top}%`,
+    width: `${region.width}%`,
+    height: `${region.height}%`,
+  };
+}
+
+function BoardSummary({
+  game,
+  assets,
+  buildOverlay,
+  onBuildRegionSelect,
+}: {
+  game: GameState;
+  assets: OfficialAssets;
+  buildOverlay?: BoardBuildOverlayState;
+  onBuildRegionSelect?: (option: BoardBuildRegionOption) => void;
+}) {
   const industries = getActiveIndustries(game);
   const links = getActiveLinks(game);
   const coalMarketCubes = marketOccupiedCount(game, 'coal');
   const ironMarketCubes = marketOccupiedCount(game, 'iron');
   const boardUrl = officialAssetUrl(assets, 'source.board', 'game-board');
+  const buildRegionOptions = buildOverlay?.active
+    ? buildOverlay.options.filter((option) => BOARD_SLOT_REGIONS[option.slotId])
+    : [];
+
+  function activateBuildRegion(event: React.KeyboardEvent<HTMLDivElement>, option: BoardBuildRegionOption) {
+    if (event.key !== 'Enter' && event.key !== ' ') {
+      return;
+    }
+    event.preventDefault();
+    onBuildRegionSelect?.(option);
+  }
+
   return (
     <section className="board-panel">
       <div className="board-stage">
         {boardUrl
-          ? <img src={boardUrl} alt="Official Brass Birmingham board" />
+          ? <img className="board-image" src={boardUrl} alt="Official Brass Birmingham board" />
           : <div className="image-placeholder">Official board image unavailable</div>}
+        <div className="board-built-layer" aria-label="Built industries on board">
+          {industries.map((industry) => {
+            const region = BOARD_SLOT_REGIONS[industry.slotId];
+            if (!region) {
+              return null;
+            }
+            const owner = game.players[industry.ownerPlayerId];
+            const imageUrl = officialIndustryTileUrl(assets, industry.specId, industry.flipped, owner?.color);
+            const locationName = staticConfig.locations[industry.locationId]?.name ?? abbreviatedId(industry.locationId);
+            const title = `${owner?.name ?? abbreviatedId(industry.ownerPlayerId)} ${industryLabel(industry.industryType)} at ${locationName}`;
+            return (
+              <div className="board-built-industry" key={industry.id} style={boardRegionStyle(region)} title={title}>
+                {imageUrl
+                  ? <img src={imageUrl} alt={`${title}, ${industry.flipped ? 'flipped' : 'front'}`} />
+                  : <span>{industry.level}</span>}
+              </div>
+            );
+          })}
+        </div>
+        {buildRegionOptions.length > 0 && (
+          <div className="board-build-layer" aria-label="Selectable build spaces">
+            {buildRegionOptions.map((option) => {
+              const region = BOARD_SLOT_REGIONS[option.slotId];
+              const locationName = staticConfig.locations[option.locationId]?.name ?? abbreviatedId(option.locationId);
+              const industriesLabel = option.industryTypes.map(industryLabel).join(', ');
+              const title = `${locationName}: ${industriesLabel} (${option.slotId})`;
+              const isSelected = option.slotId === buildOverlay?.selectedSlotId;
+              return (
+                <div
+                  key={option.slotId}
+                  className={`board-build-region${isSelected ? ' is-selected' : ''}`}
+                  style={boardRegionStyle(region)}
+                  role="button"
+                  tabIndex={0}
+                  title={title}
+                  aria-label={`Build at ${title}`}
+                  onClick={() => onBuildRegionSelect?.(option)}
+                  onKeyDown={(event) => activateBuildRegion(event, option)}
+                >
+                  <span>{abbreviatedId(option.slotId)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <div className="market-strip">
           <span>Coal market {coalMarketCubes}</span>
           <span>Iron market {ironMarketCubes}</span>
@@ -4322,11 +4468,15 @@ function ActionForms({
   playerId,
   sendCommand,
   assets,
+  boardBuildSelectionRequest,
+  onBoardBuildOverlayChange,
 }: {
   game: GameState;
   playerId: string;
   sendCommand: (command: GameCommand) => void;
   assets: OfficialAssets;
+  boardBuildSelectionRequest?: BoardBuildSelectionRequest;
+  onBoardBuildOverlayChange?: (overlay: BoardBuildOverlayState) => void;
 }) {
   const player = game.players[playerId];
   const handCardIds = useMemo(() => playerHandCardIdsForView(game, playerId), [game, playerId]);
@@ -4448,6 +4598,43 @@ function ActionForms({
   const developTwoOptionKey = developTwoOptions.join('|');
   const slots = industryType ? buildSlotOptionsForIndustry(game, locationId, industryType, playerId) : [];
   const selectedBuildSlotId = slots.some((slot) => slot.id === slotId) ? slotId : slots[0]?.id ?? '';
+  const boardBuildRegionOptions = useMemo<BoardBuildRegionOption[]>(() => {
+    const optionsBySlot = new Map<string, BoardBuildRegionOption>();
+
+    for (const location of buildLocationOptions) {
+      const locationIndustryOptions = buildIndustryOptionsForLocationAndCard(game, playerId, cardId, location.id);
+      for (const buildableIndustryType of locationIndustryOptions) {
+        const buildableSlots = buildSlotOptionsForIndustry(game, location.id, buildableIndustryType, playerId);
+        for (const slot of buildableSlots) {
+          if (!BOARD_SLOT_REGIONS[slot.id]) {
+            continue;
+          }
+          const current = optionsBySlot.get(slot.id);
+          if (current) {
+            if (!current.industryTypes.includes(buildableIndustryType)) {
+              current.industryTypes.push(buildableIndustryType);
+            }
+            continue;
+          }
+          optionsBySlot.set(slot.id, {
+            slotId: slot.id,
+            locationId: location.id,
+            industryTypes: [buildableIndustryType],
+          });
+        }
+      }
+    }
+
+    return Array.from(optionsBySlot.values())
+      .map((option) => ({
+        ...option,
+        industryTypes: industryTypeOrder.filter((orderedType) => option.industryTypes.includes(orderedType)),
+      }))
+      .sort((a, b) => a.locationId.localeCompare(b.locationId) || a.slotId.localeCompare(b.slotId));
+  }, [game, playerId, cardId, buildLocationOptionKey]);
+  const boardBuildRegionOptionKey = boardBuildRegionOptions
+    .map((option) => `${option.slotId}:${option.industryTypes.join(',')}`)
+    .join('|');
   const buildCoalOptions = buildCoalValues.map((_, index) => resourceOptionsFromSources(
     game,
     resourceSourcesForBuildSlot(
@@ -4698,6 +4885,7 @@ function ActionForms({
   const passCanSubmit = !passReason;
   const loanCanSubmit = !loanReason;
   const scoutCanSubmit = !scoutReason;
+  const boardBuildSelectionRequestId = boardBuildSelectionRequest?.requestId ?? 0;
   const actionTabs: Array<{ id: ActionTab; label: string; canSubmit: boolean; reason?: string }> = [
     { id: 'build', label: 'Build', canSubmit: buildCanSubmit, reason: buildReason },
     { id: 'network', label: 'Network', canSubmit: networkCanSubmit, reason: networkReason },
@@ -4708,6 +4896,49 @@ function ActionForms({
     { id: 'pass', label: 'Pass', canSubmit: passCanSubmit, reason: passReason },
   ];
   const selectedActionMeta = actionTabs.find((action) => action.id === selectedAction);
+
+  useEffect(() => {
+    return () => {
+      onBoardBuildOverlayChange?.(emptyBoardBuildOverlayState);
+    };
+  }, [onBoardBuildOverlayChange]);
+
+  useEffect(() => {
+    onBoardBuildOverlayChange?.({
+      active: selectedAction === 'build' && boardBuildRegionOptions.length > 0,
+      playerId,
+      cardId,
+      selectedSlotId: selectedBuildSlotId,
+      selectedIndustryType: industryType,
+      options: selectedAction === 'build' ? boardBuildRegionOptions : [],
+    });
+  }, [
+    onBoardBuildOverlayChange,
+    selectedAction,
+    playerId,
+    cardId,
+    selectedBuildSlotId,
+    industryType,
+    boardBuildRegionOptionKey,
+  ]);
+
+  useEffect(() => {
+    const request = boardBuildSelectionRequest;
+    if (!request || request.playerId !== playerId) {
+      return;
+    }
+    setSelectedAction('build');
+    if (handCardIds.includes(request.cardId)) {
+      setCardId(request.cardId);
+    }
+    setLocationId(request.locationId);
+    setSlotId(request.slotId);
+    setIndustryType(request.industryType);
+    setBuildCoalOne('');
+    setBuildCoalTwo('');
+    setBuildIronOne('');
+    setBuildIronTwo('');
+  }, [boardBuildSelectionRequestId, playerId]);
 
   return (
     <section className="action-panel">
