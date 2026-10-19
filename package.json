@@ -50,7 +50,8 @@
     "face-audit:review-match-template": "tsx src/tools/faceAuditCli.ts review-match-template",
     "face-audit:review-match-template-by-area": "tsx src/tools/faceAuditCli.ts review-match-template-by-area",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "simulate": "esbuild src/simulator/runSimulation.ts --bundle --platform=node --format=esm --outfile=dist/simulator/runSimulation.mjs && node dist/simulator/runSimulation.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
@@ -66,6 +67,7 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "concurrently": "^9.2.0",
+    "esbuild": "^0.28.1",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vite": "^7.0.2",

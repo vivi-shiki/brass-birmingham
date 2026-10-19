@@ -15,3 +15,7 @@ An online multiplayer version of the board game Brass: Birmingham that you can p
 - Play with friends in online rooms, and rejoin a game in progress if you disconnect
 - When an action isn't allowed, the game tells you which rule blocks it
 - An optional introductory Canal-only variant
+
+## Game simulation
+
+Run `npm run simulate -- 4 20261019` to save a seeded full-game record in `artifacts/simulations/`. The record contains every command, its resulting events, final scores and winners. Run `npm run verify` for the build and test suite.
